@@ -2708,19 +2708,51 @@ async def publish_agent(
                 )
                 session.add(approval)
                 await session.flush()
-                await upsert_approval_notification(
-                    session,
-                    recipient_user_id=resolved_department_admin_id,
-                    entity_type="agent_publish_request",
-                    entity_id=str(approval.id),
-                    title=f'Agent "{published_agent_name}" awaiting your approval.',
-                    link="/approval",
-                )
+
+                # Notify all co-admins of the dept (dept-centric routing).
+                # resolved_department_id is the stable key — all current admins receive the alert.
+                notified_user_ids: set[UUID] = set()
+                if resolved_department_id:
+                    co_admin_rows = (await session.exec(
+                        select(UserDepartmentMembership.user_id)
+                        .join(Role, Role.id == UserDepartmentMembership.role_id)
+                        .where(
+                            UserDepartmentMembership.department_id == resolved_department_id,
+                            UserDepartmentMembership.status == "active",
+                            func.lower(Role.name) == "department_admin",
+                        )
+                    )).all()
+                    for co_admin_id in co_admin_rows:
+                        uid = co_admin_id if isinstance(co_admin_id, UUID) else co_admin_id[0]
+                        if uid == current_user.id:
+                            continue
+                        await upsert_approval_notification(
+                            session,
+                            recipient_user_id=uid,
+                            entity_type="agent_publish_request",
+                            entity_id=str(approval.id),
+                            title=f'Agent "{published_agent_name}" awaiting your approval.',
+                            link="/approval",
+                        )
+                        notified_user_ids.add(uid)
+
+                # Always notify the original primary admin (backward-compat fallback)
+                if resolved_department_admin_id not in notified_user_ids:
+                    await upsert_approval_notification(
+                        session,
+                        recipient_user_id=resolved_department_admin_id,
+                        entity_type="agent_publish_request",
+                        entity_id=str(approval.id),
+                        title=f'Agent "{published_agent_name}" awaiting your approval.',
+                        link="/approval",
+                    )
+                    notified_user_ids.add(resolved_department_admin_id)
+
                 super_admin_id = await _resolve_super_admin_user_id(
                     session=session,
                     org_id=agent.org_id,
                 )
-                if super_admin_id and super_admin_id != resolved_department_admin_id:
+                if super_admin_id and super_admin_id not in notified_user_ids:
                     await upsert_approval_notification(
                         session,
                         recipient_user_id=super_admin_id,

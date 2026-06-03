@@ -789,10 +789,74 @@ async def _can_current_admin_delete_target_user(
         raise HTTPException(status_code=403, detail="You can delete only users you created.")
 
 
+async def _dept_admin_cascade_summary(
+    session: DbSession,
+    *,
+    target_user: User,
+) -> dict:
+    """Return a summary of what would be cascade-deleted when removing a dept admin."""
+    dept_ids = list(
+        (await session.exec(
+            select(Department.id).where(Department.admin_user_id == target_user.id)
+        )).all()
+    )
+    dept_names = list(
+        (await session.exec(
+            select(Department.name).where(Department.id.in_(dept_ids))
+        )).all()
+    ) if dept_ids else []
+
+    member_ids = list(
+        (await session.exec(
+            select(distinct(UserDepartmentMembership.user_id)).where(
+                UserDepartmentMembership.department_id.in_(dept_ids),
+                UserDepartmentMembership.status == ACTIVE_DEPT_STATUS,
+                UserDepartmentMembership.user_id != target_user.id,
+            )
+        )).all()
+    ) if dept_ids else []
+
+    agent_ids = list(
+        (await session.exec(
+            select(Agent.id).where(Agent.user_id.in_(member_ids + [target_user.id]))
+        )).all()
+    ) if member_ids else list(
+        (await session.exec(
+            select(Agent.id).where(Agent.user_id == target_user.id)
+        )).all()
+    )
+
+    active_uat = int(
+        (await session.exec(
+            select(func.count()).select_from(AgentDeploymentUAT).where(
+                AgentDeploymentUAT.agent_id.in_(agent_ids),
+                AgentDeploymentUAT.is_active.is_(True),
+            )
+        )).one() or 0
+    ) if agent_ids else 0
+
+    active_prod = int(
+        (await session.exec(
+            select(func.count()).select_from(AgentDeploymentProd).where(
+                AgentDeploymentProd.agent_id.in_(agent_ids),
+                AgentDeploymentProd.is_active.is_(True),
+            )
+        )).one() or 0
+    ) if agent_ids else 0
+
+    return {
+        "dept_names": dept_names,
+        "user_count": len(member_ids),
+        "agent_count": len(agent_ids),
+        "active_deployment_count": active_uat + active_prod,
+    }
+
+
 async def _get_delete_user_blocker(
     session: DbSession,
     *,
     target_user: User,
+    force_cascade: bool = False,
 ) -> str | None:
     target_role = normalize_role(target_user.role)
 
@@ -808,19 +872,80 @@ async def _get_delete_user_blocker(
         session,
         target_user,
     ):
-        return (
-            "This department admin still has users under them. "
-            "Delete or reassign those users first, then delete this account."
-        )
+        if not force_cascade:
+            return (
+                "DEPT_ADMIN_CASCADE_REQUIRED: This department admin still has users under them. "
+                "All users, agents, and active deployments in their department(s) will be "
+                "permanently deleted. Pass force_cascade=true to confirm."
+            )
 
-    active_uat_count, active_prod_count = await _active_runtime_dependency_counts(
-        session,
-        user_id=target_user.id,
-    )
-    if active_uat_count or active_prod_count:
-        return "User deletion is not possible due to active UAT/PROD agents."
-
+    # Active agents with deployments are auto-reassigned to the acting admin — no blocker needed.
     return None
+
+
+async def _active_deployment_agent_ids_for_user(
+    session: DbSession,
+    user_id: UUID,
+) -> set[UUID]:
+    """Return IDs of agents owned by user that have active UAT or PROD deployments."""
+    all_agent_ids = await _owned_agent_ids_for_user(session, user_id)
+    if not all_agent_ids:
+        return set()
+    uat_ids = set(
+        (await session.exec(
+            select(AgentDeploymentUAT.agent_id).where(
+                AgentDeploymentUAT.agent_id.in_(all_agent_ids),
+                AgentDeploymentUAT.is_active.is_(True),
+            )
+        )).all()
+    )
+    prod_ids = set(
+        (await session.exec(
+            select(AgentDeploymentProd.agent_id).where(
+                AgentDeploymentProd.agent_id.in_(all_agent_ids),
+                AgentDeploymentProd.is_active.is_(True),
+            )
+        )).all()
+    )
+    return uat_ids | prod_ids
+
+
+async def _cascade_delete_dept_admin_departments(
+    session: DbSession,
+    *,
+    dept_admin: User,
+    actor_user_id: UUID,
+) -> None:
+    """Cascade-delete all departments administered by dept_admin.
+
+    Deletes every member's assets (agents, deployments, approvals) then the dept rows.
+    Used when a dept admin is hard-deleted with force_cascade=True and has no replacement.
+    """
+    dept_ids = list(
+        (await session.exec(
+            select(Department.id).where(Department.admin_user_id == dept_admin.id)
+        )).all()
+    )
+    for dept_id in dept_ids:
+        member_ids = list(
+            (await session.exec(
+                select(distinct(UserDepartmentMembership.user_id)).where(
+                    UserDepartmentMembership.department_id == dept_id,
+                    UserDepartmentMembership.user_id != dept_admin.id,
+                )
+            )).all()
+        )
+        for member_id in member_ids:
+            member = await session.get(User, member_id)
+            if not member:
+                continue
+            # Cascade: delete all assets including active deployments
+            await _hard_delete_user_dependencies(
+                session,
+                target_user=member,
+                actor_user_id=actor_user_id,
+                reassign_active_agents_to=None,
+            )
 
 
 async def _hard_delete_user_dependencies(
@@ -828,8 +953,38 @@ async def _hard_delete_user_dependencies(
     *,
     target_user: User,
     actor_user_id: UUID,
+    reassign_active_agents_to: UUID | None = ...,  # type: ignore[assignment]
 ) -> None:
+    """Delete a user and all their owned data.
+
+    Args:
+        reassign_active_agents_to: If provided (including None passed explicitly),
+            agents with active UAT/PROD deployments are reassigned to this user_id
+            rather than deleted. If the default sentinel is received the actor_user_id
+            is used as the reassignment target (standard delete flow).
+            Pass None explicitly only for cascade deletes where everything must go.
+    """
     user_id = target_user.id
+
+    # Determine reassignment target for active-deployment agents.
+    # Sentinel default → reassign to actor (normal delete).
+    # Explicit None → cascade, delete everything.
+    _sentinel = ...  # re-use Ellipsis as sentinel
+    if reassign_active_agents_to is _sentinel:
+        _reassign_to: UUID | None = actor_user_id
+    else:
+        _reassign_to = reassign_active_agents_to  # type: ignore[assignment]
+
+    preserve_agent_ids: set[UUID] = set()
+    if _reassign_to is not None:
+        preserve_agent_ids = await _active_deployment_agent_ids_for_user(session, user_id)
+        if preserve_agent_ids:
+            await session.exec(
+                update(Agent)
+                .where(Agent.id.in_(list(preserve_agent_ids)))
+                .values(user_id=_reassign_to)
+            )
+
     await invalidate_user_auth(
         user_id,
         email=target_user.email or target_user.username,
@@ -895,6 +1050,7 @@ async def _hard_delete_user_dependencies(
     await _hard_delete_user_assets(
         session,
         target_user=target_user,
+        preserve_agent_ids=preserve_agent_ids if preserve_agent_ids else None,
     )
 
     await session.exec(delete(UserDepartmentMembership).where(UserDepartmentMembership.user_id == user_id))
@@ -907,9 +1063,22 @@ async def _hard_delete_user_assets(
     session: DbSession,
     *,
     target_user: User,
+    preserve_agent_ids: set[UUID] | None = None,
 ) -> None:
+    """Delete all assets owned by user.
+
+    Args:
+        preserve_agent_ids: Agent IDs that have been reassigned and must not be deleted.
+            Pass None or an empty set to delete everything (cascade mode).
+    """
     user_id = target_user.id
-    agent_ids = await _owned_agent_ids_for_user(session, user_id)
+    all_agent_ids = await _owned_agent_ids_for_user(session, user_id)
+    # Exclude reassigned agents from deletion
+    agent_ids = (
+        [aid for aid in all_agent_ids if aid not in preserve_agent_ids]
+        if preserve_agent_ids
+        else all_agent_ids
+    )
     uat_deployment_ids: list[UUID] = []
 
     if agent_ids:
@@ -2107,9 +2276,30 @@ async def _move_user_to_department(
 
     target_role_entity = await _get_role_entity(session, target_role)
 
+    # Find agents with active deployments — reassign to old dept admin, not delete.
+    active_deploy_ids = await _active_deployment_agent_ids_for_user(session, target_user.id)
+    if active_deploy_ids:
+        old_membership = (await session.exec(
+            select(UserDepartmentMembership).where(
+                UserDepartmentMembership.user_id == target_user.id,
+                UserDepartmentMembership.status == ACTIVE_DEPT_STATUS,
+            )
+        )).first()
+        reassign_to = actor.id
+        if old_membership:
+            old_dept = await session.get(Department, old_membership.department_id)
+            if old_dept and old_dept.admin_user_id and old_dept.admin_user_id != target_user.id:
+                reassign_to = old_dept.admin_user_id
+        await session.exec(
+            update(Agent)
+            .where(Agent.id.in_(list(active_deploy_ids)))
+            .values(user_id=reassign_to)
+        )
+
     await _hard_delete_user_assets(
         session,
         target_user=target_user,
+        preserve_agent_ids=active_deploy_ids if active_deploy_ids else None,
     )
 
     await session.exec(
@@ -2230,22 +2420,23 @@ async def patch_user(
                     ),
                 )
 
-            # Don't allow promoting a user who's already a member of someone
-            # else's department to department_admin. They were created under
-            # another admin, and promotion leaves them with the role but no
-            # department to admin (control panel and dept-scoped views show
-            # nothing). Create a fresh dept admin user instead.
+            # When promoting a dept member to department_admin, a target department_id
+            # must accompany the role change so we know which dept they will admin.
+            # Their old dept agents with active deployments are auto-reassigned to
+            # the old dept's admin; remaining assets are cleaned up via the dept
+            # change flow that follows below.
             if (
                 requested_role == "department_admin"
                 and current_role != "department_admin"
                 and await _target_belongs_to_department(session, user_db)
+                and not user_update.department_id
             ):
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "This user already belongs to a department under another "
-                        "department admin and cannot be promoted to department "
-                        "admin. Create a new user for this role instead."
+                        "This user already belongs to a department. "
+                        "Provide a department_id to specify which department they will admin, "
+                        "or create a new department admin user instead."
                     ),
                 )
 
@@ -2268,28 +2459,21 @@ async def patch_user(
         else:
             department_change_requested = False
         if department_change_requested and normalize_role(user.role) in {"root", "super_admin"}:
-            # Block the move if the user being moved is a dept admin who
-            # still has subordinates — otherwise the old department is left
-            # without an admin and the moved admin becomes "rootless" in the
-            # new dept while still owning users in the old one.
-            if await _target_has_managed_users(session, user_db):
+            # Block the move if the user being moved is a dept admin who still has
+            # subordinates and no replacement — they would leave a dept without an admin.
+            if (
+                normalize_role(user_db.role) == "department_admin"
+                and await _target_has_managed_users(session, user_db)
+            ):
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "This user still has users under them and cannot be "
-                        "moved to a different department. Reassign or remove "
-                        "those users first."
+                        "This department admin still has users under them and cannot be "
+                        "moved to a different department. Reassign or remove those users first."
                     ),
                 )
-            published_uat_count, published_prod_count = await _published_deployment_counts_for_user(
-                session,
-                user_id=user_db.id,
-            )
-            if published_uat_count or published_prod_count:
-                raise HTTPException(
-                    status_code=409,
-                    detail="You cannot change the department of a user who has agents published in UAT or PROD. Remove those published agent dependencies first.",
-                )
+            # Published agents are auto-reassigned to the old dept admin by
+            # _move_user_to_department — no need to block here.
             await _move_user_to_department(
                 session,
                 actor=user,
@@ -2457,8 +2641,14 @@ async def delete_user(
     user_id: UUID,
     session: DbSession,
     current_user: User = Depends(PermissionChecker(["view_admin_page"])),
+    force_cascade: bool = False,
 ) -> dict:
-    """Delete a user from the database."""
+    """Delete a user from the database.
+
+    For department admins with active users/agents under them, pass force_cascade=true
+    to permanently delete all users, agents, and deployments in their department(s).
+    Active agents owned by non-admin users are auto-reassigned to the acting admin.
+    """
     if current_user.id == user_id:
         raise HTTPException(status_code=400, detail="You can't delete your own user account")
 
@@ -2485,11 +2675,20 @@ async def delete_user(
         delete_blocker = await _get_delete_user_blocker(
             session,
             target_user=user_db,
+            force_cascade=force_cascade,
         )
         if delete_blocker:
             raise HTTPException(
                 status_code=409,
                 detail=delete_blocker,
+            )
+
+        # Cascade-delete all departments administered by this user before deleting them.
+        if force_cascade and normalize_role(user_db.role) == "department_admin":
+            await _cascade_delete_dept_admin_departments(
+                session,
+                dept_admin=user_db,
+                actor_user_id=current_user.id,
             )
 
         await _hard_delete_user_dependencies(
@@ -2528,6 +2727,15 @@ async def get_delete_user_check(
     session: DbSession,
     current_user: User = Depends(PermissionChecker(["view_admin_page"])),
 ) -> dict:
+    """Pre-flight check before deleting a user.
+
+    Returns:
+        can_delete: True when deletion can proceed without extra confirmation.
+        requires_cascade_confirmation: True when the user is a dept admin with active
+            members — caller must re-confirm via DELETE ...?force_cascade=true.
+        cascade_summary: Details of what will be wiped on cascade (dept names, counts).
+        detail: Human-readable explanation when can_delete is False.
+    """
     if current_user.id == user_id:
         raise HTTPException(status_code=400, detail="You can't delete your own user account")
 
@@ -2553,9 +2761,21 @@ async def get_delete_user_check(
     delete_blocker = await _get_delete_user_blocker(
         session,
         target_user=user_db,
+        force_cascade=False,
     )
+
+    # Detect cascade-required scenario and enrich the response.
+    requires_cascade = (
+        delete_blocker is not None
+        and delete_blocker.startswith("DEPT_ADMIN_CASCADE_REQUIRED")
+    )
+    cascade_summary = None
+    if requires_cascade:
+        cascade_summary = await _dept_admin_cascade_summary(session, target_user=user_db)
 
     return {
         "can_delete": delete_blocker is None,
+        "requires_cascade_confirmation": requires_cascade,
+        "cascade_summary": cascade_summary,
         "detail": delete_blocker,
     }

@@ -787,14 +787,21 @@ async def _get_approval_for_action(
     if not req:
         raise HTTPException(status_code=404, detail="Approval request not found")
 
-    if req.request_to != current_user.id:
-        if _is_org_scoped_super_admin(current_user):
-            org_ids = await _designated_super_admin_org_ids(session, current_user)
-            if req.org_id and req.org_id in org_ids:
-                return req
-        raise HTTPException(status_code=403, detail="Not allowed to act on this approval")
+    if req.request_to == current_user.id:
+        return req
 
-    return req
+    if _is_org_scoped_super_admin(current_user):
+        org_ids = await _designated_super_admin_org_ids(session, current_user)
+        if req.org_id and req.org_id in org_ids:
+            return req
+
+    # Any co-admin of the approval's dept can action it (dept-centric routing).
+    if _is_dept_admin(current_user) and req.dept_id:
+        managed_dept_ids = await _get_dept_admin_managed_dept_ids(session, current_user.id)
+        if req.dept_id in managed_dept_ids:
+            return req
+
+    raise HTTPException(status_code=403, detail="Not allowed to act on this approval")
 
 
 async def _get_approval_for_view(
@@ -818,12 +825,19 @@ async def _get_approval_for_view(
     if is_super:
         super_org_ids = await _designated_super_admin_org_ids(session, current_user)
 
+    is_dept_admin_user = _is_dept_admin(current_user)
+    managed_dept_ids: set[UUID] | None = None
+    if is_dept_admin_user:
+        managed_dept_ids = await _get_dept_admin_managed_dept_ids(session, current_user.id)
+
     # Direct match by approval request id.
     req = (await session.exec(select(ApprovalRequest).where(ApprovalRequest.id == target_uuid))).first()
     if req:
         if req.request_to == current_user.id or req.requested_by == current_user.id:
             return req
         if is_super and super_org_ids and req.org_id in super_org_ids:
+            return req
+        if is_dept_admin_user and managed_dept_ids and req.dept_id in managed_dept_ids:
             return req
         raise HTTPException(status_code=403, detail="Not allowed to view this approval")
 
@@ -834,6 +848,12 @@ async def _get_approval_for_view(
             (ApprovalRequest.request_to == current_user.id)
             | (ApprovalRequest.requested_by == current_user.id)
             | (ApprovalRequest.org_id.in_(list(super_org_ids)))
+        )
+    elif is_dept_admin_user and managed_dept_ids:
+        stmt = stmt.where(
+            (ApprovalRequest.request_to == current_user.id)
+            | (ApprovalRequest.requested_by == current_user.id)
+            | (ApprovalRequest.dept_id.in_(list(managed_dept_ids)))
         )
     else:
         stmt = stmt.where(
@@ -1115,6 +1135,42 @@ async def _resolve_department_admin_user_id(
     return dept.admin_user_id
 
 
+async def _get_dept_admin_managed_dept_ids(
+    session: DbSession,
+    user_id: UUID,
+) -> set[UUID]:
+    """Return dept IDs where user is a dept admin — via membership role OR dept.admin_user_id.
+
+    Using dept_id as the stable routing key means approval visibility is unaffected when
+    admins change. Multiple co-admins of the same dept all see the same pending approvals
+    and any one of them can action a request.
+    """
+    # Primary: membership table with department_admin role (supports multiple co-admins)
+    rows = (await session.exec(
+        select(UserDepartmentMembership.department_id)
+        .join(Role, Role.id == UserDepartmentMembership.role_id)
+        .where(
+            UserDepartmentMembership.user_id == user_id,
+            UserDepartmentMembership.status == "active",
+            func.lower(Role.name) == "department_admin",
+        )
+    )).all()
+    dept_ids: set[UUID] = {r if isinstance(r, UUID) else r[0] for r in rows}
+
+    # Fallback: dept.admin_user_id for backwards-compatibility with depts that
+    # haven't been re-assigned through the membership table yet.
+    primary_admin_depts = (await session.exec(
+        select(Department.id).where(Department.admin_user_id == user_id)
+    )).all()
+    dept_ids.update(primary_admin_depts)
+
+    return dept_ids
+
+
+def _is_dept_admin(user: CurrentActiveUser) -> bool:
+    return str(getattr(user, "role", "")).lower() == "department_admin"
+
+
 async def _resolve_model_visibility_approver(
     *,
     session: DbSession,
@@ -1214,6 +1270,18 @@ async def get_approvals(
         if _is_org_scoped_super_admin(current_user):
             org_ids = await _designated_super_admin_org_ids(session, current_user)
             stmt = stmt.where(ApprovalRequest.org_id.in_(list(org_ids)) if org_ids else False)
+        elif _is_dept_admin(current_user):
+            # Dept-centric routing: any co-admin of the same dept sees all its approvals.
+            # Using dept_id (stable) instead of request_to (user-specific) means admin
+            # changes never orphan pending approvals.
+            managed_dept_ids = await _get_dept_admin_managed_dept_ids(session, current_user.id)
+            if managed_dept_ids:
+                stmt = stmt.where(
+                    (ApprovalRequest.dept_id.in_(list(managed_dept_ids)))
+                    | (ApprovalRequest.request_to == current_user.id)
+                )
+            else:
+                stmt = stmt.where(ApprovalRequest.request_to == current_user.id)
         else:
             stmt = stmt.where(ApprovalRequest.request_to == current_user.id)
         rows = (await session.exec(stmt)).all()
