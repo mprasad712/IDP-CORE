@@ -17,7 +17,7 @@ html {
 
     --foreground:0 0% 27%;
     --background: 0 0% 100%; /* hsl(0, 0%, 100%) */
-    --muted: 240 5% 96%; /* hsl(240, 5%, 96%) */
+    --muted: 26 20% 96%; /* warm off-white card/muted surface */
     --muted-foreground: 240 4% 46%; /* hsl(240, 4%, 46%) */
     --card: 0 0% 100%; /* hsl(0, 0%, 100%) */
     --card-foreground: 0 0% 0%; /* hsl(0, 0%, 0%) */
@@ -29,7 +29,7 @@ html {
     --primary: 0 0% 0%; /* hsl(0, 0%, 0%) */
     --secondary: 0 0% 100%; /* hsl(0, 0%, 100%) */
     --secondary-foreground: 240 4% 16%; /* hsl(240, 4%, 16%) */
-    --accent: 240 5% 96%; /* hsl(240, 5%, 96%) */
+    --accent: 26 55% 96%; /* warm orange tint for hover/active states */
     --accent-foreground: 0 0% 23%;
     --destructive: 0 72% 51%; /* hsl(0, 72%, 51%) */
     --destructive-foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
@@ -140,7 +140,7 @@ html {
     --placeholder: 240 5% 64.9%;
     --hard-zinc: 240 5.2% 33.9%;
     --smooth-red: 0 93.3% 94.1%;
-    --radius: 0.5rem;
+    --radius: 0.6rem;
 
     --datatype-pink: 333.3 71.4% 50.6%;
     --datatype-pink-foreground: 325.7 77.8% 94.7%;
@@ -206,16 +206,16 @@ html {
     --red-foreground: 0 90.6% 70.8%;
     --indigo-foreground: 243.7 54.5% 41.4%;
 
-    --button-primary: #DA2128;
+    --button-primary: #D04A02;
     --button-primary-foreground: #ffffff;
 
-    --button-primary-hover: #b81b20;
-    --button-primary-disabled: #f0a3a6;
+    --button-primary-hover: #A83800;
+    --button-primary-disabled: #F5C0A0;
 
     --tabs-label: #ffffff;
-    --login-sso-button-bg: #da2128;
-    --login-sso-button-hover: #b81b20;
-    --login-sso-button-disabled: #f0a3a6;
+    --login-sso-button-bg: #D04A02;
+    --login-sso-button-hover: #A83800;
+    --login-sso-button-disabled: #F5C0A0;
     --login-sso-button-foreground: #ffffff;
 
 
@@ -223,12 +223,12 @@ html {
 
   .dark {
     --foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
-    --background: 240 6% 10%; /* hsl(240, 6%, 10%) */
-    --muted: 240 4% 16%; /* hsl(240, 4%, 16%) */
+    --background: 222 30% 9%; /* deep navy — PwC dark mode */
+    --muted: 222 22% 15%; /* hsl(222, 22%, 15%) */
     --muted-foreground: 240 5% 65%; /* hsl(240, 5%, 65%) */
-    --card: 240 6% 10%; /* hsl(240, 6%, 10%) */
+    --card: 222 30% 9%; /* deep navy */
     --card-foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
-    --popover: 240 6% 10%; /* hsl(240, 6%, 10%) */
+    --popover: 222 30% 9%; /* deep navy */
     --popover-foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
     --border: 240 5% 26%; /* hsl(240, 5%, 26%) */
     --input: 240 5% 34%; /* hsl(240, 5%, 34%) */
@@ -236,7 +236,7 @@ html {
     --primary: 0 0% 100%; /* hsl(0, 0%, 100%) */
     --secondary: 0 0% 0%; /* hsl(0, 0%, 0%) */
     --secondary-foreground: 240 6% 90%; /* hsl(240, 6%, 90%) */
-    --accent: 240 4% 16%; /* hsl(240, 4%, 16%) */
+    --accent: 222 22% 15%; /* hsl(222, 22%, 15%) */
     --accent-foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
     --destructive: 0 84% 60%; /* hsl(0, 84%, 60%) */
     --destructive-foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
@@ -415,7 +415,7 @@ html {
     --chat-bot-icon: #235d70;
     --chat-user-icon: #4f3d6e;
 
-    --sidebar-background: 240 5.9% 10%;
+    --sidebar-background: 222 30% 9%;
     --sidebar-foreground: 240 4.8% 95.9%;
     --sidebar-primary: 224.3 76.3% 48%;
     --sidebar-primary-foreground: 0 0% 100%;
@@ -480,16 +480,16 @@ html {
     --red-foreground: 0 72.2% 50.6%;
     --indigo-foreground: 234.5 89.5% 73.9%;
 
-    --button-primary: white;
-    --button-primary-foreground: #0c0c0c;
+    --button-primary: #D04A02;
+    --button-primary-foreground: #ffffff;
 
-    --button-primary-hover: #ffffff;
-    --button-primary-disabled: #f0a3a6;
+    --button-primary-hover: #A83800;
+    --button-primary-disabled: #F5C0A0;
 
-    --tabs-label: #000000;
-    --login-sso-button-bg: #da2128;
-    --login-sso-button-hover: #b81b20;
-    --login-sso-button-disabled: #f0a3a6;
+    --tabs-label: #ffffff;
+    --login-sso-button-bg: #D04A02;
+    --login-sso-button-hover: #A83800;
+    --login-sso-button-disabled: #F5C0A0;
     --login-sso-button-foreground: #ffffff;
   }
 }

@@ -25,7 +25,7 @@ body {
 }
 
 #react-agent-id .react-flow__node {
-  box-shadow: 0 8px 22px rgba(218, 33, 40, 0.35);
+  box-shadow: 0 8px 22px rgba(208, 74, 2, 0.35);
 }
 
 .App-logo {
@@ -236,10 +236,59 @@ code {
 
 /* Sidebar color */
 :root {
-  --sidebar-background: #f3f3f3; /* light theme */
-  --sidebar-foreground: #555555;
-  --sidebar-background-hover: #e9e9e9;
-  --info-foreground: #da2128;
+  --sidebar-background: #F5F1EE; /* warm gray — PwC light theme */
+  --sidebar-foreground: #444444;
+  --sidebar-background-hover: rgba(208, 74, 2, 0.06);
+  --info-foreground: #D04A02;
+}
+
+/* ── PwC IDP Global Design System ── */
+
+/* Header: orange brand bar + refined shadow */
+[data-testid="app-header"] {
+  border-top: 3px solid #D04A02;
+  background: #ffffff;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.07), 0 2px 8px rgba(0, 0, 0, 0.04);
+  border-bottom-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.dark [data-testid="app-header"] {
+  background: hsl(var(--background));
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.3), 0 2px 16px rgba(0, 0, 0, 0.18);
+  border-bottom-color: rgba(255, 255, 255, 0.07) !important;
+}
+
+/* Sidebar right border: subtle orange tint */
+[data-sidebar="sidebar"] {
+  border-right-color: rgba(208, 74, 2, 0.12) !important;
+}
+
+/* Active sidebar menu item: orange highlight */
+[data-sidebar="menu-button"][data-active="true"] {
+  background-color: rgba(208, 74, 2, 0.09) !important;
+  color: #D04A02 !important;
+  font-weight: 600;
+  border-radius: 0.5rem;
+}
+
+.dark [data-sidebar="menu-button"][data-active="true"] {
+  background-color: rgba(208, 74, 2, 0.18) !important;
+  color: #FF8A4C !important;
+}
+
+/* Sidebar item hover: warm tint */
+[data-sidebar="menu-button"]:hover:not([data-active="true"]) {
+  background-color: rgba(208, 74, 2, 0.05) !important;
+  color: inherit;
+}
+
+.dark [data-sidebar="menu-button"]:hover:not([data-active="true"]) {
+  background-color: rgba(208, 74, 2, 0.10) !important;
+}
+
+/* Smooth card & UI transitions */
+.transition-all {
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1) !important;
 }
 
 [data-sidebar="sidebar"] {

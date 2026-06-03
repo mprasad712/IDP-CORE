@@ -397,7 +397,7 @@ const SidebarTrigger = React.forwardRef<
   variant="ghost"
   size="icon"
   className={cn(
-    "!bg-white !opacity-100 h-7 w-7 rounded-full bg-white text-gray-700 shadow border border-gray-200 hover:bg-gray-100",
+    "!opacity-100 h-7 w-7 rounded-full bg-white dark:bg-background text-[#D04A02] shadow-sm border border-[#D04A02]/25 hover:bg-[#D04A02]/8 hover:border-[#D04A02]/40 transition-all duration-150",
     className
   )}
   onClick={handleClick}

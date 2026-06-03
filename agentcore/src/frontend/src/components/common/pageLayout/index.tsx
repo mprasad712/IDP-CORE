@@ -28,31 +28,36 @@ export default function PageLayout({
         <div className="flex flex-col gap-4 px-4 py-6 pt-0 sm:px-6">
           <CustomBanner />
           <div className="flex w-full items-center justify-between gap-4 space-y-0.5 pb-2 pt-10">
-            <div className="flex w-full flex-col">
-              <div className="flex items-center gap-2">
-                {backTo && (
-                  <Button
-                    unstyled
-                    onClick={() => {
-                      navigate(backTo);
-                    }}
-                    data-testid="back_page_button"
-                  >
-                    <ForwardedIconComponent
-                      name="ChevronLeft"
-                      className="flex cursor-pointer"
-                    />
-                  </Button>
-                )}
-                <h2
-                  className="text-xl font-bold tracking-tight md:text-2xl"
-                  data-testid="mainpage_title"
+            <div className="flex w-full items-center gap-4">
+              {backTo && (
+                <Button
+                  unstyled
+                  onClick={() => navigate(backTo)}
+                  data-testid="back_page_button"
+                  className="flex-shrink-0"
                 >
-                  {title}
-                  {betaIcon && <span className="store-beta-icon">Beta</span>}
-                </h2>
+                  <ForwardedIconComponent
+                    name="ChevronLeft"
+                    className="flex cursor-pointer"
+                  />
+                </Button>
+              )}
+              <div className="flex items-center gap-3">
+                <div
+                  className="h-8 w-[3px] flex-shrink-0 rounded-full"
+                  style={{ background: "#D04A02" }}
+                />
+                <div className="flex flex-col">
+                  <h2
+                    className="text-xl font-bold tracking-tight md:text-2xl"
+                    data-testid="mainpage_title"
+                  >
+                    {title}
+                    {betaIcon && <span className="store-beta-icon">Beta</span>}
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-0.5">{description}</p>
+                </div>
               </div>
-              <p className="text-muted-foreground">{description}</p>
             </div>
             <div className="flex-shrink-0">{button && button}</div>
           </div>
