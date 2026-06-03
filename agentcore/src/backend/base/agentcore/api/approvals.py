@@ -1127,45 +1127,23 @@ async def _resolve_department_admin_user_id(
     dept_id: UUID | None,
     requested_by: UUID | None,
 ) -> UUID:
+    from agentcore.services.auth.dept_admin_utils import get_primary_dept_admin_id
     resolved_dept_id = dept_id or await _resolve_user_primary_dept(session=session, user_id=requested_by)
     if not resolved_dept_id:
         raise HTTPException(status_code=400, detail="Department id is required for department admin resolution")
-    dept = await session.get(Department, resolved_dept_id)
-    if not dept or not dept.admin_user_id:
+    admin_id = await get_primary_dept_admin_id(session, resolved_dept_id)
+    if not admin_id:
         raise HTTPException(status_code=400, detail="No department admin configured for requester department")
-    return dept.admin_user_id
+    return admin_id
 
 
 async def _get_dept_admin_managed_dept_ids(
     session: DbSession,
     user_id: UUID,
 ) -> set[UUID]:
-    """Return dept IDs where user is a dept admin — via membership role OR dept.admin_user_id.
-
-    Using dept_id as the stable routing key means approval visibility is unaffected when
-    admins change. Multiple co-admins of the same dept all see the same pending approvals
-    and any one of them can action a request.
-    """
-    # Primary: membership table with department_admin role (supports multiple co-admins)
-    rows = (await session.exec(
-        select(UserDepartmentMembership.department_id)
-        .join(Role, Role.id == UserDepartmentMembership.role_id)
-        .where(
-            UserDepartmentMembership.user_id == user_id,
-            UserDepartmentMembership.status == "active",
-            func.lower(Role.name) == "department_admin",
-        )
-    )).all()
-    dept_ids: set[UUID] = {r if isinstance(r, UUID) else r[0] for r in rows}
-
-    # Fallback: dept.admin_user_id for backwards-compatibility with depts that
-    # haven't been re-assigned through the membership table yet.
-    primary_admin_depts = (await session.exec(
-        select(Department.id).where(Department.admin_user_id == user_id)
-    )).all()
-    dept_ids.update(primary_admin_depts)
-
-    return dept_ids
+    """Return dept IDs where user is a dept admin (delegates to central utility)."""
+    from agentcore.services.auth.dept_admin_utils import get_managed_dept_ids_for_user
+    return await get_managed_dept_ids_for_user(session, user_id)
 
 
 def _is_dept_admin(user: CurrentActiveUser) -> bool:

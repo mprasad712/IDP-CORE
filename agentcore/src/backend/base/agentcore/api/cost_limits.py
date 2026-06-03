@@ -125,12 +125,8 @@ async def _user_org_ids(session: DbSession, user: CurrentActiveUser) -> set[UUID
 
 async def _user_admin_dept_ids(session: DbSession, user: CurrentActiveUser) -> set[UUID]:
     """Return department IDs where the user is the admin."""
-    rows = (
-        await session.exec(
-            select(Department.id).where(Department.admin_user_id == user.id)
-        )
-    ).all()
-    return {r if isinstance(r, UUID) else r[0] for r in rows}
+    from agentcore.services.auth.dept_admin_utils import get_managed_dept_ids_for_user
+    return await get_managed_dept_ids_for_user(session, user.id)
 
 
 async def _validate_scope_ownership(

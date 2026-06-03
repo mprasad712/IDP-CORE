@@ -59,9 +59,8 @@ async def hard_delete_user(
                 skip_user_ids={user_id},
             )
 
-    administered_department_ids = (
-        await db.exec(select(Department.id).where(Department.admin_user_id == user_id))
-    ).all()
+    from agentcore.services.auth.dept_admin_utils import get_managed_dept_ids_for_user
+    administered_department_ids = list(await get_managed_dept_ids_for_user(db, user_id))
     for department_id in administered_department_ids:
         await hard_delete_department(
             db,

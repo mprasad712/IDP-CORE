@@ -467,10 +467,11 @@ async def _resolve_request_approver(
         if not dept_pairs:
             raise HTTPException(status_code=403, detail="No active department scope found for requester")
         _, target_dept_id = sorted(dept_pairs, key=lambda x: (str(x[0]), str(x[1])))[0]
-    dept = await session.get(Department, target_dept_id)
-    if not dept or not dept.admin_user_id:
+    from agentcore.services.auth.dept_admin_utils import get_primary_dept_admin_id
+    admin_id = await get_primary_dept_admin_id(session, target_dept_id)
+    if not admin_id:
         raise HTTPException(status_code=400, detail="No department admin configured for requester department")
-    return dept.admin_user_id
+    return admin_id
 
 
 async def _resolve_super_admin_approver(

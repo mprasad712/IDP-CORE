@@ -795,11 +795,8 @@ async def _dept_admin_cascade_summary(
     target_user: User,
 ) -> dict:
     """Return a summary of what would be cascade-deleted when removing a dept admin."""
-    dept_ids = list(
-        (await session.exec(
-            select(Department.id).where(Department.admin_user_id == target_user.id)
-        )).all()
-    )
+    from agentcore.services.auth.dept_admin_utils import get_managed_dept_ids_for_user
+    dept_ids = list(await get_managed_dept_ids_for_user(session, target_user.id))
     dept_names = list(
         (await session.exec(
             select(Department.name).where(Department.id.in_(dept_ids))
@@ -1041,11 +1038,8 @@ async def _cascade_delete_dept_admin_departments(
     Deletes every member's assets (agents, deployments, approvals) then the dept rows.
     Used when a dept admin is hard-deleted with force_cascade=True and has no replacement.
     """
-    dept_ids = list(
-        (await session.exec(
-            select(Department.id).where(Department.admin_user_id == dept_admin.id)
-        )).all()
-    )
+    from agentcore.services.auth.dept_admin_utils import get_managed_dept_ids_for_user
+    dept_ids = list(await get_managed_dept_ids_for_user(session, dept_admin.id))
     for dept_id in dept_ids:
         member_ids = list(
             (await session.exec(
@@ -1662,7 +1656,9 @@ async def add_user(
                     ).first()
                     if not department:
                         raise HTTPException(status_code=400, detail="Invalid department.")
-                    dept_admin = await session.get(User, department.admin_user_id)
+                    from agentcore.services.auth.dept_admin_utils import get_primary_dept_admin_id
+                    _primary_id = await get_primary_dept_admin_id(session, department.id)
+                    dept_admin = await session.get(User, _primary_id) if _primary_id else None
                     new_user.department_admin_email = dept_admin.username if dept_admin else None
                     new_user.department_name = department.name
                     await _ensure_department_membership(
@@ -2408,8 +2404,11 @@ async def _move_user_to_department(
         reassign_to = actor.id
         if old_membership:
             old_dept = await session.get(Department, old_membership.department_id)
-            if old_dept and old_dept.admin_user_id and old_dept.admin_user_id != target_user.id:
-                reassign_to = old_dept.admin_user_id
+            if old_dept:
+                from agentcore.services.auth.dept_admin_utils import get_dept_admin_ids
+                _old_admins = [uid for uid in await get_dept_admin_ids(session, old_dept.id) if uid != target_user.id]
+                if _old_admins:
+                    reassign_to = _old_admins[0]
         await session.exec(
             update(Agent)
             .where(Agent.id.in_(list(active_deploy_ids)))
@@ -2463,9 +2462,11 @@ async def _move_user_to_department(
         actor_user_id=actor.id,
     )
 
-    target_department_admin = await session.get(User, target_department.admin_user_id)
+    from agentcore.services.auth.dept_admin_utils import get_primary_dept_admin_id
+    primary_admin_id = await get_primary_dept_admin_id(session, target_department.id)
+    target_department_admin = await session.get(User, primary_admin_id) if primary_admin_id else None
     target_user.department_name = target_department.name
-    target_user.department_admin = target_department.admin_user_id
+    target_user.department_admin = primary_admin_id
     target_user.department_admin_email = (
         target_department_admin.username if target_department_admin else None
     )

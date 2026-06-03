@@ -35,6 +35,7 @@ from agentcore.services.database.models.user.model import User
 from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
 from agentcore.services.database.models.guardrail_catalogue.model import GuardrailCatalogue
 from agentcore.services.database.models.guardrail_execution_log.model import GuardrailExecutionLog
+from agentcore.services.auth.dept_admin_utils import get_managed_dept_ids_for_user
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -197,12 +198,7 @@ async def _department_admin_dept_ids(
     role = str(getattr(current_user, "role", "")).lower()
     if role != "department_admin":
         return set()
-    rows = (
-        await session.exec(
-            select(Department.id).where(Department.admin_user_id == current_user.id)
-        )
-    ).all()
-    return {r if isinstance(r, UUID) else r[0] for r in rows}
+    return await get_managed_dept_ids_for_user(session, current_user.id)
 
 
 @router.get("/sections/environment-lifecycle", response_model=DashboardSectionResponse, status_code=200)

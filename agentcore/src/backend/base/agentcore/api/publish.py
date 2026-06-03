@@ -67,6 +67,7 @@ from agentcore.services.database.models.agent_bundle.model import (
     DeploymentEnvEnum,
 )
 from agentcore.services.approval_notifications import upsert_approval_notification
+from agentcore.services.auth.dept_admin_utils import get_dept_admin_ids, get_primary_dept_admin_id
 
 router = APIRouter(prefix="/publish", tags=["Publish"])
 
@@ -608,18 +609,24 @@ async def _resolve_publish_scope(
             agent.dept_id = department.id
         session.add(agent)
 
-        resolved_department_admin_id = department.admin_user_id
-        if (
-            requested_department_admin_id
-            and requested_department_admin_id != resolved_department_admin_id
-        ):
+        # Resolve primary admin via membership table (supports multiple co-admins).
+        resolved_department_admin_id = await get_primary_dept_admin_id(session, department.id)
+        if not resolved_department_admin_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"department_admin_id {requested_department_admin_id} does not match "
-                    f"department admin {resolved_department_admin_id} for department {resolved_department_id}."
-                ),
+                detail=f"No department admin configured for department {resolved_department_id}.",
             )
+        if requested_department_admin_id:
+            dept_admin_ids = await get_dept_admin_ids(session, department.id)
+            if requested_department_admin_id not in dept_admin_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"department_admin_id {requested_department_admin_id} is not an admin "
+                        f"of department {resolved_department_id}."
+                    ),
+                )
+            resolved_department_admin_id = requested_department_admin_id
 
         admin_user = (
             await session.exec(select(User).where(User.id == resolved_department_admin_id))
@@ -711,15 +718,23 @@ async def _resolve_publish_scope(
             ),
         )
 
-    resolved_department_admin_id = department.admin_user_id
-    if requested_department_admin_id and requested_department_admin_id != resolved_department_admin_id:
+    resolved_department_admin_id = await get_primary_dept_admin_id(session, department.id)
+    if not resolved_department_admin_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"department_admin_id {requested_department_admin_id} does not match "
-                f"department admin {resolved_department_admin_id} for department {resolved_department_id}."
-            ),
+            detail=f"No department admin configured for department {resolved_department_id}.",
         )
+    if requested_department_admin_id:
+        dept_admin_ids = await get_dept_admin_ids(session, department.id)
+        if requested_department_admin_id not in dept_admin_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"department_admin_id {requested_department_admin_id} is not an admin "
+                    f"of department {resolved_department_id}."
+                ),
+            )
+        resolved_department_admin_id = requested_department_admin_id
 
     admin_user = (
         await session.exec(select(User).where(User.id == resolved_department_admin_id))

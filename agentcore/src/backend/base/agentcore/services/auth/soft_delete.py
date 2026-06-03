@@ -41,14 +41,16 @@ async def _collect_cascade_user_ids(db: AsyncSession, root_user_id: UUID) -> set
             if child_user_id not in selected:
                 pending.append(child_user_id)
 
-        department_ids = (
-            await db.exec(
+        from agentcore.services.auth.dept_admin_utils import get_managed_dept_ids_for_user
+        managed_ids = await get_managed_dept_ids_for_user(db, user_id)
+        department_ids = list(
+            (await db.exec(
                 select(Department.id).where(
-                    Department.admin_user_id == user_id,
+                    Department.id.in_(list(managed_ids)),
                     Department.status == DeptStatusEnum.ACTIVE,
                 )
-            )
-        ).all()
+            )).all()
+        )
         if department_ids:
             member_user_ids = (
                 await db.exec(
@@ -144,11 +146,16 @@ async def soft_delete_user_hierarchy(
     )
 
     # Collect dept/org IDs that will be affected BEFORE updating their status.
+    # Collect depts affected by the deleted users (check membership table, not just admin_user_id).
+    from agentcore.services.auth.dept_admin_utils import get_managed_dept_ids_for_user
+    _managed: set[UUID] = set()
+    for _uid in deleted_ids:
+        _managed.update(await get_managed_dept_ids_for_user(db, _uid))
     affected_dept_ids: list[UUID] = list(
         (
             await db.exec(
                 select(Department.id).where(
-                    Department.admin_user_id.in_(deleted_ids),
+                    Department.id.in_(list(_managed)),
                     Department.status == DeptStatusEnum.ACTIVE,
                 )
             )
@@ -168,7 +175,7 @@ async def soft_delete_user_hierarchy(
     await db.exec(
         update(Department)
         .where(
-            Department.admin_user_id.in_(deleted_ids),
+            Department.id.in_(list(_managed)) if _managed else Department.id.is_(None),
             Department.status == DeptStatusEnum.ACTIVE,
         )
         .values(status=DeptStatusEnum.ARCHIVED, updated_at=now, updated_by=actor_user_id)
