@@ -156,14 +156,14 @@ export function AuthProvider({ children }): React.ReactElement {
           clearLocalAuthState();
           useAuthStore.getState().setUserData(null);
 
-          if (status === 401 || status === 403 || isTransportFailure) {
-            try {
-              await mutateLogoutAsync(undefined);
-            } catch {
-              await clearAuthStore();
-            }
-            setIsAuthenticated(false);
+          // Any auth failure (401, 403, transport error, or server error on whoami)
+          // means we can't verify the session — redirect to login immediately.
+          try {
+            await mutateLogoutAsync(undefined);
+          } catch {
+            await clearAuthStore();
           }
+          setIsAuthenticated(false);
         },
       },
     );

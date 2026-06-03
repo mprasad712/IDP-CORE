@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CustomLink } from "@/customization/components/custom-link";
-import IconComponent from "../../components/common/genericIconComponent";
+import { Info } from "lucide-react";
 import type { NoticeAlertType } from "../../types/alerts";
 
 export default function NoticeAlert({
@@ -48,8 +48,7 @@ export default function NoticeAlert({
       >
         <div className="flex">
           <div className="flex-shrink-0 cursor-help">
-            <IconComponent
-              name="Info"
+            <Info
               className="h-5 w-5 text-status-blue"
               aria-hidden="true"
             />

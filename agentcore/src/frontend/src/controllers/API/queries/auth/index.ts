@@ -5,6 +5,7 @@ export * from "./use-patch-reset-password";
 export * from "./use-patch-update-user";
 export * from "./use-post-add-user";
 export * from "./use-post-login-user";
+export * from "./use-post-register";
 export * from "./use-post-logout";
 export * from "./use-post-refresh-access";
 export * from "./use-get-departments";

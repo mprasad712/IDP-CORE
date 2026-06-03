@@ -112,6 +112,34 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: "build",
     },
+    optimizeDeps: {
+      // Do NOT pre-bundle icon libraries — they have thousands of files each
+      // and cause Vite's dep crawl to hang for 10-15 minutes on first start.
+      exclude: ["lucide-react", "react-icons", "@radix-ui/react-icons"],
+      // Allow the page to load immediately while dep optimization runs in the
+      // background instead of blocking the browser until crawl is complete.
+      holdUntilCrawlEnd: false,
+      // Explicitly pre-bundle heavy deps so they are ready before the first
+      // browser request instead of being discovered mid-crawl.
+      // i18next packages are the main culprit: they were not pre-bundled,
+      // so the browser stalled on 3 pending script requests for 10+ minutes
+      // while Vite optimised them on first load.
+      include: [
+        "react",
+        "react-dom",
+        "react-router-dom",
+        "i18next",
+        "i18next-browser-languagedetector",
+        "i18next-resources-to-backend",
+        "react-i18next",
+        "@azure/msal-browser",
+        "@azure/msal-react",
+        "@tanstack/react-query",
+        "@xyflow/react",
+        "axios",
+        "zustand",
+      ],
+    },
     define: {
       "process.env.BACKEND_URL": JSON.stringify(
         envAgentCore.BACKEND_URL ?? backendUrlDefault,

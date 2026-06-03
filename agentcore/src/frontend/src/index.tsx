@@ -14,22 +14,14 @@ import "./style/applies.css";
 // @ts-ignore
 import App from "./customization/custom-App";
 
-
-
-/* ================= MSAL IMPORTS ================= */
-import { PublicClientApplication, EventType, AuthenticationResult  } from "@azure/msal-browser";
+import { PublicClientApplication, EventType } from "@azure/msal-browser";
+import type { AuthenticationResult } from "@azure/msal-browser";
 import { MsalProvider } from "@azure/msal-react";
 import { msalConfig } from "./authConfig";
 
-/* ================================================ */
-
-/**
- * MSAL instance should be created outside React tree.
- * MSAL Browser v4 requires initialize() before any interaction.
- */
+// MsalProvider must always be in the tree — useMsal() is called throughout the app
 const msalInstance = new PublicClientApplication(msalConfig);
 
-// Listen for login success and set account
 msalInstance.addEventCallback((event) => {
   if (event.eventType === EventType.LOGIN_SUCCESS && event.payload) {
     const payload = event.payload as AuthenticationResult;
@@ -39,43 +31,38 @@ msalInstance.addEventCallback((event) => {
   }
 });
 
-/* ============== REACT ROOT ================= */
-
 const root = ReactDOM.createRoot(
-  document.getElementById("root") as HTMLElement
+  document.getElementById("root") as HTMLElement,
 );
 
-// Initialize MSAL, handle any pending redirects, then render
-msalInstance
-  .initialize()
-  .then(() => msalInstance.handleRedirectPromise())
-  .then(() => {
-    // Set active account after initialization
-    const accounts = msalInstance.getAllAccounts();
-    if (!msalInstance.getActiveAccount() && accounts.length > 0) {
-      msalInstance.setActiveAccount(accounts[0]);
-    }
+// Render React immediately — don't block on MSAL network calls
+root.render(
+  <React.StrictMode>
+    <I18nextProvider i18n={i18n}>
+      <MsalProvider instance={msalInstance}>
+        <App />
+      </MsalProvider>
+    </I18nextProvider>
+  </React.StrictMode>,
+);
 
-    root.render(
-      <React.StrictMode>
-        <I18nextProvider i18n={i18n}>
-          <MsalProvider instance={msalInstance}>
-            <App />
-          </MsalProvider>
-        </I18nextProvider>
-      </React.StrictMode>
-    );
-  })
-  .catch((err) => {
-    console.error("[MSAL] Initialization failed:", err);
-    // Render app without MSAL so the page isn't blank
-    root.render(
-      <React.StrictMode>
-        <I18nextProvider i18n={i18n}>
-          <App />
-        </I18nextProvider>
-      </React.StrictMode>
-    );
-  });
+// Initialize MSAL in the background after React is already painting
+const isMsalConfigured =
+  !!msalConfig?.auth?.clientId && !!msalConfig?.auth?.authority;
+
+if (isMsalConfigured) {
+  msalInstance
+    .initialize()
+    .then(() => msalInstance.handleRedirectPromise())
+    .then(() => {
+      const accounts = msalInstance.getAllAccounts();
+      if (!msalInstance.getActiveAccount() && accounts.length > 0) {
+        msalInstance.setActiveAccount(accounts[0]);
+      }
+    })
+    .catch((err) => {
+      console.error("[MSAL] Initialization failed:", err);
+    });
+}
 
 reportWebVitals();

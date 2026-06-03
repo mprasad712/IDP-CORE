@@ -38,8 +38,6 @@ import ExportApiModal from "@/modals/exportApiModal";
 import ExportModal from "@/modals/exportModal";
 import useAlertStore from "@/stores/alertStore";
 import type { AgentType } from "@/types/agent";
-import SchedulerPage from "@/pages/SchedulerPage";
-
 type EnvironmentTab = "UAT" | "PROD";
 type FilterTab = "creator" | "owner" | "department" | "version" | "deployment" | "timeline";
 type CreatedDateFilter = "all" | "today" | "7d" | "30d" | "90d";
@@ -152,9 +150,6 @@ export default function WorkflowsView({
   const [openExportModal, setOpenExportModal] = useState(false);
   const [openEmbedModal, setOpenEmbedModal] = useState(false);
   const [openExportApiModal, setOpenExportApiModal] = useState(false);
-  const [schedulerAgent, setSchedulerAgent] = useState<WorkagentType | null>(
-    null,
-  );
   const [exportApiAgent, setExportApiAgent] = useState<{
     agentId: string;
     agentName: string;
@@ -174,7 +169,6 @@ export default function WorkflowsView({
   const updateSharingMutation = usePutControlPanelAgentSharing();
   const validatePublishEmail = useValidatePublishEmail();
   const can = (permissionKey: string) => permissions?.includes(permissionKey);
-  const canViewScheduler = can("view_control_panel");
   const canDirectPromoteToProd = can("prod_publish_approval_not_required");
   const requiresProdApproval = !canDirectPromoteToProd;
 
@@ -997,7 +991,6 @@ export default function WorkflowsView({
     (activeTab === "PROD" ? 1 : 0) +
     (can("share_agent") ? 1 : 0) +
     (can("move_uat_to_prod") && activeTab === "UAT" ? 1 : 0) +
-    (canViewScheduler ? 1 : 0) +
     (can("start_stop_agent") ? 1 : 0) +
     (can("enable_disable_agent") ? 1 : 0);
 
@@ -1343,7 +1336,6 @@ export default function WorkflowsView({
               <col className="w-[11rem]" />
               {can("share_agent") && <col className="w-[8rem]" />}
               {can("move_uat_to_prod") && activeTab === "UAT" && <col className="w-[8rem]" />}
-              {canViewScheduler && <col className="w-[7rem]" />}
               {can("start_stop_agent") && <col className="w-[6rem]" />}
               {can("enable_disable_agent") && <col className="w-[7rem]" />}
             </colgroup>
@@ -1382,11 +1374,6 @@ export default function WorkflowsView({
                 {can("move_uat_to_prod") && activeTab === "UAT" && (
                   <th className="bg-muted/30 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                     {t("Move UAT to PROD")}
-                  </th>
-                )}
-                {canViewScheduler && (
-                  <th className="bg-muted/30 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    {t("Agent Scheduler")}
                   </th>
                 )}
                 {can("start_stop_agent") && (
@@ -1594,44 +1581,6 @@ export default function WorkflowsView({
                         </button>
                       </td>
                     )}
-                    {canViewScheduler && (
-                      <td className="px-4 py-3 whitespace-nowrap">
-                        {(() => {
-                          const isChat = workflow.inputType === "chat";
-                          const disabledReason = isChat
-                            ? "Chat agents cannot be scheduled."
-                            : undefined;
-                          const button = (
-                            <button
-                              type="button"
-                              className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs transition-colors ${
-                                isChat
-                                  ? "cursor-not-allowed border-muted-foreground/30 text-muted-foreground"
-                                  : "hover:bg-muted"
-                              }`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (isChat) return;
-                                setSchedulerAgent(workflow);
-                              }}
-                              aria-disabled={isChat}
-                            >
-                              {t("Schedule")}
-                            </button>
-                          );
-
-                          if (disabledReason) {
-                            return (
-                              <ShadTooltip content={disabledReason}>
-                                <span>{button}</span>
-                              </ShadTooltip>
-                            );
-                          }
-
-                          return button;
-                        })()}
-                      </td>
-                    )}
                     {can("start_stop_agent") && (
                       <td className="px-4 py-3 whitespace-nowrap">
                         {(() => {
@@ -1733,27 +1682,6 @@ export default function WorkflowsView({
           </div>
         </div>
       </div>
-
-      <Dialog
-        open={Boolean(schedulerAgent)}
-        onOpenChange={(open) => {
-          if (!open) setSchedulerAgent(null);
-        }}
-      >
-        <DialogContent className="max-w-5xl p-0">
-          {schedulerAgent && (
-            <SchedulerPage
-              embedded
-              agentFilter={{
-                deploymentId: schedulerAgent.id,
-                agentId: schedulerAgent.agentId,
-                agentName: schedulerAgent.name,
-              }}
-              onRequestClose={() => setSchedulerAgent(null)}
-            />
-          )}
-        </DialogContent>
-      </Dialog>
 
       <ExportModal
         open={openExportModal}

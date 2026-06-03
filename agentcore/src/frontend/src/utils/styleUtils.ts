@@ -1,7 +1,28 @@
-import { TwitterLogoIcon } from "@radix-ui/react-icons";
-import dynamicIconImports from "lucide-react/dynamicIconImports.mjs";
 import { lazy } from "react";
-import { FaApple, FaDiscord, FaGithub } from "react-icons/fa";
+
+// All three icon-library imports below use @vite-ignore so Vite's dep crawler
+// skips analysing their thousands of internal icon files at startup.
+// Without this, Vite registers 1400+ lucide icons + 1000+ FA icons as chunks
+// and hangs for 10-15 minutes before serving any JavaScript.
+
+let dynamicIconImports: Record<string, () => Promise<any>> = {};
+import(/* @vite-ignore */ "lucide-react/dynamicIconImports.mjs").then((m) => {
+  dynamicIconImports = m.default;
+});
+
+let TwitterLogoIcon: React.ComponentType<any> = () => null;
+import(/* @vite-ignore */ "@radix-ui/react-icons").then((m) => {
+  TwitterLogoIcon = m.TwitterLogoIcon;
+});
+
+let FaApple: React.ComponentType<any> = () => null;
+let FaDiscord: React.ComponentType<any> = () => null;
+let FaGithub: React.ComponentType<any> = () => null;
+import(/* @vite-ignore */ "react-icons/fa").then((m) => {
+  FaApple = m.FaApple;
+  FaDiscord = m.FaDiscord;
+  FaGithub = m.FaGithub;
+});
 import { ENABLE_KNOWLEDGE_BASES } from "@/customization/feature-flags";
 
 import { fontAwesomeIcons, isFontAwesomeIcon } from "@/icons/fontAwesomeIcons";
