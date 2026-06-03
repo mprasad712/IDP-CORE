@@ -2,11 +2,24 @@
 @tailwind components;
 @tailwind utilities;
 
-/* TODO: Confirm that all colors here are found in tailwind config */
+/* ── PwC IDP Design System — Global ── */
 
 /* Slightly scale down the entire UI for better fit on smaller screens */
 html {
   font-size: 14.5px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* PwC orange text selection */
+::selection {
+  background-color: rgba(208, 74, 2, 0.15);
+  color: inherit;
+}
+
+::-moz-selection {
+  background-color: rgba(208, 74, 2, 0.15);
+  color: inherit;
 }
 
 @layer base {
@@ -226,9 +239,9 @@ html {
     --background: 222 30% 9%; /* deep navy — PwC dark mode */
     --muted: 222 22% 15%; /* hsl(222, 22%, 15%) */
     --muted-foreground: 240 5% 65%; /* hsl(240, 5%, 65%) */
-    --card: 222 30% 9%; /* deep navy */
+    --card: 222 28% 12%; /* slightly lighter than bg for depth */
     --card-foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
-    --popover: 222 30% 9%; /* deep navy */
+    --popover: 222 28% 12%; /* match card */
     --popover-foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
     --border: 240 5% 26%; /* hsl(240, 5%, 26%) */
     --input: 240 5% 34%; /* hsl(240, 5%, 34%) */

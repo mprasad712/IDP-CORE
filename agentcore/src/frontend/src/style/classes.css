@@ -48,8 +48,8 @@ select:-webkit-autofill,
 select:-webkit-autofill:hover,
 select:-webkit-autofill:focus {
   -webkit-text-fill-color: black;
-  -webkit-box-shadow: 0 0 0px 1000px #fff6d0 inset;
-  box-shadow: 0 0 0px 1000px #fff6d0 inset;
+  -webkit-box-shadow: 0 0 0px 1000px #fff8f5 inset;
+  box-shadow: 0 0 0px 1000px #fff8f5 inset;
   color: black;
 }
 .ace_scrollbar::-webkit-scrollbar {
@@ -437,7 +437,7 @@ input[type="search"]::-webkit-search-cancel-button {
  * NotebookLM panel (OrchestratorChat) — verbatim port of MiBuddy's
  * notebooklm.module.css. Class names are prefixed with `nbk_` so
  * they don't collide with anything else in the global stylesheet.
- * Brand red: #DA2121. Dark mode hooks off [data-theme="dark"].
+ * Brand red: #D04A02. Dark mode hooks off [data-theme="dark"].
  * ───────────────────────────────────────────────────────────────── */
 
 .nbk_layout {
@@ -578,13 +578,13 @@ input[type="search"]::-webkit-search-cancel-button {
   margin-top: 6px;
   cursor: pointer;
 }
-.nbk_radioRow input[type="radio"]:checked { border-color: #DA2121; }
+.nbk_radioRow input[type="radio"]:checked { border-color: #D04A02; }
 .nbk_radioRow input[type="radio"]:checked::before {
   content: "";
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: #DA2121;
+  background: #D04A02;
 }
 
 .nbk_textArea {
@@ -630,7 +630,7 @@ input[type="search"]::-webkit-search-cancel-button {
   cursor: pointer;
 }
 .nbk_chooseFileText {
-  color: #DA2121;
+  color: #D04A02;
   font-style: italic;
   font-family: Inter;
   font-size: 14px;
@@ -662,7 +662,7 @@ input[type="search"]::-webkit-search-cancel-button {
   color: #555555;
 }
 .nbk_webLinkInput::placeholder {
-  color: #DA2121;
+  color: #D04A02;
   font-family: Inter;
   font-size: 14px;
   font-style: italic;
@@ -686,7 +686,7 @@ input[type="search"]::-webkit-search-cancel-button {
 .nbk_generateBtn {
   width: 230px;
   height: 46px;
-  background: #DA2121;
+  background: #D04A02;
   border: none;
   border-radius: 23px;
   display: flex;
@@ -759,7 +759,7 @@ input[type="search"]::-webkit-search-cancel-button {
   padding: 10px 14px;
   border-radius: 12px;
   background: #fff0f0;
-  color: #DA2121;
+  color: #D04A02;
   border: 1px solid #f5c7c7;
   font-size: 13px;
   font-family: Inter;
@@ -829,7 +829,7 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .ac_canvas_answer:focus-visible {
   outline: none;
-  border-color: #d92128;
+  border-color: #D04A02;
   box-shadow: 0 2px 12px rgba(217, 33, 40, 0.18);
 }
 
@@ -865,7 +865,7 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .ac_canvas_btn {
-  color: #d92128;
+  color: #D04A02;
   font-size: 16px;
   font-weight: 500;
   cursor: pointer;
@@ -881,7 +881,7 @@ input[type="search"]::-webkit-search-cancel-button {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: #d92128;
+  color: #D04A02;
   font-size: 16px;
   font-weight: 500;
   cursor: pointer;
@@ -906,7 +906,7 @@ input[type="search"]::-webkit-search-cancel-button {
   bottom: 53px;
   position: fixed;
   right: 20px;
-  background: #D92128;
+  background: #D04A02;
   padding: 20px 6px;
   border-radius: 20px;
   z-index: 999;
@@ -1014,7 +1014,7 @@ input[type="search"]::-webkit-search-cancel-button {
   align-items: center;
   gap: 20px;
   height: 156px;
-  box-shadow: -2px 1px 0px #d92128;
+  box-shadow: -2px 1px 0px #D04A02;
 }
 
 .slider-track {

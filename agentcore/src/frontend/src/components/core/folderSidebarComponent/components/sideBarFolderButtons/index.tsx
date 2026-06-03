@@ -399,233 +399,168 @@ const SideBarFoldersButtonsComponent = ({
     _navigate("/assets/knowledge-bases");
   };
 
+  /* ── Shared nav button style ── */
+  const navBtn = [
+    "relative w-full text-[var(--sidebar-foreground)] transition-all duration-150",
+    "hover:!bg-[rgba(208,74,2,0.07)] hover:!text-[#D04A02]",
+    "data-[active=true]:!bg-[rgba(208,74,2,0.12)] data-[active=true]:!text-[#D04A02]",
+    "data-[active=true]:!font-semibold data-[active=true]:shadow-[inset_3px_0_0_#D04A02]",
+  ].join(" ");
+
+  /* ── Section label ── */
+  const SectionLabel = ({ label }: { label: string }) =>
+    sidebarOpen ? (
+      <div className="px-3 pb-1 pt-5 first:pt-2">
+        <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-muted-foreground/40">
+          {label}
+        </span>
+      </div>
+    ) : (
+      <div className="my-2 mx-3 h-px bg-border/40" />
+    );
+
   return (
     <Sidebar
       collapsible={isMobile ? "offcanvas" : "icon"}
       data-testid="project-sidebar"
       className="bg-[var(--sidebar-background)] text-[var(--sidebar-foreground)]"
     >
-      {/* ================= HEADER ================= */}
-      <div
-        className="absolute top-[56px] right-[-12px] z-50 -translate-y-1/2"
-      >
-        <SidebarTrigger
-          className="h-6 w-6 rounded-full bg-background border shadow-md hover:bg-accent"
-        />
+      {/* ── Collapse toggle ── */}
+      <div className="absolute right-[-12px] top-[56px] z-50 -translate-y-1/2">
+        <SidebarTrigger className="h-6 w-6" />
       </div>
-      <SidebarHeader className="flex h-12 items-center px-3">
-        {/* Logo changes based on sidebar collapse state */}
-        
-      </SidebarHeader>
 
-      {/* ================= CONTENT ================= */}
-      <SidebarContent className="text-[var(--sidebar-foreground)]">
-  <SidebarGroup className="p-4 py-2">
-    <SidebarGroupContent>
-      <SidebarMenu className="text-[var(--sidebar-foreground)]">
+      
 
-        {/* Dashboard */}
-        {can("view_dashboard") && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              size="md"
-              isActive={pathname.startsWith("/dashboard-admin")}
-              onClick={() => _navigate("/dashboard-admin")}
-              className="text-[var(--sidebar-foreground)] hover:!bg-[var(--button-primary)] hover:!text-[var(--tabs-label)] data-[active=true]:!bg-[var(--button-primary)] data-[active=true]:!text-[var(--tabs-label)] transition-colors"
-            >
-              <ForwardedIconComponent
-                name="LayoutDashboard"
-                className="h-4 w-4"
-              />
-              {t("Dashboard")}
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
+      {/* ── Navigation ── */}
+      <SidebarContent className="text-[var(--sidebar-foreground)] py-2">
+        <SidebarGroup className="px-2 py-0">
+          <SidebarGroupContent>
+            <SidebarMenu>
 
-        {/* Projects */}
-        {can("view_projects_page") && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              size="md"
-              isActive={pathname.startsWith("/agents")}
-              onClick={() => _navigate("/agents")}
-              className="text-[var(--sidebar-foreground)] hover:!bg-[var(--button-primary)] hover:!text-[var(--tabs-label)] data-[active=true]:!bg-[var(--button-primary)] data-[active=true]:!text-[var(--tabs-label)] transition-colors"
-            >
-              <ForwardedIconComponent
-                name="FolderKanban"
-                className="h-4 w-4"
-              />
-              {t("Projects")}
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
+              {/* ─ Core ─ */}
+              {(can("view_dashboard") || can("view_projects_page")) && (
+                <SectionLabel label="Core" />
+              )}
 
-        {/* Review & Approval */}
-        {can("view_approval_page") && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              size="md"
-              isActive={pathname.startsWith("/approval")}
-              onClick={() => _navigate("/approval")}
-              className="text-[var(--sidebar-foreground)] hover:!bg-[var(--button-primary)] hover:!text-[var(--tabs-label)] data-[active=true]:!bg-[var(--button-primary)] data-[active=true]:!text-[var(--tabs-label)] transition-colors"
-            >
-              <ForwardedIconComponent
-                name="ClipboardCheck"
-                className="h-4 w-4"
-              />
-              {t("Review & Approval")}
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
+              {can("view_dashboard") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/dashboard-admin")} onClick={() => _navigate("/dashboard-admin")} className={navBtn}>
+                    <ForwardedIconComponent name="LayoutDashboard" className="h-4 w-4 flex-shrink-0" />
+                    {t("Dashboard")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
 
-        {/* Agent Registry */}
-        {can("view_published_agents") && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              size="md"
-              isActive={pathname.startsWith("/agent-catalogue")}
-              onClick={() => _navigate("/agent-catalogue")}
-              className="text-[var(--sidebar-foreground)] hover:!bg-[var(--button-primary)] hover:!text-[var(--tabs-label)] data-[active=true]:!bg-[var(--button-primary)] data-[active=true]:!text-[var(--tabs-label)] transition-colors"
-            >
-              <ForwardedIconComponent
-                name="Bot"
-                className="h-4 w-4"
-              />
-              {t("Agent Registry")}
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
+              {can("view_projects_page") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/agents")} onClick={() => _navigate("/agents")} className={navBtn}>
+                    <ForwardedIconComponent name="FolderKanban" className="h-4 w-4 flex-shrink-0" />
+                    {t("Projects")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
 
-        {/* Model Registry */}
-        {can("view_models") && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              size="md"
-              isActive={pathname.startsWith("/model-catalogue")}
-              onClick={() => _navigate("/model-catalogue")}
-              className="text-[var(--sidebar-foreground)] hover:!bg-[var(--button-primary)] hover:!text-[var(--tabs-label)] data-[active=true]:!bg-[var(--button-primary)] data-[active=true]:!text-[var(--tabs-label)] transition-colors"
-            >
-              <ForwardedIconComponent
-                name="Database"
-                className="h-4 w-4"
-              />
-              {t("Model Registry")}
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
+              {/* ─ Governance ─ */}
+              {(can("view_approval_page") || can("view_published_agents") || can("view_models")) && (
+                <SectionLabel label="Governance" />
+              )}
 
-        {/* Agent Runtime */}
-        {can("view_control_panel") && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              size="md"
-              isActive={pathname.startsWith("/workflows")}
-              onClick={() => _navigate("/workflows")}
-              className="text-[var(--sidebar-foreground)] hover:!bg-[var(--button-primary)] hover:!text-[var(--tabs-label)] data-[active=true]:!bg-[var(--button-primary)] data-[active=true]:!text-[var(--tabs-label)] transition-colors"
-            >
-              <ForwardedIconComponent
-                name="PlayCircle"
-                className="h-4 w-4"
-              />
-              {t("Agent Control Panel")}
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
+              {can("view_approval_page") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/approval")} onClick={() => _navigate("/approval")} className={navBtn}>
+                    <ForwardedIconComponent name="ClipboardCheck" className="h-4 w-4 flex-shrink-0" />
+                    {t("Review & Approval")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
 
-        {can("view_connector_page") && (
-          <SidebarMenuItem>
-              <SidebarMenuButton
-                size="md"
-                isActive={pathname.startsWith("/connectors")}
-                onClick={() => _navigate("/connectors")}
-                className="text-[var(--sidebar-foreground)] hover:!bg-[var(--button-primary)] hover:!text-[var(--tabs-label)] data-[active=true]:!bg-[var(--button-primary)] data-[active=true]:!text-[var(--tabs-label)] transition-colors"
-              >
-                <ForwardedIconComponent
-                  name="Cable"
-                  className="h-4 w-4"
-                />
-                Connectors
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-        )}
+              {can("view_published_agents") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/agent-catalogue")} onClick={() => _navigate("/agent-catalogue")} className={navBtn}>
+                    <ForwardedIconComponent name="Bot" className="h-4 w-4 flex-shrink-0" />
+                    {t("Agent Registry")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
 
-        {/* Packages */}
-        {can("view_packages_page") && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              size="md"
-              isActive={pathname.startsWith("/packages")}
-              onClick={() => _navigate("/packages")}
-              className="text-[var(--sidebar-foreground)] hover:!bg-[var(--button-primary)] hover:!text-[var(--tabs-label)] data-[active=true]:!bg-[var(--button-primary)] data-[active=true]:!text-[var(--tabs-label)] transition-colors"
-            >
-              <ForwardedIconComponent
-                name="Package"
-                className="h-4 w-4"
-              />
-              {t("Packages")}
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
+              {can("view_models") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/model-catalogue")} onClick={() => _navigate("/model-catalogue")} className={navBtn}>
+                    <ForwardedIconComponent name="Database" className="h-4 w-4 flex-shrink-0" />
+                    {t("Model Registry")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
 
-        {can("view_platform_configs") && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              size="md"
-              isActive={pathname.startsWith("/timeout-settings")}
-              onClick={() => _navigate("/timeout-settings")}
-              className="text-[var(--sidebar-foreground)] hover:!bg-[var(--button-primary)] hover:!text-[var(--tabs-label)] data-[active=true]:!bg-[var(--button-primary)] data-[active=true]:!text-[var(--tabs-label)] transition-colors"
-            >
-              <ForwardedIconComponent
-                name="Clock"
-                className="h-4 w-4"
-              />
-              {t("Platform Configurations")}
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
+              {/* ─ Platform ─ */}
+              {(can("view_control_panel") || can("view_connector_page") || can("view_packages_page")) && (
+                <SectionLabel label="Platform" />
+              )}
 
-        {can("view_help_support_page") && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              size="md"
-              isActive={pathname.startsWith("/help-support")}
-              onClick={() => _navigate("/help-support")}
-              className="text-[var(--sidebar-foreground)] hover:!bg-[var(--button-primary)] hover:!text-[var(--tabs-label)] data-[active=true]:!bg-[var(--button-primary)] data-[active=true]:!text-[var(--tabs-label)] transition-colors"
-            >
-              <ForwardedIconComponent
-                name="CircleHelp"
-                className="h-4 w-4"
-              />
-              {t("Help & Support")}
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
+              {can("view_control_panel") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/workflows")} onClick={() => _navigate("/workflows")} className={navBtn}>
+                    <ForwardedIconComponent name="PlayCircle" className="h-4 w-4 flex-shrink-0" />
+                    {t("Agent Control Panel")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
 
-      </SidebarMenu>
-    </SidebarGroupContent>
-  </SidebarGroup>
-</SidebarContent>
+              {can("view_connector_page") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/connectors")} onClick={() => _navigate("/connectors")} className={navBtn}>
+                    <ForwardedIconComponent name="Cable" className="h-4 w-4 flex-shrink-0" />
+                    Connectors
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
 
+              {can("view_packages_page") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/packages")} onClick={() => _navigate("/packages")} className={navBtn}>
+                    <ForwardedIconComponent name="Package" className="h-4 w-4 flex-shrink-0" />
+                    {t("Packages")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
 
+              {/* ─ System ─ */}
+              {(can("view_platform_configs") || can("view_help_support_page")) && (
+                <SectionLabel label="System" />
+              )}
 
-      {/* ================= FOOTER ================= */}
-      {/* <SidebarFooter className="border-t">
-        <div className="grid w-full items-center gap-2 p-2">
-          {can("view_settings_page") && (
-            <SidebarMenuButton
-              onClick={() => _navigate("/settings")}
-              size="md"
-              className="text-[var(--sidebar-foreground)] hover:!bg-[var(--button-primary)] hover:!text-[var(--tabs-label)] data-[active=true]:!bg-[var(--button-primary)] data-[active=true]:!text-[var(--tabs-label)] transition-colors"
-            >
-              <ForwardedIconComponent
-                name="Settings"
-                className="h-4 w-4"
-              />
-              Settings
-            </SidebarMenuButton>
-          )}
-        </div>
-      </SidebarFooter> */}
+              {can("view_platform_configs") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/timeout-settings")} onClick={() => _navigate("/timeout-settings")} className={navBtn}>
+                    <ForwardedIconComponent name="Clock" className="h-4 w-4 flex-shrink-0" />
+                    {t("Platform Configurations")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+
+              {can("view_help_support_page") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/help-support")} onClick={() => _navigate("/help-support")} className={navBtn}>
+                    <ForwardedIconComponent name="CircleHelp" className="h-4 w-4 flex-shrink-0" />
+                    {t("Help & Support")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+      </SidebarContent>
+
+      {/* ── Footer: version / brand ── */}
+      {sidebarOpen && (
+        <SidebarFooter className="border-t border-[rgba(208,74,2,0.08)] px-4 py-3">
+          <p className="text-[9px] font-medium uppercase tracking-wider text-muted-foreground/30">
+            PwC IDP © {new Date().getFullYear()}
+          </p>
+        </SidebarFooter>
+      )}
     </Sidebar>
   );
 };
