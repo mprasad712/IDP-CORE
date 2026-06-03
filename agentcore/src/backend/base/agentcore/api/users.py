@@ -852,6 +852,125 @@ async def _dept_admin_cascade_summary(
     }
 
 
+async def _super_admin_cascade_summary(
+    session: DbSession,
+    *,
+    target_user: User,
+) -> dict:
+    """Return a summary of what would be cascade-deleted when removing a super admin."""
+    org_ids = list(
+        (await session.exec(
+            select(Organization.id).where(Organization.owner_user_id == target_user.id)
+        )).all()
+    )
+    # Also include orgs where user is super_admin via membership (not necessarily owner)
+    membership_org_ids = list(
+        (await session.exec(
+            select(UserOrganizationMembership.org_id).where(
+                UserOrganizationMembership.user_id == target_user.id,
+                UserOrganizationMembership.status.in_(list(ACTIVE_ORG_STATUSES)),
+            )
+        )).all()
+    )
+    all_org_ids = list(set(org_ids + membership_org_ids))
+
+    org_names = list(
+        (await session.exec(
+            select(Organization.name).where(Organization.id.in_(all_org_ids))
+        )).all()
+    ) if all_org_ids else []
+
+    dept_ids = list(
+        (await session.exec(
+            select(Department.id).where(Department.org_id.in_(all_org_ids))
+        )).all()
+    ) if all_org_ids else []
+
+    member_ids = list(
+        (await session.exec(
+            select(distinct(UserOrganizationMembership.user_id)).where(
+                UserOrganizationMembership.org_id.in_(all_org_ids),
+                UserOrganizationMembership.status.in_(list(ACTIVE_ORG_STATUSES)),
+                UserOrganizationMembership.user_id != target_user.id,
+            )
+        )).all()
+    ) if all_org_ids else []
+
+    agent_ids = list(
+        (await session.exec(
+            select(Agent.id).where(Agent.user_id.in_(member_ids + [target_user.id]))
+        )).all()
+    ) if member_ids else list(
+        (await session.exec(
+            select(Agent.id).where(Agent.user_id == target_user.id)
+        )).all()
+    )
+
+    active_uat = int(
+        (await session.exec(
+            select(func.count()).select_from(AgentDeploymentUAT).where(
+                AgentDeploymentUAT.agent_id.in_(agent_ids),
+                AgentDeploymentUAT.is_active.is_(True),
+            )
+        )).one() or 0
+    ) if agent_ids else 0
+
+    active_prod = int(
+        (await session.exec(
+            select(func.count()).select_from(AgentDeploymentProd).where(
+                AgentDeploymentProd.agent_id.in_(agent_ids),
+                AgentDeploymentProd.is_active.is_(True),
+            )
+        )).one() or 0
+    ) if agent_ids else 0
+
+    return {
+        "org_names": org_names,
+        "dept_count": len(dept_ids),
+        "user_count": len(member_ids),
+        "agent_count": len(agent_ids),
+        "active_deployment_count": active_uat + active_prod,
+    }
+
+
+async def _cascade_delete_super_admin_orgs(
+    session: DbSession,
+    *,
+    super_admin: User,
+    actor_user_id: UUID,
+) -> None:
+    """Cascade-delete all orgs owned/administered by a super admin.
+
+    For each org: deletes every member's full assets (agents, deployments, approvals)
+    then the org-scoped rows and the org itself.
+    Used when a super admin is hard-deleted with force_cascade=True and has no replacement.
+    """
+    org_ids = list(
+        (await session.exec(
+            select(Organization.id).where(Organization.owner_user_id == super_admin.id)
+        )).all()
+    )
+    for org_id in org_ids:
+        member_ids = list(
+            (await session.exec(
+                select(distinct(UserOrganizationMembership.user_id)).where(
+                    UserOrganizationMembership.org_id == org_id,
+                    UserOrganizationMembership.user_id != super_admin.id,
+                )
+            )).all()
+        )
+        for member_id in member_ids:
+            member = await session.get(User, member_id)
+            if not member:
+                continue
+            await _hard_delete_user_dependencies(
+                session,
+                target_user=member,
+                actor_user_id=actor_user_id,
+                reassign_active_agents_to=None,  # cascade: delete everything
+            )
+
+
 async def _get_delete_user_blocker(
     session: DbSession,
     *,
@@ -860,13 +979,14 @@ async def _get_delete_user_blocker(
 ) -> str | None:
     target_role = normalize_role(target_user.role)
 
-    if target_role == "super_admin":
-        super_admin_blocker = await _get_super_admin_delete_blocker(
-            session,
-            target_user=target_user,
-        )
-        if super_admin_blocker:
-            return super_admin_blocker
+    if target_role == "super_admin" and await _target_has_managed_users(session, target_user):
+        if not force_cascade:
+            return (
+                "SUPER_ADMIN_CASCADE_REQUIRED: This super admin still has department admins "
+                "and users under them. All organisations, departments, users, agents, and "
+                "active deployments will be permanently deleted. "
+                "Pass force_cascade=true to confirm."
+            )
 
     if target_role == "department_admin" and await _target_has_managed_users(
         session,
@@ -2683,8 +2803,14 @@ async def delete_user(
                 detail=delete_blocker,
             )
 
-        # Cascade-delete all departments administered by this user before deleting them.
-        if force_cascade and normalize_role(user_db.role) == "department_admin":
+        target_role = normalize_role(user_db.role)
+        if force_cascade and target_role == "super_admin":
+            await _cascade_delete_super_admin_orgs(
+                session,
+                super_admin=user_db,
+                actor_user_id=current_user.id,
+            )
+        elif force_cascade and target_role == "department_admin":
             await _cascade_delete_dept_admin_departments(
                 session,
                 dept_admin=user_db,
@@ -2765,13 +2891,17 @@ async def get_delete_user_check(
     )
 
     # Detect cascade-required scenario and enrich the response.
-    requires_cascade = (
-        delete_blocker is not None
-        and delete_blocker.startswith("DEPT_ADMIN_CASCADE_REQUIRED")
+    requires_cascade = delete_blocker is not None and (
+        delete_blocker.startswith("DEPT_ADMIN_CASCADE_REQUIRED")
+        or delete_blocker.startswith("SUPER_ADMIN_CASCADE_REQUIRED")
     )
     cascade_summary = None
     if requires_cascade:
-        cascade_summary = await _dept_admin_cascade_summary(session, target_user=user_db)
+        target_role_check = normalize_role(user_db.role)
+        if target_role_check == "super_admin":
+            cascade_summary = await _super_admin_cascade_summary(session, target_user=user_db)
+        else:
+            cascade_summary = await _dept_admin_cascade_summary(session, target_user=user_db)
 
     return {
         "can_delete": delete_blocker is None,

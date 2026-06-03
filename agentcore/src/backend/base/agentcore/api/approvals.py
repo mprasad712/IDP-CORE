@@ -739,23 +739,24 @@ async def _designated_super_admin_org_ids(
     session: DbSession,
     current_user: CurrentActiveUser,
 ) -> set[UUID]:
+    """Return org IDs where the current user has the super_admin role.
+
+    Uses org_id as the stable routing key (same principle as dept_id for dept admins).
+    Multiple co-super-admins of the same org all see the same approval queue and any
+    one of them can action a request — no "designated first admin" restriction.
+    """
     if not _is_org_scoped_super_admin(current_user):
         return set()
-    org_ids = await _current_user_org_ids(session, current_user.id)
-    if not org_ids:
-        return set()
-    allowed: set[UUID] = set()
-    for org_id in org_ids:
-        try:
-            super_admin_id = await _resolve_super_admin_user_id(
-                session=session,
-                org_id=org_id,
-            )
-        except HTTPException:
-            continue
-        if super_admin_id == current_user.id:
-            allowed.add(org_id)
-    return allowed
+    rows = (await session.exec(
+        select(UserOrganizationMembership.org_id)
+        .join(Role, Role.id == UserOrganizationMembership.role_id)
+        .where(
+            UserOrganizationMembership.user_id == current_user.id,
+            UserOrganizationMembership.status.in_(["active", "accepted"]),
+            func.lower(Role.name) == "super_admin",
+        )
+    )).all()
+    return {r if isinstance(r, UUID) else r[0] for r in rows}
 
 
 async def _get_approval_for_action(
