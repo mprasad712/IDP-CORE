@@ -68,6 +68,10 @@ class KeyVaultSecretStore:
 
 def resolve_backend_secrets_from_key_vault() -> None:
     """Load required backend secrets from Azure Key Vault into environment."""
+    use_kv = os.getenv("USE_KEY_VAULT", "true").strip().lower()
+    if use_kv in ("false", "no", "0"):
+        return
+
     vault_url = os.getenv("AGENTCORE_KEY_VAULT_URL", "").strip()
     if not vault_url:
         return
@@ -87,16 +91,8 @@ def resolve_backend_secrets_from_key_vault() -> None:
         "AGENTCORE_SECRET_KEY": "AGENTCORE_KEY_VAULT_SECRET_KEY_SECRET_NAME",
         "AZURE_CLIENT_SECRET": "AGENTCORE_KEY_VAULT_AZURE_CLIENT_SECRET_SECRET_NAME",
         "MODEL_SERVICE_API_KEY": "AGENTCORE_KEY_VAULT_MODEL_SERVICE_API_KEY_SECRET_NAME",
-        "MCP_SERVICE_API_KEY": "AGENTCORE_KEY_VAULT_MCP_SERVICE_API_KEY_SECRET_NAME",
-        "GUARDRAILS_SERVICE_API_KEY": "AGENTCORE_KEY_VAULT_GUARDRAILS_SERVICE_API_KEY_SECRET_NAME",
-        "PINECONE_SERVICE_API_KEY": "AGENTCORE_KEY_VAULT_PINECONE_SERVICE_API_KEY_SECRET_NAME",
-        "GRAPH_RAG_SERVICE_API_KEY": "AGENTCORE_KEY_VAULT_GRAPH_RAG_SERVICE_API_KEY_SECRET_NAME",
         "GITHUB_TOKEN": "AGENTCORE_KEY_VAULT_GITHUB_TOKEN_SECRET_NAME",
         "ADO_TOKEN": "AGENTCORE_KEY_VAULT_ADO_TOKEN_SECRET_NAME",
-        "NEO4J_PASSWORD": "AGENTCORE_KEY_VAULT_NEO4J_PASSWORD_SECRET_NAME",
-        # "LTM_EMBEDDING_API_KEY": "AGENTCORE_KEY_VAULT_LTM_EMBEDDING_API_KEY_SECRET_NAME",
-        # "LTM_PINECONE_API_KEY":"AGENTCORE_KEY_VAULT_LTM_PINECONE_API_KEY_SECRET_NAME",
-        # "AGENTCORE_INTERNAL_SECRET": "AGENTCORE_KEY_VAULT_INTERNAL_SECRET_SECRET_NAME",
     }
 
     for env_name, secret_name_env in mappings.items():

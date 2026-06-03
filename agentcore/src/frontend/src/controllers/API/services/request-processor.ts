@@ -16,6 +16,11 @@ const isAuthenticationError = (error: unknown) => {
   return status === 401 || status === 403;
 };
 
+const isServerError = (error: unknown) => {
+  const status = (error as { response?: { status?: number } })?.response?.status;
+  return !!status && status >= 500;
+};
+
 export function UseRequestProcessor(): {
   query: QueryFunctionType;
   mutate: MutationFunctionType;
@@ -32,12 +37,11 @@ export function UseRequestProcessor(): {
       queryKey,
       queryFn,
       retry: (failureCount, error) => {
-        if (isAuthenticationError(error)) {
-          return false;
-        }
-        return failureCount < 5;
+        if (isAuthenticationError(error)) return false;
+        if (isServerError(error)) return false; // server errors don't benefit from retrying
+        return failureCount < 2; // reduced from 5 — network blips only
       },
-      retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
+      retryDelay: (attemptIndex) => Math.min(500 * 2 ** attemptIndex, 3000), // max 3s, down from 30s
       ...options,
     });
   }
@@ -58,12 +62,11 @@ export function UseRequestProcessor(): {
       retry:
         options.retry ??
         ((failureCount, error) => {
-          if (isAuthenticationError(error)) {
-            return false;
-          }
-          return failureCount < 3;
+          if (isAuthenticationError(error)) return false;
+          if (isServerError(error)) return false; // fail fast on 5xx — no point retrying
+          return failureCount < 1; // one retry for transient network errors only
         }),
-      retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
+      retryDelay: () => 500, // flat 500ms for the single allowed retry
     });
   }
 

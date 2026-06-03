@@ -2,28 +2,18 @@ import { ErrorBoundary } from "react-error-boundary";
 import { Outlet } from "react-router-dom";
 import AlertDisplayArea from "@/alerts/displayArea";
 import CrashErrorComponent from "@/components/common/crashErrorComponent";
-import { GenericErrorComponent } from "./components/GenericErrorComponent";
 import { useHealthCheck } from "./hooks/use-health-check";
 
 export function AppWrapperPage() {
-  const { healthCheckTimeout, fetchingHealth, refetch } = useHealthCheck();
+  useHealthCheck();
 
   return (
     <div className="flex h-full w-full flex-col">
       <ErrorBoundary
-        onReset={() => {
-          // any reset function
-        }}
+        onReset={() => {}}
         FallbackComponent={CrashErrorComponent}
       >
-        <>
-          <GenericErrorComponent
-            healthCheckTimeout={healthCheckTimeout}
-            fetching={fetchingHealth}
-            retry={refetch}
-          />
-          <Outlet />
-        </>
+        <Outlet />
       </ErrorBoundary>
       <div className="app-div">
         <AlertDisplayArea />

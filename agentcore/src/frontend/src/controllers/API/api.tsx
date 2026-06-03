@@ -41,8 +41,9 @@ function forceSessionExpiryLogout() {
     return;
   }
 
-  // Already on login page — nothing to do, avoid a reload loop
-  if (window.location.pathname.includes("login")) {
+  // Already on login/set-password page — nothing to do, avoid a reload loop
+  const noRedirectPaths = ["login", "set-password"];
+  if (noRedirectPaths.some((p) => window.location.pathname.includes(p))) {
     return;
   }
 
@@ -251,7 +252,7 @@ function ApiInterceptor() {
   }, [accessToken, setErrorData, customHeaders]);
 
   function checkErrorCount() {
-    if (window.location.pathname.includes("login")) return;
+    if (["login", "set-password"].some((p) => window.location.pathname.includes(p))) return;
 
     const currentErrorCount =
       useAuthStore.getState().authenticationErrorCount ?? 0;
@@ -270,7 +271,7 @@ function ApiInterceptor() {
   }
 
   async function tryToRenewAccessToken(error: AxiosError) {
-    if (window.location.pathname.includes("login")) return null;
+    if (["login", "set-password"].some((p) => window.location.pathname.includes(p))) return null;
     if (error.config?.headers) {
       for (const [key, value] of Object.entries(customHeaders)) {
         error.config.headers[key] = value;

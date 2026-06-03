@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 from typing import Annotated
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from agentcore.services.database.models.user.crud import get_user_by_username
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, or_
 
 import httpx
-from pydantic import BaseModel
-from jose import jwt
+from pydantic import BaseModel, EmailStr
+from jose import jwt, JWTError
 import secrets
 from agentcore.api.utils import DbSession
 from agentcore.api.schemas import Token
@@ -21,12 +23,14 @@ from agentcore.services.auth.utils import (
     create_refresh_token,
     create_user_tokens,
     get_password_hash,
+    make_set_password_token,
 )
 from agentcore.services.database.models.user.crud import get_user_by_id
 from agentcore.services.deps import get_settings_service
 from agentcore.services.database.models.user.model import User
 from agentcore.services.auth.permissions import get_permissions_for_role, normalize_role
 from agentcore.services.cache.user_cache import UserCacheService
+from agentcore.services.notifications import send_verification_email, send_admin_user_created_email
 
 
 class AzureSSORequest(BaseModel):
@@ -179,9 +183,27 @@ async def login_to_get_access_token(
         ) from exc
 
     if user:
+        # Promote to root if the authenticated user's email matches PLATFORM_ROOT_EMAIL
+        root_email = (
+            str(auth_settings.PLATFORM_ROOT_EMAIL).strip().lower()
+            if auth_settings.PLATFORM_ROOT_EMAIL
+            else ""
+        )
+        user_email = (user.email or "").strip().lower()
+        user_username = (user.username or "").strip().lower()
+        if root_email and (user_email == root_email or user_username == root_email):
+            if normalize_role(getattr(user, "role", "consumer")) != "root":
+                user.role = "root"
+                user.is_superuser = True
+                db.add(user)
+                await db.commit()
+                await db.refresh(user)
+            current_role = "root"
+        else:
+            current_role = normalize_role(getattr(user, "role", "developer"))
+
         tokens = await create_user_tokens(user_id=user.id, db=db, update_last_login=True)
         _apply_auth_cookies(response, tokens, auth_settings, user)
-        current_role = normalize_role(getattr(user, "role", "developer"))
         permissions = await get_permissions_for_role(current_role)
         from agentcore.observability.metrics_registry import record_login_attempt
         record_login_attempt("success")
@@ -380,10 +402,203 @@ async def logout(response: Response):
     response.delete_cookie("apikey_tkn_ag")
     return {"message": "Logout successful"}
 
+
+# ── Registration ──────────────────────────────────────────────────────────────
+
+class RegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+
+
+def _make_verification_token(user_id: str, secret_key: str) -> str:
+    payload = {
+        "sub": user_id,
+        "type": "email_verification",
+        "exp": datetime.now(timezone.utc) + timedelta(hours=24),
+    }
+    return jwt.encode(payload, secret_key, algorithm="HS256")
+
+
+@router.post("/register", status_code=201)
+async def register_user(body: RegisterRequest, request: Request, db: DbSession):
+    auth_settings = get_settings_service().auth_settings
+    settings = get_settings_service().settings
+
+    username = body.username.strip()
+    email = body.email.strip().lower()
+
+    if not username or not email or not body.password:
+        raise HTTPException(status_code=400, detail="Username, email and password are required.")
+
+    existing = (
+        await db.exec(
+            select(User).where(
+                User.deleted_at.is_(None),
+                or_(
+                    func.lower(User.username) == username.lower(),
+                    func.lower(User.email) == email,
+                ),
+            )
+        )
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="A user with that username or email already exists.")
+
+    user = User(
+        username=username,
+        email=email,
+        display_name=username,
+        password=get_password_hash(body.password),
+        role="consumer",
+        is_active=False,
+        is_superuser=False,
+    )
+    try:
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="A user with that username or email already exists.")
+
+    secret_key = auth_settings.SECRET_KEY.get_secret_value()
+    token = _make_verification_token(str(user.id), secret_key)
+
+    base_url = str(request.base_url).rstrip("/")
+    verification_link = f"{base_url}/api/verify-email?token={token}"
+
+    await send_verification_email(
+        settings=settings,
+        recipient_email=email,
+        recipient_name=username,
+        verification_link=verification_link,
+    )
+
+    return {"message": "Registration successful. Please check your email to verify your account."}
+
+
+@router.get("/verify-email", response_class=HTMLResponse)
+async def verify_email(token: str, db: DbSession):
+    auth_settings = get_settings_service().auth_settings
+    secret_key = auth_settings.SECRET_KEY.get_secret_value()
+
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+    try:
+        payload = jwt.decode(token, secret_key, algorithms=["HS256"])
+    except JWTError:
+        return HTMLResponse(_verification_page(success=False, frontend_url=frontend_url))
+
+    if payload.get("type") != "email_verification":
+        return HTMLResponse(_verification_page(success=False, frontend_url=frontend_url))
+
+    user_id = payload.get("sub")
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        return HTMLResponse(_verification_page(success=False, frontend_url=frontend_url))
+
+    if not user.is_active:
+        user.is_active = True
+        user.updated_at = datetime.now(timezone.utc)
+        db.add(user)
+        await db.commit()
+
+    return HTMLResponse(_verification_page(success=True, frontend_url=frontend_url))
+
+
+def _verification_page(*, success: bool, frontend_url: str) -> str:
+    if success:
+        title = "Email Verified"
+        heading = "Email verified successfully!"
+        message = "Your account is now active. You can sign in."
+        color = "#D04A02"
+    else:
+        title = "Verification Failed"
+        heading = "Verification link is invalid or expired."
+        message = "Please register again or request a new verification link."
+        color = "#c0392b"
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>{title}</title>
+  <meta http-equiv="refresh" content="4; url={frontend_url}/login">
+  <style>
+    body {{ font-family: Calibri, Arial, sans-serif; display: flex; align-items: center;
+           justify-content: center; min-height: 100vh; margin: 0; background: #f7f7f7; }}
+    .card {{ background: #fff; border-top: 4px solid {color}; border-radius: 8px;
+             padding: 40px 48px; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,.08); max-width: 420px; }}
+    h1 {{ color: {color}; font-size: 1.4rem; margin-bottom: 12px; }}
+    p {{ color: #555; line-height: 1.6; }}
+    a {{ color: {color}; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>{heading}</h1>
+    <p>{message}</p>
+    <p style="margin-top:20px;font-size:0.9rem;color:#999;">
+      Redirecting to <a href="{frontend_url}/login">login</a> in a moment…
+    </p>
+  </div>
+</body>
+</html>"""
+
+# ── Set password (admin-created users / password reset) ──────────────────────
+
+class SetPasswordRequest(BaseModel):
+    token: str
+    password: str
+
+
+@router.post("/set-password")
+async def set_password(body: SetPasswordRequest, db: DbSession):
+    auth_settings = get_settings_service().auth_settings
+    secret_key = auth_settings.SECRET_KEY.get_secret_value()
+
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+    # Decode without verification first to extract the user_id.
+    try:
+        unverified = jwt.get_unverified_claims(body.token)
+    except JWTError:
+        raise HTTPException(status_code=400, detail="Invalid or expired link. Please request a new one.")
+
+    if unverified.get("type") != "set_password":
+        raise HTTPException(status_code=400, detail="Invalid token type.")
+
+    user_id = unverified.get("sub")
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Re-verify using the key bound to the user's current password hash.
+    # If the password was already changed the signing key will no longer match.
+    signing_key = secret_key + (user.password or "")[:20]
+    try:
+        jwt.decode(body.token, signing_key, algorithms=["HS256"])
+    except JWTError:
+        raise HTTPException(
+            status_code=400,
+            detail="This link has already been used or has expired. Please contact your administrator for a new one.",
+        )
+
+    user.password = get_password_hash(body.password)
+    user.is_active = True
+    user.updated_at = datetime.now(timezone.utc)
+    db.add(user)
+    await db.commit()
+
+    return {"message": "Password set successfully. You can now sign in."}
+
+
 # @router.post("/logout")
 # async def logout(response: Response):
 #     auth_settings = get_settings_service().auth_settings
-    
+
 #     cookie_params = {
 #         "domain": auth_settings.COOKIE_DOMAIN,
 #         "path": "/", # Ensure this matches where the cookie was set

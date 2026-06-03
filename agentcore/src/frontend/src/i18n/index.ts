@@ -3,7 +3,10 @@ import LanguageDetector from "i18next-browser-languagedetector";
 import resourcesToBackend from "i18next-resources-to-backend";
 import { initReactI18next } from "react-i18next";
 
-const localeModules = import.meta.glob("./locales/*/*.json");
+// Scoped to translation.json only — avoids registering every file in the
+// locales tree as a potential Vite module, which significantly slows down
+// the dep crawl on first startup.
+const localeModules = import.meta.glob("./locales/*/translation.json");
 export const SUPPORTED_LOCALES = Object.keys(localeModules)
   .map((path) => path.match(/\.\/locales\/([^/]+)\/translation\.json$/)?.[1])
   .filter((locale): locale is string => Boolean(locale))

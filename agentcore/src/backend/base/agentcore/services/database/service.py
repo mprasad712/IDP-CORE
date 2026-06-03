@@ -87,6 +87,8 @@ class DatabaseService(Service):
                     "To avoid this warning, update the database URL."
                 )
             driver = "postgresql+psycopg"
+        elif driver == "postgresql+psycopg2":
+            driver = "postgresql+psycopg"
 
         self.database_url = f"{driver}://{url_components[1]}"
 

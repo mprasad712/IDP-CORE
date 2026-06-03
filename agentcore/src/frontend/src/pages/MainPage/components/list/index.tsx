@@ -210,188 +210,189 @@ const ListComponent = ({
     }
   };
 
+  /* ── Avatar color derived from agent id ── */
+  const PALETTE = [
+    "#D04A02","#1B5FA8","#2E7D32","#6A1B9A",
+    "#00695C","#C62828","#1565C0","#E65100",
+    "#4527A0","#004D40","#AD1457","#0277BD",
+  ];
+  const avatarColor = (() => {
+    let h = 0;
+    for (let i = 0; i < agentData.id.length; i++) h = agentData.id.charCodeAt(i) + ((h << 5) - h);
+    return PALETTE[Math.abs(h) % PALETTE.length];
+  })();
+  const avatarInitials = agentData.name.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("");
+  const envLabel = getDeploymentEnvLabel();
+
   return (
     <>
-      <Card
+      <div
         key={agentData.id}
         draggable={!effectiveDisabled}
         onDragStart={effectiveDisabled ? undefined : onDragStart}
         onClick={handleClick}
-        className={cn(
-          "flex flex-row bg-background group justify-between rounded-lg border-none px-4 py-3 shadow-none hover:bg-muted",
-          isComponent || effectiveDisabled ? "cursor-default" : "cursor-pointer",
-          effectiveDisabled && "opacity-70"
-        )}
         data-testid="list-card"
+        className={cn(
+          "group relative flex items-center gap-4 rounded-xl border border-transparent bg-background px-4 py-3",
+          "transition-all duration-150 hover:border-border hover:bg-muted/40 hover:shadow-sm",
+          isComponent || effectiveDisabled ? "cursor-default" : "cursor-pointer",
+          effectiveDisabled && "opacity-60",
+        )}
       >
-        <div
-          className={`flex min-w-0 ${
-            isComponent || effectiveDisabled ? "cursor-default" : "cursor-pointer"
-          } items-center gap-4`}
-        >
-          <div className="group/checkbox relative flex items-center">
-            <div
-              className={cn(
-                "z-20 flex w-0 items-center transition-all duration-300",
-                selected && "w-10",
-              )}
-            >
-              <Checkbox
-                checked={selected}
-                onCheckedChange={(checked) => setSelected(checked as boolean)}
-                onClick={(e) => e.stopPropagation()}
-                disabled={effectiveDisabled}
-                className={cn(
-                  "ml-2 transition-opacity focus-visible:ring-0",
-                  !selected && "opacity-0 group-hover/checkbox:opacity-100",
-                )}
-                data-testid={`checkbox-${agentData.id}`}
-              />
-            </div>
-            <div
-              className={cn(
-                "flex items-center justify-center rounded-lg p-1.5",
-                index % 2 === 0 ? "bg-muted-foreground/30" : "bg-[var(--info-foreground)]",
-              )}
-            >
-              <ForwardedIconComponent
-                name="Workagent"
-                className={cn(
-                  "h-5 w-5",
-                  index % 2 === 0 ? "text-foreground" : "text-white",
-                )}
-              />
-            </div>
-          </div>
-
-          <div className="flex min-w-0 flex-col justify-start">
-            <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
-              <div
-                className="flex min-w-0 flex-shrink truncate text-sm font-semibold"
-                data-testid={`agent-name-div`}
-              >
-                <span
-                  className="truncate"
-                  data-testid={`agent-name-${agentData.id}`}
-                >
-                  {agentData.name}
-                </span>
-              </div>
-              <div className="flex min-w-0 flex-shrink text-xs text-muted-foreground">
-                <span className="truncate">
-                  Edited {timeElapsed(agentData.updated_at)} ago
-                </span>
-              </div>
-              {showRequesterBadge && !!badgeLabel && (
-                <ShadTooltip
-                  content={
-                    workflowLocked
-                      ? "PROD request is awaiting approval."
-                      : latestDecision === "REJECTED"
-                        ? "Your PROD publish request was rejected."
-                        : latestProdStatus === "PUBLISHED"
-                          ? "Your PROD publish request is approved."
-                          : ""
-                  }
-                >
-                  <span
-                    className={cn(
-                      "rounded-full px-2 py-0.5 text-[11px] font-medium leading-4",
-                      workflowLocked && "bg-yellow-100 text-yellow-800",
-                      !workflowLocked &&
-                        latestProdStatus === "PUBLISHED" &&
-                        "bg-green-100 text-green-800",
-                      !workflowLocked &&
-                        latestDecision === "REJECTED" &&
-                        "bg-red-100 text-red-800",
-                    )}
-                  >
-                    {badgeLabel}
-                  </span>
-                </ShadTooltip>
-              )}
-            </div>
-            {(agentData.description?.trim() || (agentData.tags ?? []).length > 0) && (
-              <div className="mt-1 flex min-w-0 flex-col gap-2">
-                {agentData.description?.trim() && (
-                  <p
-                    className="max-w-[36rem] truncate text-xs leading-5 text-muted-foreground"
-                    title={agentData.description}
-                  >
-                    {agentData.description}
-                  </p>
-                )}
-                {(agentData.tags ?? []).length > 0 && (
-                  <div
-                    className="relative flex min-w-0 flex-wrap gap-1.5 group/tags"
-                    title={agentData.tags?.join(", ") || undefined}
-                  >
-                    {(agentData.tags ?? []).slice(0, 3).map((tag) => (
-                      <span
-                        key={tag}
-                        className="inline-flex max-w-[120px] items-center rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
-                        title={tag}
-                      >
-                        <span className="truncate">{tag}</span>
-                      </span>
-                    ))}
-                    {(agentData.tags ?? []).length > 3 && (
-                      <span
-                        className="inline-flex items-center rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
-                        title={agentData.tags?.join(", ") || undefined}
-                      >
-                        +{(agentData.tags ?? []).length - 3}
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+        {/* ── Checkbox (slide in on hover / when selected) ── */}
+        <div className="group/checkbox relative flex flex-shrink-0 items-center">
+          <div className={cn("z-20 w-0 overflow-hidden transition-all duration-200", selected && "w-9")}>
+            <Checkbox
+              checked={selected}
+              onCheckedChange={(v) => setSelected(v as boolean)}
+              onClick={(e) => e.stopPropagation()}
+              disabled={effectiveDisabled}
+              className={cn("ml-1.5 transition-opacity focus-visible:ring-0", !selected && "opacity-0 group-hover/checkbox:opacity-100")}
+              data-testid={`checkbox-${agentData.id}`}
+            />
           </div>
         </div>
 
-        <div className="ml-5 flex items-center gap-3">
-          {createdByLabel && (
-            <div className="hidden min-w-0 items-center gap-2 text-xs text-muted-foreground sm:flex">
-              <span className="whitespace-nowrap">Created by</span>
-              <div className="flex min-w-0 items-center gap-2">
+        {/* ── Avatar ── */}
+        <div className="relative flex-shrink-0">
+          <div
+            className="flex h-10 w-10 items-center justify-center rounded-xl text-[13px] font-bold text-white shadow-sm"
+            style={{ background: `linear-gradient(135deg, ${avatarColor} 0%, ${avatarColor}CC 100%)` }}
+          >
+            {avatarInitials}
+          </div>
+          {/* online-style dot for deployed agents */}
+          {envLabel && (
+            <span
+              className={cn(
+                "absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-background",
+                envLabel === "PROD" ? "bg-emerald-500" : "bg-amber-400",
+              )}
+            />
+          )}
+        </div>
+
+        {/* ── Main content ── */}
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+            <span
+              className="truncate text-sm font-semibold text-foreground"
+              data-testid={`agent-name-${agentData.id}`}
+            >
+              {agentData.name}
+            </span>
+
+            {/* Status badge */}
+            {showRequesterBadge && !!badgeLabel && (
+              <ShadTooltip
+                content={
+                  workflowLocked ? "PROD request is awaiting approval."
+                  : latestDecision === "REJECTED" ? "Your PROD publish request was rejected."
+                  : latestProdStatus === "PUBLISHED" ? "Your PROD publish request is approved."
+                  : ""
+                }
+              >
                 <span
-                  className="max-w-[96px] truncate font-medium text-foreground"
-                  title={creatorEmail || undefined}
+                  className={cn(
+                    "rounded-full px-2 py-0.5 text-[10px] font-semibold leading-4",
+                    workflowLocked && "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+                    !workflowLocked && latestProdStatus === "PUBLISHED" && "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+                    !workflowLocked && latestDecision === "REJECTED" && "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+                  )}
                 >
-                  {createdByLabel}
+                  {badgeLabel}
                 </span>
-              </div>
+              </ShadTooltip>
+            )}
+
+            {/* Env badge (always visible when deployed) */}
+            {envLabel && !showRequesterBadge && (
+              <span
+                className={cn(
+                  "rounded-full px-2 py-0.5 text-[10px] font-semibold",
+                  envLabel === "PROD"
+                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                    : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+                )}
+              >
+                {envLabel}
+              </span>
+            )}
+
+            {/* Type pill */}
+            <span
+              className="rounded-full px-2 py-0.5 text-[10px] font-medium"
+              style={{
+                background: `${avatarColor}12`,
+                color: avatarColor,
+              }}
+            >
+              {isComponent ? "Component" : "Agent"}
+            </span>
+          </div>
+
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5">
+            {agentData.description?.trim() && (
+              <p className="max-w-[32rem] truncate text-xs text-muted-foreground" title={agentData.description}>
+                {agentData.description}
+              </p>
+            )}
+            <span className="whitespace-nowrap text-xs text-muted-foreground/60">
+              {timeElapsed(agentData.updated_at)} ago
+            </span>
+          </div>
+
+          {(agentData.tags ?? []).length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {(agentData.tags ?? []).slice(0, 4).map((tag) => (
+                <span
+                  key={tag}
+                  className="rounded-md border border-border/50 bg-muted/50 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                >
+                  {tag}
+                </span>
+              ))}
+              {(agentData.tags ?? []).length > 4 && (
+                <span className="rounded-md border border-border/50 bg-muted/50 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  +{(agentData.tags ?? []).length - 4}
+                </span>
+              )}
             </div>
           )}
+        </div>
+
+        {/* ── Right side meta + actions ── */}
+        <div className="ml-auto flex flex-shrink-0 items-center gap-4">
+          {createdByLabel && (
+            <div className="hidden items-center gap-2 sm:flex">
+              {/* Creator avatar initials */}
+              <div className="flex h-6 w-6 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-muted-foreground">
+                {createdByLabel.slice(0, 2).toUpperCase()}
+              </div>
+              <span className="max-w-[80px] truncate text-xs text-muted-foreground" title={creatorEmail || undefined}>
+                {createdByLabel}
+              </span>
+            </div>
+          )}
+
           <DropdownMenu>
             <DropdownMenuTrigger asChild disabled={effectiveDisabled}>
               <Button
                 variant="ghost"
                 size="iconMd"
                 data-testid="home-dropdown-menu"
-                className="group"
+                className="opacity-0 transition-opacity group-hover:opacity-100"
                 disabled={effectiveDisabled}
               >
-                <ForwardedIconComponent
-                  name="Ellipsis"
-                  aria-hidden="true"
-                  className="h-5 w-5 text-muted-foreground group-hover:text-foreground"
-                />
+                <ForwardedIconComponent name="Ellipsis" aria-hidden="true" className="h-4 w-4 text-muted-foreground" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent
-              className="w-[185px]"
-              sideOffset={5}
-              side="bottom"
-            >
+            <DropdownMenuContent className="w-[185px]" sideOffset={5} side="bottom">
               <DropdownComponent
                 agentData={agentData}
                 setOpenDelete={setOpenDelete}
                 handleExport={handleExport}
-                handleEdit={() => {
-                  setOpenSettings(true);
-                }}
+                handleEdit={() => setOpenSettings(true)}
                 canModifyAgent={canModifyAgent}
                 canDuplicateAgent={canDuplicateAgent}
                 canCopyAgent={canCopyAgent}
@@ -402,7 +403,13 @@ const ListComponent = ({
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-      </Card>
+
+        {/* left accent bar (visible only on hover) */}
+        <div
+          className="pointer-events-none absolute inset-y-0 left-0 w-[3px] rounded-l-xl opacity-0 transition-opacity duration-150 group-hover:opacity-100"
+          style={{ background: avatarColor }}
+        />
+      </div>
       {openDelete && (
         <DeleteConfirmationModal
           open={openDelete}

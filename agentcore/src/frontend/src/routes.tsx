@@ -1,4 +1,4 @@
-import { lazy } from "react";
+import { lazy, Suspense } from "react";
 import {
   createBrowserRouter,
   createRoutesFromElements,
@@ -17,44 +17,47 @@ import { BASENAME } from "./customization/config-constants";
 import {
   ENABLE_CUSTOM_PARAM,
   ENABLE_FILE_MANAGEMENT,
-  ENABLE_KNOWLEDGE_BASES,
 } from "./customization/feature-flags";
-import { CustomRoutesStore } from "./customization/utils/custom-routes-store";
 import { CustomRoutesStorePages } from "./customization/utils/custom-routes-store-pages";
 import { AppAuthenticatedPage } from "./pages/AppAuthenticatedPage";
 import { AppInitPage } from "./pages/AppInitPage";
 import { AppWrapperPage } from "./pages/AppWrapperPage";
-import AgentBuilderPage from "./pages/AgentBuilderPage";
-import LoginPage from "./pages/LoginPage";
-import FilesPage from "./pages/MainPage/pages/filesPage";
-import HomePage from "./pages/MainPage/pages/homePage";
-import KnowledgePage from "./pages/MainPage/pages/knowledgePage";
-
-import CollectionPage from "./pages/MainPage/pages/main-page";
-import HelpSupportPage from "./pages/SettingsPage/pages/HelpSupportPage";
-import MCPServersPage from "./pages/McpServersPage";
-import PackagesPage from "./pages/SettingsPage/pages/PackagesPage";
-import ReleaseManagementPage from "./pages/ReleaseManagementPage";
-import ViewPage from "./pages/ViewPage";
-import ApprovalPage from "./pages/ApprovalPage";
-import ApprovalPreviewPage from "./pages/ApprovalPreviewPage";
-import ModelCatalogue from "./pages/ModelCatalogue";
-import AgentOrchestrator from "./pages/OrchestratorChat";
-import SharePointCallback from "./pages/SharePointCallback";
-import AgentCatalogueView from "./pages/AgentCatalogue";
-import AgentCataloguePreviewPage from "./pages/AgentCataloguePreview";
-import { Workflow } from "lucide-react";
-import WorkflowsView from "./pages/WorkflowPage";
-import Dashboard from "./pages/DashboardPage";
-import DashboardAdmin from "./pages/DashboardPage";
-import TimeoutSettings from "./pages/TimeoutSettings";
-import ObservabilityDashboard from "./pages/ObservabilityPage";
-import EvaluationPage from "./pages/EvaluationPage";
-import GuardrailsView from "./pages/GuardrailsCatalogue";
-import VectorDBView from "./pages/VectorDbPage";
-import ConnectorsCatalogueView from "./pages/ConnectorsCatalogue";
-import HITLApprovalsPage from "./pages/HITLApprovalsPage";
+import { LoadingPage } from "./pages/LoadingPage";
 import useAuthStore from "./stores/authStore";
+
+// ─── Lazy-loaded page components ─────────────────────────────────────────────
+// Each import is deferred until the route is first visited, so the initial
+// bundle only contains the app shell + auth guards — not every page at once.
+
+const LoginPage              = lazy(() => import("./pages/LoginPage"));
+const CollectionPage         = lazy(() => import("./pages/MainPage/pages/main-page"));
+const HomePage               = lazy(() => import("./pages/MainPage/pages/homePage"));
+const FilesPage              = lazy(() => import("./pages/MainPage/pages/filesPage"));
+const AgentBuilderPage       = lazy(() => import("./pages/AgentBuilderPage"));
+const ViewPage               = lazy(() => import("./pages/ViewPage"));
+const DashboardAdmin         = lazy(() => import("./pages/DashboardPage"));
+const ModelCatalogue         = lazy(() => import("./pages/ModelCatalogue"));
+const AgentCatalogueView     = lazy(() => import("./pages/AgentCatalogue"));
+const WorkflowsView          = lazy(() => import("./pages/WorkflowPage"));
+const ConnectorsCatalogueView = lazy(() => import("./pages/ConnectorsCatalogue"));
+const ApprovalPage           = lazy(() => import("./pages/ApprovalPage"));
+const ApprovalPreviewPage    = lazy(() => import("./pages/ApprovalPreviewPage"));
+const TimeoutSettings        = lazy(() => import("./pages/TimeoutSettings"));
+const HelpSupportPage        = lazy(() => import("./pages/SettingsPage/pages/HelpSupportPage"));
+const PackagesPage           = lazy(() => import("./pages/SettingsPage/pages/PackagesPage"));
+const AgentOrchestrator      = lazy(() => import("./pages/OrchestratorChat"));
+const SharePointCallback     = lazy(() => import("./pages/SharePointCallback"));
+const AdminPage              = lazy(() => import("./pages/AdminPage"));
+const AccessControlPage      = lazy(() => import("./pages/AccessControlPage"));
+const CostLimitsPage         = lazy(() => import("./pages/CostLimitsPage"));
+const LoginAdminPage         = lazy(() => import("./pages/AdminPage/LoginPage"));
+const DeleteAccountPage      = lazy(() => import("./pages/DeleteAccountPage"));
+const PlaygroundPage         = lazy(() => import("./pages/Playground"));
+const SetPasswordPage        = lazy(() => import("./pages/SetPasswordPage"));
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PageLoader = () => <LoadingPage />;
 
 function DefaultLandingRedirect() {
   const permissions = useAuthStore((state) => state.permissions);
@@ -63,58 +66,53 @@ function DefaultLandingRedirect() {
   if (String(role ?? "").toLowerCase() === "root") {
     return <CustomNavigate replace to="approval" />;
   }
-
   if (permissions.includes("view_dashboard")) {
     return <CustomNavigate replace to="dashboard-admin" />;
   }
-
   if (permissions.includes("view_projects_page")) {
     return <CustomNavigate replace to="agents" />;
   }
-
   if (permissions.includes("view_approval_page")) {
     return <CustomNavigate replace to="approval" />;
   }
-
   if (permissions.includes("view_published_agents")) {
     return <CustomNavigate replace to="agent-catalogue" />;
   }
-
   if (permissions.includes("view_models")) {
     return <CustomNavigate replace to="model-catalogue" />;
   }
-
   if (permissions.includes("view_control_panel")) {
     return <CustomNavigate replace to="workflows" />;
   }
-
-  if (permissions.includes("view_hitl_approvals_page")) {
-    return <CustomNavigate replace to="hitl-approvals" />;
-  }
-
   return <CustomNavigate replace to="dashboard-admin" />;
 }
 
-const AdminPage = lazy(() => import("./pages/AdminPage"));
-const AccessControlPage = lazy(() => import("./pages/AccessControlPage"));
-const CostLimitsPage = lazy(() => import("./pages/CostLimitsPage"));
-const LoginAdminPage = lazy(() => import("./pages/AdminPage/LoginPage"));
-const DeleteAccountPage = lazy(() => import("./pages/DeleteAccountPage"));
-
-const PlaygroundPage = lazy(() => import("./pages/Playground"));
-
-
 const router = createBrowserRouter(
   createRoutesFromElements([
-    <Route path="/sharepoint-callback" element={<SharePointCallback />} />,
+    <Route
+      path="/sharepoint-callback"
+      element={
+        <Suspense fallback={<PageLoader />}>
+          <SharePointCallback />
+        </Suspense>
+      }
+    />,
+    <Route
+      path="/set-password"
+      element={
+        <Suspense fallback={<PageLoader />}>
+          <SetPasswordPage />
+        </Suspense>
+      }
+    />,
     <Route path="/playground/:id/">
       <Route
         path=""
         element={
           <ContextWrapper key={1}>
-
+            <Suspense fallback={<PageLoader />}>
               <PlaygroundPage />
-
+            </Suspense>
           </ContextWrapper>
         }
       />
@@ -138,14 +136,21 @@ const router = createBrowserRouter(
             }
           >
             <Route path="" element={<AppAuthenticatedPage />}>
-                <Route path="" element={<CustomDashboardWrapperPage />}>
-                <Route path="" element={<CollectionPage />}>
+              <Route path="" element={<CustomDashboardWrapperPage />}>
+                <Route
+                  path=""
+                  element={
+                    <Suspense fallback={<PageLoader />}>
+                      <CollectionPage />
+                    </Suspense>
+                  }
+                >
                   <Route index element={<DefaultLandingRedirect />} />
                   <Route
                     path="help-support"
                     element={
                       <ProtectedPermissionRoute permission="view_help_support_page">
-                        <HelpSupportPage />
+                        <Suspense fallback={<PageLoader />}><HelpSupportPage /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />
@@ -153,15 +158,7 @@ const router = createBrowserRouter(
                     path="approval"
                     element={
                       <ProtectedPermissionRoute permission="view_approval_page">
-                        <ApprovalPage />
-                      </ProtectedPermissionRoute>
-                    }
-                  />
-                  <Route
-                    path="hitl-approvals"
-                    element={
-                      <ProtectedPermissionRoute permission="view_hitl_approvals_page">
-                        <HITLApprovalsPage />
+                        <Suspense fallback={<PageLoader />}><ApprovalPage /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />
@@ -169,7 +166,7 @@ const router = createBrowserRouter(
                     path="model-catalogue"
                     element={
                       <ProtectedPermissionRoute permission="view_models">
-                        <ModelCatalogue />
+                        <Suspense fallback={<PageLoader />}><ModelCatalogue /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />
@@ -177,23 +174,7 @@ const router = createBrowserRouter(
                     path="orchestrator-chat"
                     element={
                       <ProtectedPermissionRoute permission="view_orchastration_page">
-                        <AgentOrchestrator />
-                      </ProtectedPermissionRoute>
-                    }
-                  />
-                  <Route
-                    path="guardrails"
-                    element={
-                      <ProtectedPermissionRoute permission="view_guardrail_page">
-                        <GuardrailsView />
-                      </ProtectedPermissionRoute>
-                    }
-                  />
-                  <Route
-                    path="vector-db"
-                    element={
-                      <ProtectedPermissionRoute permission="view_vectordb_page">
-                        <VectorDBView />
+                        <Suspense fallback={<PageLoader />}><AgentOrchestrator /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />
@@ -201,15 +182,7 @@ const router = createBrowserRouter(
                     path="connectors"
                     element={
                       <ProtectedPermissionRoute permission="view_connector_page">
-                        <ConnectorsCatalogueView />
-                      </ProtectedPermissionRoute>
-                    }
-                  />
-                  <Route
-                    path="mcp-servers"
-                    element={
-                      <ProtectedPermissionRoute permission="view_mcp_page">
-                        <MCPServersPage />
+                        <Suspense fallback={<PageLoader />}><ConnectorsCatalogueView /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />
@@ -217,7 +190,7 @@ const router = createBrowserRouter(
                     path="dashboard-admin"
                     element={
                       <ProtectedPermissionRoute permission="view_dashboard">
-                        <DashboardAdmin />
+                        <Suspense fallback={<PageLoader />}><DashboardAdmin /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />
@@ -225,7 +198,7 @@ const router = createBrowserRouter(
                     path="timeout-settings"
                     element={
                       <ProtectedPermissionRoute permission="view_platform_configs">
-                        <TimeoutSettings />
+                        <Suspense fallback={<PageLoader />}><TimeoutSettings /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />
@@ -233,84 +206,35 @@ const router = createBrowserRouter(
                     path="packages"
                     element={
                       <ProtectedPermissionRoute permission="view_packages_page">
-                        <PackagesPage />
+                        <Suspense fallback={<PageLoader />}><PackagesPage /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />
-                  <Route
-                    path="release-management"
-                    element={
-                      <ProtectedPermissionRoute permission="view_release_management_page">
-                        <ReleaseManagementPage />
-                      </ProtectedPermissionRoute>
-                    }
-                  />
-                  
                   <Route
                     path="agent-catalogue"
                     element={
                       <ProtectedPermissionRoute permission="view_published_agents">
-                        <AgentCatalogueView />
+                        <Suspense fallback={<PageLoader />}><AgentCatalogueView /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />
-                  <Route
-                    path="agent-catalogue/:registryId/view"
-                    element={
-                      <ProtectedPermissionRoute permission="view_published_agents">
-                        <AgentCataloguePreviewPage />
-                      </ProtectedPermissionRoute>
-                    }
-                  />
-                  <Route
-                    path="observability-dashboard"
-                    element={
-                      <ProtectedPermissionRoute permission="view_observability_page">
-                        <ObservabilityDashboard />
-                      </ProtectedPermissionRoute>
-                    }
-                  />
-
                   <Route
                     path="workflows"
                     element={
                       <ProtectedPermissionRoute permission="view_control_panel">
-                        <WorkflowsView />
-                      </ProtectedPermissionRoute>
-                    }
-                  />
-                  <Route
-                    path="evaluation"
-                    element={
-                      <ProtectedPermissionRoute permission="view_evaluation_page">
-                        <EvaluationPage />
+                        <Suspense fallback={<PageLoader />}><WorkflowsView /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />
                   {ENABLE_FILE_MANAGEMENT && (
                     <Route path="assets">
-                      <Route
-                        index
-                        element={<CustomNavigate replace to="files" />}
-                      />
+                      <Route index element={<CustomNavigate replace to="files" />} />
                       <Route
                         path="files"
                         element={
-                          
-                            <FilesPage />
-                          
+                          <Suspense fallback={<PageLoader />}><FilesPage /></Suspense>
                         }
                       />
-                      
-                        <Route
-                          path="knowledge-bases"
-                          element={
-                            <ProtectedPermissionRoute permission="view_knowledge_base">
-                              <KnowledgePage />
-                            </ProtectedPermissionRoute>
-                          }
-                        />
-                      
                     </Route>
                   )}
                   <Route
@@ -321,49 +245,74 @@ const router = createBrowserRouter(
                       </ProtectedPermissionRoute>
                     }
                   >
-                    <Route index element={<CollectionPage />} />
+                    <Route
+                      index
+                      element={
+                        <Suspense fallback={<PageLoader />}><CollectionPage /></Suspense>
+                      }
+                    />
                     <Route
                       path="folder/:folderId"
-                      element={<HomePage type="agents" />}
+                      element={
+                        <Suspense fallback={<PageLoader />}><HomePage type="agents" /></Suspense>
+                      }
                     />
                   </Route>
                   <Route
                     path="components/"
                     element={
                       <ProtectedPermissionRoute permission="view_projects_page">
-                        <HomePage key="components" type="components" />
+                        <Suspense fallback={<PageLoader />}>
+                          <HomePage key="components" type="components" />
+                        </Suspense>
                       </ProtectedPermissionRoute>
                     }
                   >
                     <Route
                       path="folder/:folderId"
-                      element={<HomePage key="components" type="components" />}
+                      element={
+                        <Suspense fallback={<PageLoader />}>
+                          <HomePage key="components" type="components" />
+                        </Suspense>
+                      }
                     />
                   </Route>
                   <Route
                     path="all/"
                     element={
                       <ProtectedPermissionRoute permission="view_projects_page">
-                        <HomePage key="agents" type="agents" />
+                        <Suspense fallback={<PageLoader />}>
+                          <HomePage key="agents" type="agents" />
+                        </Suspense>
                       </ProtectedPermissionRoute>
                     }
                   >
                     <Route
                       path="folder/:folderId"
-                      element={<HomePage key="agents" type="agents" />}
+                      element={
+                        <Suspense fallback={<PageLoader />}>
+                          <HomePage key="agents" type="agents" />
+                        </Suspense>
+                      }
                     />
                   </Route>
                   <Route
                     path="mcp/"
                     element={
                       <ProtectedPermissionRoute permission="view_projects_page">
-                        <HomePage key="mcp" type="mcp" />
+                        <Suspense fallback={<PageLoader />}>
+                          <HomePage key="mcp" type="mcp" />
+                        </Suspense>
                       </ProtectedPermissionRoute>
                     }
                   >
                     <Route
                       path="folder/:folderId"
-                      element={<HomePage key="mcp" type="mcp" />}
+                      element={
+                        <Suspense fallback={<PageLoader />}>
+                          <HomePage key="mcp" type="mcp" />
+                        </Suspense>
+                      }
                     />
                   </Route>
                 </Route>
@@ -373,35 +322,38 @@ const router = createBrowserRouter(
                 />
                 {CustomRoutesStorePages()}
                 <Route path="account">
-                  <Route path="delete" element={<DeleteAccountPage />}></Route>
+                  <Route path="delete" element={<Suspense fallback={<PageLoader />}><DeleteAccountPage /></Suspense>} />
                 </Route>
                 <Route
                   path="admin"
                   element={
                     <ProtectedAdminRoute>
-                      <AdminPage />
+                      <Suspense fallback={<PageLoader />}><AdminPage /></Suspense>
                     </ProtectedAdminRoute>
                   }
                 />
                 <Route
                   path="cost-limits"
-                  element={<CostLimitsPage />}
+                  element={<Suspense fallback={<PageLoader />}><CostLimitsPage /></Suspense>}
                 />
                 <Route
                   path="access-control"
                   element={
                     <ProtectedAccessControlRoute>
-                      <AccessControlPage />
+                      <Suspense fallback={<PageLoader />}><AccessControlPage /></Suspense>
                     </ProtectedAccessControlRoute>
                   }
                 />
               </Route>
-              <Route path="approval/:agentId/review" element={<CustomDashboardWrapperPage />}>
+              <Route
+                path="approval/:agentId/review"
+                element={<CustomDashboardWrapperPage />}
+              >
                 <Route
                   path=""
                   element={
                     <ProtectedPermissionRoute permission="view_approval_page">
-                      <ApprovalPreviewPage />
+                      <Suspense fallback={<PageLoader />}><ApprovalPreviewPage /></Suspense>
                     </ProtectedPermissionRoute>
                   }
                 />
@@ -410,22 +362,17 @@ const router = createBrowserRouter(
                 <Route path="" element={<CustomDashboardWrapperPage />}>
                   <Route
                     path="folder/:folderId/"
-                    element={
-                     
-                        <AgentBuilderPage />
-                     
-                    }
+                    element={<Suspense fallback={<PageLoader />}><AgentBuilderPage /></Suspense>}
                   />
                   <Route
                     path=""
-                    element={
-                     
-                        <AgentBuilderPage />
-                 
-                    }
+                    element={<Suspense fallback={<PageLoader />}><AgentBuilderPage /></Suspense>}
                   />
                 </Route>
-                <Route path="view" element={<ViewPage />} />
+                <Route
+                  path="view"
+                  element={<Suspense fallback={<PageLoader />}><ViewPage /></Suspense>}
+                />
               </Route>
             </Route>
           </Route>
@@ -433,17 +380,15 @@ const router = createBrowserRouter(
             path="login"
             element={
               <ProtectedLoginRoute>
-                <LoginPage />
+                <Suspense fallback={<PageLoader />}><LoginPage /></Suspense>
               </ProtectedLoginRoute>
             }
           />
-
-          
           <Route
             path="login/admin"
             element={
               <ProtectedLoginRoute>
-                <LoginAdminPage />
+                <Suspense fallback={<PageLoader />}><LoginAdminPage /></Suspense>
               </ProtectedLoginRoute>
             }
           />

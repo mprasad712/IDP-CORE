@@ -54,6 +54,7 @@ from agentcore.services.database.registry_service import sync_agent_registry
 from agentcore.services.auth.utils import generate_agent_api_key
 from agentcore.services.auth.permissions import get_permissions_for_role
 from agentcore.services.approval_notifications import upsert_approval_notification
+from agentcore.services.auth.dept_admin_utils import get_managed_dept_ids_for_user, get_primary_dept_admin_id, get_dept_admin_ids
 from agentcore.services.database.models.agent_bundle.model import DeploymentEnvEnum as BundleDeploymentEnvEnum
 
 router = APIRouter(prefix="/control-panel", tags=["Control Panel"])
@@ -265,12 +266,7 @@ async def _department_admin_dept_ids(
     role = str(getattr(current_user, "role", "")).lower()
     if role != "department_admin":
         return set()
-    rows = (
-        await session.exec(
-            select(Department.id).where(Department.admin_user_id == current_user.id)
-        )
-    ).all()
-    return {r if isinstance(r, UUID) else r[0] for r in rows}
+    return await get_managed_dept_ids_for_user(session, current_user.id)
 
 
 async def _require_control_panel_permission(
@@ -1216,7 +1212,7 @@ async def promote_uat_to_prod(
                 org_id=uat_dep.org_id,
                 dept_id=department_id,
                 requested_by=current_user.id,
-                request_to=department.admin_user_id,
+                request_to=await get_primary_dept_admin_id(session, department.id) or department.admin_user_id,
                 requested_at=datetime.now(timezone.utc),
                 visibility_requested=visibility_enum,
                 publish_description=body.publish_description,
@@ -1225,19 +1221,23 @@ async def promote_uat_to_prod(
             )
             session.add(approval)
             await session.flush()
-            await upsert_approval_notification(
-                session,
-                recipient_user_id=department.admin_user_id,
-                entity_type="agent_publish_request",
-                entity_id=str(approval.id),
-                title=f'Agent "{new_record.agent_name}" awaiting your approval.',
-                link="/approval",
-            )
+            # Notify all co-admins of the dept.
+            notified: set = set()
+            for co_admin_id in await get_dept_admin_ids(session, department.id):
+                await upsert_approval_notification(
+                    session,
+                    recipient_user_id=co_admin_id,
+                    entity_type="agent_publish_request",
+                    entity_id=str(approval.id),
+                    title=f'Agent "{new_record.agent_name}" awaiting your approval.',
+                    link="/approval",
+                )
+                notified.add(co_admin_id)
             super_admin_id = await _resolve_super_admin_user_id(
                 session=session,
                 org_id=uat_dep.org_id,
             )
-            if super_admin_id and super_admin_id != department.admin_user_id:
+            if super_admin_id and super_admin_id not in notified:
                 await upsert_approval_notification(
                     session,
                     recipient_user_id=super_admin_id,

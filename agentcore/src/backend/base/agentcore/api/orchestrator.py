@@ -26,6 +26,7 @@ from fastapi.responses import StreamingResponse
 
 from agentcore.api.utils import CurrentActiveUser, DbSession
 from agentcore.services.auth.decorators import PermissionChecker
+from agentcore.services.auth.dept_admin_utils import get_managed_dept_ids_for_user
 from agentcore.services.database.models.agent.model import Agent
 from agentcore.events.event_manager import create_default_event_manager
 from agentcore.services.database.models.agent_deployment_prod.model import (
@@ -120,12 +121,7 @@ async def _department_admin_dept_ids(
     role = str(getattr(current_user, "role", "")).lower()
     if role != "department_admin":
         return set()
-    rows = (
-        await session.exec(
-            select(Department.id).where(Department.admin_user_id == current_user.id)
-        )
-    ).all()
-    return {r if isinstance(r, UUID) else r[0] for r in rows}
+    return await get_managed_dept_ids_for_user(session, current_user.id)
 
 class OrchAgentSummary(BaseModel):
     deploy_id: UUID

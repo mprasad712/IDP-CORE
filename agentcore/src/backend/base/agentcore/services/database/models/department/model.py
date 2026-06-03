@@ -18,7 +18,7 @@ class Department(SQLModel, table=True):  # type: ignore[call-arg]
     description: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     code: str | None = Field(default=None, sa_column=Column(String(50), nullable=True))
     parent_dept_id: UUID | None = Field(default=None, foreign_key="department.id", nullable=True)
-    admin_user_id: UUID = Field(foreign_key="user.id", nullable=False, index=True)
+    admin_user_id: UUID | None = Field(default=None, foreign_key="user.id", nullable=True, index=True)
     status: DeptStatusEnum = Field(
         default=DeptStatusEnum.ACTIVE,
         sa_column=Column(

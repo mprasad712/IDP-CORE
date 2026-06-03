@@ -355,6 +355,21 @@ async def create_user_longterm_token(db: AsyncSession) -> tuple[UUID, dict]:
         "refresh_token": None,
         "token_type": "bearer",
     }
+def make_set_password_token(user_id: str, secret_key: str, password_hash: str, hours: int = 72) -> str:
+    """Token is tied to the current password hash so it auto-invalidates after first use."""
+    from datetime import timedelta
+    # Signing key mixes the server secret with the current password hash.
+    # After the user sets a new password the hash changes, making this token
+    # impossible to verify — one-time use without any DB storage.
+    signing_key = secret_key + password_hash[:20]
+    payload = {
+        "sub": user_id,
+        "type": "set_password",
+        "exp": datetime.now(timezone.utc) + timedelta(hours=hours),
+    }
+    return jwt.encode(payload, signing_key, algorithm="HS256")
+
+
 def create_user_api_key(user_id: UUID) -> dict:
     access_token = create_token(
         data={"sub": str(user_id), "type": "api_key"},

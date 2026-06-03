@@ -22,6 +22,7 @@ const badgeVariants = cva(
         successStatic:
           "bg-accent-emerald text-accent-emerald-foreground border-0",
         errorStatic: "bg-error-background text-error-foreground border-0",
+        orange: "bg-[rgba(208,74,2,0.10)] text-[#D04A02] border border-[rgba(208,74,2,0.20)] font-semibold",
       },
       size: {
         sm: "h-4 text-xs",

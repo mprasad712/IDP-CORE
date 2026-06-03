@@ -792,12 +792,15 @@ async def _persist_hitl_request(
                                 select(Department).where(Department.id == dept_id_val)
                             )
                         ).first()
-                        if dept_row and dept_row.admin_user_id:
-                            assigned_to = dept_row.admin_user_id
-                            logger.info(
-                                f"[HITL] Routed deployed-run HIL to dept admin "
-                                f"{assigned_to} (dept={dept_id_val})"
-                            )
+                        if dept_row:
+                            from agentcore.services.auth.dept_admin_utils import get_primary_dept_admin_id
+                            _primary = await get_primary_dept_admin_id(_dept_db, dept_row.id)
+                            if _primary:
+                                assigned_to = _primary
+                                logger.info(
+                                    f"[HITL] Routed deployed-run HIL to dept admin "
+                                    f"{assigned_to} (dept={dept_id_val})"
+                                )
                 except Exception as _dept_err:
                     logger.warning(f"[HITL] Could not resolve dept admin: {_dept_err}")
         else:
