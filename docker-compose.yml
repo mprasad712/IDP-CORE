@@ -1,0 +1,92 @@
+services:
+  backend:
+    build:
+      context: ./agentcore/src/backend
+      dockerfile: Dockerfile
+    container_name: agentcore-backend
+    ports:
+      - "7860:7860"
+    environment:
+      BACKEND_PORT: "7860"
+      DATABASE_URL: "${DATABASE_URL}"
+      REDIS_HOST: "${REDIS_HOST}"
+      REDIS_PORT: "${REDIS_PORT:-6380}"
+      REDIS_SSL: "${REDIS_SSL:-true}"
+      REDIS_CACHE_EXPIRE: "${REDIS_CACHE_EXPIRE:-3600}"
+      MODEL_SERVICE_URL: "http://model-service:8001"
+      MCP_SERVICE_URL: "http://mcp-service:8002"
+      PINECONE_SERVICE_URL: "http://pinecone-service:8003"
+      GRAPH_RAG_SERVICE_URL: "http://graph-rag-service:8004"
+      GUARDRAILS_SERVICE_URL: "http://guardrails-service:8005"
+      RAG_SERVICE_URL: "http://graph-rag-service:8004"
+      REGION_GATEWAY_URL: "http://region-gateway:8006"
+    depends_on:
+      - model-service
+      - mcp-service
+      - pinecone-service
+      - graph-rag-service
+      - guardrails-service
+      - region-gateway
+
+  frontend:
+    build:
+      context: ./agentcore/src/frontend
+      dockerfile: Dockerfile
+    container_name: agentcore-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      HOST_IP: "backend"
+      BACKEND_PORT: "7860"
+      VITE_PROXY_TARGET: "http://backend:7860"
+      VITE_PORT: "3000"
+    depends_on:
+      - backend
+
+  model-service:
+    build:
+      context: ./agentcore/src/services/model-service
+      dockerfile: Dockerfile
+    container_name: agentcore-model-service
+    ports:
+      - "8001:8001"
+
+  mcp-service:
+    build:
+      context: ./agentcore/src/services/mcp-service
+      dockerfile: Dockerfile
+    container_name: agentcore-mcp-service
+    ports:
+      - "8002:8002"
+
+  pinecone-service:
+    build:
+      context: ./agentcore/src/services/pinecone-service
+      dockerfile: Dockerfile
+    container_name: agentcore-pinecone-service
+    ports:
+      - "8003:8003"
+
+  graph-rag-service:
+    build:
+      context: ./agentcore/src/services/graph-rag-service
+      dockerfile: Dockerfile
+    container_name: agentcore-graph-rag-service
+    ports:
+      - "8004:8004"
+
+  guardrails-service:
+    build:
+      context: ./agentcore/src/services/guardrails-service
+      dockerfile: Dockerfile
+    container_name: agentcore-guardrails-service
+    ports:
+      - "8005:8005"
+
+  region-gateway:
+    build:
+      context: ./agentcore/src/services/region-gateway
+      dockerfile: Dockerfile
+    container_name: agentcore-region-gateway
+    ports:
+      - "8006:8006"

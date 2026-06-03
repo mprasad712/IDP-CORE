@@ -1,0 +1,39 @@
+trigger:
+- main
+
+pr:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  acrName: 'agentflowacr1'
+  tag: '$(Build.BuildId)'
+
+stages:
+- stage: BuildAndPushFrontend
+  displayName: "Build and Push Frontend Image"
+  jobs:
+  - job: FrontendBuildPush
+    displayName: "Frontend Build & Push"
+    steps:
+    - task: AzureCLI@2
+      displayName: "ACR Login"
+      inputs:
+        azureSubscription: 'agentflow-sc'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az acr login --name $(acrName)
+
+    - script: |
+        docker build \
+        -f agentcore/src/frontend/Dockerfile \
+        -t $(acrName).azurecr.io/frontend:$(tag) \
+        agentcore/src/frontend
+      displayName: "Build Frontend"
+
+    - script: |
+        docker push $(acrName).azurecr.io/frontend:$(tag)
+      displayName: "Push Frontend"

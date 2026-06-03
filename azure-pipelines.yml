@@ -1,0 +1,342 @@
+trigger:
+- main
+
+pr:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  acrName: 'agentflowacr1'
+  imageName: 'agentflow-service'
+  dockerfilePath: 'Dockerfile'
+  tag: '$(Build.BuildId)'
+
+stages:
+
+# =========================================
+# STAGE 0 - DETECT CHANGES
+# =========================================
+- stage: DetectChanges
+  displayName: "Detect Service Changes"
+
+  jobs:
+  - job: Detect
+    displayName: "Detect Changed Services"
+
+    steps:
+    - checkout: self
+      fetchDepth: 0
+
+    - script: |
+        set -e
+
+        # Resolve base commit: use PR target branch or previous commit
+        if [ "$(Build.Reason)" = "PullRequest" ]; then
+          BASE=$(git merge-base HEAD origin/$(System.PullRequest.TargetBranch))
+        else
+          BASE=$(git rev-parse HEAD~1 2>/dev/null || echo "")
+        fi
+
+        if [ -z "$BASE" ]; then
+          CHANGED=""
+          echo "No base commit found — full pipeline will run"
+        else
+          CHANGED=$(git diff --name-only "$BASE" HEAD)
+          echo "Changed files:"
+          echo "${CHANGED:-  (none)}"
+        fi
+
+        # Set isOutput variable to true if the given path prefix is in CHANGED
+        flag() {
+          local path="$1" var="$2"
+          if echo "$CHANGED" | grep -q "^$path"; then
+            echo "##vso[task.setvariable variable=${var};isOutput=true]true"
+            echo "  CHANGED: $path"
+          else
+            echo "##vso[task.setvariable variable=${var};isOutput=true]false"
+          fi
+        }
+
+        flag "agentcore/src/backend"                     "backend_changed"
+        flag "agentcore/src/frontend"                    "frontend_changed"
+        flag "agentcore/src/services/graph-rag-service"  "graph_rag_changed"
+        flag "agentcore/src/services/guardrails-service" "guardrails_changed"
+        flag "agentcore/src/services/mcp-service"        "mcp_changed"
+        flag "agentcore/src/services/model-service"      "model_changed"
+        flag "agentcore/src/services/pinecone-service"   "pinecone_changed"
+        flag "agentcore/src/services/region-gateway"     "region_changed"
+
+        # full_pipeline=true when CHANGED is empty OR no service directory was touched
+        SVC_HIT=$(echo "$CHANGED" | grep -E "^agentcore/src/(backend|frontend|services)/" || true)
+        if [ -z "$CHANGED" ] || [ -z "$SVC_HIT" ]; then
+          echo "##vso[task.setvariable variable=full_pipeline;isOutput=true]true"
+          echo "No service changes detected — full pipeline will run"
+        else
+          echo "##vso[task.setvariable variable=full_pipeline;isOutput=true]false"
+          echo "Selective build: only changed services will run"
+        fi
+      name: detect
+      displayName: "Detect Changed Services"
+
+# =========================================
+# STAGE 1 - TERRAFORM CI
+# =========================================
+- stage: TerraformCI
+  displayName: "Terraform Validation"
+
+  dependsOn: DetectChanges
+
+  jobs:
+  - job: ValidateTerraform
+    displayName: "Validate Terraform"
+
+    steps:
+
+    - task: TerraformInstaller@1
+      inputs:
+        terraformVersion: 'latest'
+
+    - task: AzureCLI@2
+      displayName: "Terraform Init"
+      inputs:
+        azureSubscription: 'agentflow-sc'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          cd infra/dev
+          terraform init
+
+    - script: |
+        cd infra/dev
+        terraform fmt -check
+      displayName: "Terraform Format"
+
+    - task: AzureCLI@2
+      displayName: "Terraform Validate"
+      inputs:
+        azureSubscription: 'agentflow-sc'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          cd infra/dev
+          terraform validate
+
+    - task: AzureCLI@2
+      displayName: "Terraform Plan"
+      inputs:
+        azureSubscription: 'agentflow-sc'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          cd infra/dev
+          terraform plan
+
+# =========================================
+# STAGE 2 - TERRAFORM DEPLOY
+# =========================================
+- stage: TerraformDeploy
+  displayName: "Deploy Infrastructure"
+
+  dependsOn: TerraformCI
+
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+
+  jobs:
+  - job: DeployInfra
+    displayName: "Terraform Apply"
+
+    steps:
+
+    - task: TerraformInstaller@1
+      inputs:
+        terraformVersion: 'latest'
+
+    - task: AzureCLI@2
+      displayName: "Terraform Init"
+      inputs:
+        azureSubscription: 'agentflow-sc'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          cd infra/dev
+          terraform init
+
+    - task: AzureCLI@2
+      displayName: "Terraform Apply"
+      inputs:
+        azureSubscription: 'agentflow-sc'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          cd infra/dev
+          terraform apply -auto-approve
+
+# =========================================
+# STAGE 3 - BUILD & PUSH DOCKER IMAGES
+# =========================================
+- stage: BuildAndPush
+  displayName: "Build and Push Docker Images"
+
+  dependsOn:
+  - TerraformDeploy
+  - DetectChanges
+
+  condition: succeeded()
+
+  # Map DetectChanges outputs to stage-scoped variables for use in step conditions
+  variables:
+    full_pipeline:      $[ stageDependencies.DetectChanges.Detect.outputs['detect.full_pipeline'] ]
+    backend_changed:    $[ stageDependencies.DetectChanges.Detect.outputs['detect.backend_changed'] ]
+    frontend_changed:   $[ stageDependencies.DetectChanges.Detect.outputs['detect.frontend_changed'] ]
+    graph_rag_changed:  $[ stageDependencies.DetectChanges.Detect.outputs['detect.graph_rag_changed'] ]
+    guardrails_changed: $[ stageDependencies.DetectChanges.Detect.outputs['detect.guardrails_changed'] ]
+    mcp_changed:        $[ stageDependencies.DetectChanges.Detect.outputs['detect.mcp_changed'] ]
+    model_changed:      $[ stageDependencies.DetectChanges.Detect.outputs['detect.model_changed'] ]
+    pinecone_changed:   $[ stageDependencies.DetectChanges.Detect.outputs['detect.pinecone_changed'] ]
+    region_changed:     $[ stageDependencies.DetectChanges.Detect.outputs['detect.region_changed'] ]
+
+  jobs:
+  - job: DockerBuildPush
+    displayName: "Docker Build & Push"
+
+    steps:
+
+    # ACR LOGIN — always runs
+    - task: AzureCLI@2
+      displayName: "ACR Login"
+      inputs:
+        azureSubscription: 'agentflow-sc'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az acr login --name agentflowacr1
+
+    # =====================================
+    # BACKEND SERVICE
+    # =====================================
+    - script: |
+        docker build \
+        -f agentcore/src/backend/Dockerfile \
+        -t agentflowacr1.azurecr.io/backend:$(Build.BuildId) \
+        agentcore/src/backend
+      displayName: "Build Backend"
+      condition: or(eq(variables['backend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    - script: |
+        docker push agentflowacr1.azurecr.io/backend:$(Build.BuildId)
+      displayName: "Push Backend"
+      condition: or(eq(variables['backend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    # =====================================
+    # FRONTEND SERVICE
+    # =====================================
+    - script: |
+        docker build \
+        -f agentcore/src/frontend/Dockerfile \
+        -t agentflowacr1.azurecr.io/frontend:$(Build.BuildId) \
+        agentcore/src/frontend
+      displayName: "Build Frontend"
+      condition: or(eq(variables['frontend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    - script: |
+        docker push agentflowacr1.azurecr.io/frontend:$(Build.BuildId)
+      displayName: "Push Frontend"
+      condition: or(eq(variables['frontend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    # =====================================
+    # GRAPH RAG SERVICE
+    # =====================================
+    - script: |
+        docker build \
+        -f agentcore/src/services/graph-rag-service/Dockerfile \
+        -t agentflowacr1.azurecr.io/graph-rag-service:$(Build.BuildId) \
+        agentcore/src/services/graph-rag-service
+      displayName: "Build Graph RAG Service"
+      condition: or(eq(variables['graph_rag_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    - script: |
+        docker push agentflowacr1.azurecr.io/graph-rag-service:$(Build.BuildId)
+      displayName: "Push Graph RAG Service"
+      condition: or(eq(variables['graph_rag_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    # =====================================
+    # GUARDRAILS SERVICE
+    # =====================================
+    - script: |
+        docker build \
+        -f agentcore/src/services/guardrails-service/Dockerfile \
+        -t agentflowacr1.azurecr.io/guardrails-service:$(Build.BuildId) \
+        agentcore/src/services/guardrails-service
+      displayName: "Build Guardrails Service"
+      condition: or(eq(variables['guardrails_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    - script: |
+        docker push agentflowacr1.azurecr.io/guardrails-service:$(Build.BuildId)
+      displayName: "Push Guardrails Service"
+      condition: or(eq(variables['guardrails_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    # =====================================
+    # MCP SERVICE
+    # =====================================
+    - script: |
+        docker build \
+        -f agentcore/src/services/mcp-service/Dockerfile \
+        -t agentflowacr1.azurecr.io/mcp-service:$(Build.BuildId) \
+        agentcore/src/services/mcp-service
+      displayName: "Build MCP Service"
+      condition: or(eq(variables['mcp_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    - script: |
+        docker push agentflowacr1.azurecr.io/mcp-service:$(Build.BuildId)
+      displayName: "Push MCP Service"
+      condition: or(eq(variables['mcp_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    # =====================================
+    # MODEL SERVICE
+    # =====================================
+    - script: |
+        docker build \
+        -f agentcore/src/services/model-service/Dockerfile \
+        -t agentflowacr1.azurecr.io/model-service:$(Build.BuildId) \
+        agentcore/src/services/model-service
+      displayName: "Build Model Service"
+      condition: or(eq(variables['model_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    - script: |
+        docker push agentflowacr1.azurecr.io/model-service:$(Build.BuildId)
+      displayName: "Push Model Service"
+      condition: or(eq(variables['model_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    # =====================================
+    # PINECONE SERVICE
+    # =====================================
+    - script: |
+        docker build \
+        -f agentcore/src/services/pinecone-service/Dockerfile \
+        -t agentflowacr1.azurecr.io/pinecone-service:$(Build.BuildId) \
+        agentcore/src/services/pinecone-service
+      displayName: "Build Pinecone Service"
+      condition: or(eq(variables['pinecone_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    - script: |
+        docker push agentflowacr1.azurecr.io/pinecone-service:$(Build.BuildId)
+      displayName: "Push Pinecone Service"
+      condition: or(eq(variables['pinecone_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    # =====================================
+    # REGION GATEWAY
+    # =====================================
+    - script: |
+        docker build \
+        -f agentcore/src/services/region-gateway/Dockerfile \
+        -t agentflowacr1.azurecr.io/region-gateway:$(Build.BuildId) \
+        agentcore/src/services/region-gateway
+      displayName: "Build Region Gateway"
+      condition: or(eq(variables['region_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+    - script: |
+        docker push agentflowacr1.azurecr.io/region-gateway:$(Build.BuildId)
+      displayName: "Push Region Gateway"
+      condition: or(eq(variables['region_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
