@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import csv
 import io
+import os
 import secrets
 from uuid import UUID
 
@@ -18,7 +19,7 @@ from agentcore.api.utils import CurrentActiveUser, DbSession
 from agentcore.services.auth.decorators import PermissionChecker
 from agentcore.services.auth.permissions import get_permissions_for_role, normalize_role, permission_cache
 from agentcore.services.auth.invalidation import invalidate_user_auth
-from agentcore.services.auth.utils import get_password_hash, verify_password
+from agentcore.services.auth.utils import get_password_hash, verify_password, make_set_password_token
 from agentcore.services.cache.user_cache import UserCacheService
 from agentcore.services.database.models.agent.model import Agent
 from agentcore.services.database.models.agent_api_key.model import AgentApiKey
@@ -39,7 +40,7 @@ from agentcore.services.database.models.user.model import User, UserCreate, User
 from agentcore.services.database.models.user_department_membership.model import UserDepartmentMembership
 from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
 from agentcore.services.deps import get_settings_service
-from agentcore.services.notifications import send_user_notification_email
+from agentcore.services.notifications import send_user_notification_email, send_admin_user_created_email
 from agentcore.services.observability import (
     LangfuseProvisioningError,
     get_langfuse_provisioning_service,
@@ -1419,20 +1420,29 @@ async def add_user(
         session.add(new_user)
         await session.commit()
         await session.refresh(new_user)
-        settings = get_settings_service().settings
-        email_sent, email_detail = await send_user_notification_email(
-            settings=settings,
-            recipient_email=_notification_recipient_for_user(new_user),
-            recipient_name=_display_name_for_user(new_user),
-            subject="Your AgentCore account has been created",
-            headline="Your AgentCore account is ready",
-            intro_text="Your account has been created or reactivated in AgentCore.",
-            summary_text="You are receiving this email because an administrator created or updated your access.",
-            actor_name=_display_name_for_user(current_user),
-            changed_fields=_build_add_user_email_details(new_user),
-            organization_name=organization_name,
-            department_name=new_user.department_name,
-        )
+
+        settings_service = get_settings_service()
+        settings = settings_service.settings
+        auth_settings = settings_service.auth_settings
+        secret_key = auth_settings.SECRET_KEY.get_secret_value()
+
+        recipient_email = _notification_recipient_for_user(new_user)
+        if recipient_email:
+            set_password_token = make_set_password_token(str(new_user.id), secret_key, new_user.password or "", hours=72)
+            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+            set_password_link = f"{frontend_url}/set-password?token={set_password_token}"
+            email_sent, email_detail = await send_admin_user_created_email(
+                settings=settings,
+                recipient_email=recipient_email,
+                recipient_name=_display_name_for_user(new_user),
+                actor_name=_display_name_for_user(current_user),
+                role=_friendly_role_name(new_user.role),
+                organization_name=organization_name,
+                department_name=new_user.department_name,
+                set_password_link=set_password_link,
+            )
+        else:
+            email_sent, email_detail = False, "No email address for this user."
         _format_notification_email_status(
             response,
             sent=email_sent,

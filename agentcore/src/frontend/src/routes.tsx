@@ -53,6 +53,7 @@ const CostLimitsPage         = lazy(() => import("./pages/CostLimitsPage"));
 const LoginAdminPage         = lazy(() => import("./pages/AdminPage/LoginPage"));
 const DeleteAccountPage      = lazy(() => import("./pages/DeleteAccountPage"));
 const PlaygroundPage         = lazy(() => import("./pages/Playground"));
+const SetPasswordPage        = lazy(() => import("./pages/SetPasswordPage"));
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -93,6 +94,14 @@ const router = createBrowserRouter(
       element={
         <Suspense fallback={<PageLoader />}>
           <SharePointCallback />
+        </Suspense>
+      }
+    />,
+    <Route
+      path="/set-password"
+      element={
+        <Suspense fallback={<PageLoader />}>
+          <SetPasswordPage />
         </Suspense>
       }
     />,

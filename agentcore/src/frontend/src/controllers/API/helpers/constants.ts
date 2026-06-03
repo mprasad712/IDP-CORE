@@ -13,6 +13,7 @@ export const URLs = {
   LOGOUT: `logout`,
   LOGIN: `login`,
   REGISTER: `register`,
+  SET_PASSWORD: `set-password`,
   REFRESH: "refresh",
   BUILD: `build`,
   CUSTOM_COMPONENT: `custom_component`,

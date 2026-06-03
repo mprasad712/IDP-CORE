@@ -23,13 +23,14 @@ from agentcore.services.auth.utils import (
     create_refresh_token,
     create_user_tokens,
     get_password_hash,
+    make_set_password_token,
 )
 from agentcore.services.database.models.user.crud import get_user_by_id
 from agentcore.services.deps import get_settings_service
 from agentcore.services.database.models.user.model import User
 from agentcore.services.auth.permissions import get_permissions_for_role, normalize_role
 from agentcore.services.cache.user_cache import UserCacheService
-from agentcore.services.notifications import send_verification_email
+from agentcore.services.notifications import send_verification_email, send_admin_user_created_email
 
 
 class AzureSSORequest(BaseModel):
@@ -182,9 +183,27 @@ async def login_to_get_access_token(
         ) from exc
 
     if user:
+        # Promote to root if the authenticated user's email matches PLATFORM_ROOT_EMAIL
+        root_email = (
+            str(auth_settings.PLATFORM_ROOT_EMAIL).strip().lower()
+            if auth_settings.PLATFORM_ROOT_EMAIL
+            else ""
+        )
+        user_email = (user.email or "").strip().lower()
+        user_username = (user.username or "").strip().lower()
+        if root_email and (user_email == root_email or user_username == root_email):
+            if normalize_role(getattr(user, "role", "consumer")) != "root":
+                user.role = "root"
+                user.is_superuser = True
+                db.add(user)
+                await db.commit()
+                await db.refresh(user)
+            current_role = "root"
+        else:
+            current_role = normalize_role(getattr(user, "role", "developer"))
+
         tokens = await create_user_tokens(user_id=user.id, db=db, update_last_login=True)
         _apply_auth_cookies(response, tokens, auth_settings, user)
-        current_role = normalize_role(getattr(user, "role", "developer"))
         permissions = await get_permissions_for_role(current_role)
         from agentcore.observability.metrics_registry import record_login_attempt
         record_login_attempt("success")
@@ -527,10 +546,59 @@ def _verification_page(*, success: bool, frontend_url: str) -> str:
 </body>
 </html>"""
 
+# ── Set password (admin-created users / password reset) ──────────────────────
+
+class SetPasswordRequest(BaseModel):
+    token: str
+    password: str
+
+
+@router.post("/set-password")
+async def set_password(body: SetPasswordRequest, db: DbSession):
+    auth_settings = get_settings_service().auth_settings
+    secret_key = auth_settings.SECRET_KEY.get_secret_value()
+
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+    # Decode without verification first to extract the user_id.
+    try:
+        unverified = jwt.get_unverified_claims(body.token)
+    except JWTError:
+        raise HTTPException(status_code=400, detail="Invalid or expired link. Please request a new one.")
+
+    if unverified.get("type") != "set_password":
+        raise HTTPException(status_code=400, detail="Invalid token type.")
+
+    user_id = unverified.get("sub")
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Re-verify using the key bound to the user's current password hash.
+    # If the password was already changed the signing key will no longer match.
+    signing_key = secret_key + (user.password or "")[:20]
+    try:
+        jwt.decode(body.token, signing_key, algorithms=["HS256"])
+    except JWTError:
+        raise HTTPException(
+            status_code=400,
+            detail="This link has already been used or has expired. Please contact your administrator for a new one.",
+        )
+
+    user.password = get_password_hash(body.password)
+    user.is_active = True
+    user.updated_at = datetime.now(timezone.utc)
+    db.add(user)
+    await db.commit()
+
+    return {"message": "Password set successfully. You can now sign in."}
+
+
 # @router.post("/logout")
 # async def logout(response: Response):
 #     auth_settings = get_settings_service().auth_settings
-    
+
 #     cookie_params = {
 #         "domain": auth_settings.COOKIE_DOMAIN,
 #         "path": "/", # Ensure this matches where the cookie was set

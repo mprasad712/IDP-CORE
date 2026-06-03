@@ -253,6 +253,93 @@ async def send_user_notification_email(
         return False, str(exc)
 
 
+async def send_admin_user_created_email(
+    *,
+    settings,
+    recipient_email: str,
+    recipient_name: str,
+    actor_name: str,
+    role: str,
+    organization_name: str | None,
+    department_name: str | None,
+    set_password_link: str,
+) -> tuple[bool, str | None]:
+    try:
+        smtp_config = _load_smtp_config(settings)
+    except ValueError as exc:
+        logger.warning("Skipping admin-created-user email because SMTP config is incomplete: %s", exc)
+        return False, str(exc)
+
+    subject = "Your MiCore IDP account has been created"
+
+    dept_row = f"<b>Department:</b> {escape(department_name or '-')}<br>" if department_name else ""
+    org_row = f"<b>Organization:</b> {escape(organization_name or '-')}<br>" if organization_name else ""
+
+    html_body = f"""<!DOCTYPE html>
+<html>
+<body style="font-family: Calibri, Arial, sans-serif; font-size: 11pt; color: #000; max-width: 600px; margin: 0 auto;">
+<div style="border-top: 4px solid #D04A02; padding: 32px 24px;">
+  <p>Hello <b>{escape(recipient_name)}</b>,</p>
+  <p>An administrator has created an account for you on <b>MiCore IDP</b>.</p>
+  <p>
+    <b>Username:</b> {escape(recipient_email)}<br>
+    <b>Role:</b> {escape(role)}<br>
+    {org_row}{dept_row}
+    <b>Created by:</b> {escape(actor_name)}
+  </p>
+  <p>To get started, set your password by clicking the button below:</p>
+  <p style="text-align: center; margin: 32px 0;">
+    <a href="{set_password_link}"
+       style="background:#D04A02; color:#fff; text-decoration:none; padding:12px 28px;
+              border-radius:4px; font-weight:bold; display:inline-block;">
+      Set Your Password
+    </a>
+  </p>
+  <p>Or copy and paste this link into your browser:</p>
+  <p style="word-break:break-all; color:#555; font-size:10pt;">{escape(set_password_link)}</p>
+  <p style="color:#888; font-size:9pt; margin-top:24px;">
+    This link expires in 72 hours. If you did not expect this email, please contact your administrator.
+  </p>
+  <p style="color:#666; font-size: 9pt;">
+    This is an automated notification from MiCore IDP. Please do not reply to this email.
+  </p>
+</div>
+</body>
+</html>"""
+
+    text_body = (
+        f"Hello {recipient_name},\n\n"
+        "An administrator has created an account for you on MiCore IDP.\n\n"
+        f"Username: {recipient_email}\n"
+        f"Role: {role}\n"
+        f"Organization: {organization_name or '-'}\n"
+        f"Department: {department_name or '-'}\n"
+        f"Created by: {actor_name}\n\n"
+        "To set your password, visit the link below:\n"
+        f"{set_password_link}\n\n"
+        "This link expires in 72 hours.\n\n"
+        "— MiCore IDP Team"
+    )
+
+    try:
+        message = _build_raw_message(
+            smtp_config=smtp_config,
+            recipient_email=recipient_email,
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+        )
+        await asyncio.to_thread(
+            _send_message_sync,
+            smtp_config=smtp_config,
+            message=message,
+        )
+        return True, None
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to send admin-created-user email via SMTP: %s", exc)
+        return False, str(exc)
+
+
 async def send_verification_email(
     *,
     settings,

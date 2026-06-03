@@ -363,7 +363,7 @@ export default function LoginPage(): JSX.Element {
                     <Form.Root onSubmit={(e) => { e.preventDefault(); signIn(); }} className="space-y-5">
                       <Form.Field name="username" className="space-y-1.5">
                         <Form.Label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
-                          {t("Username")}
+                          {t("Username or Email")}
                         </Form.Label>
                         <Form.Control asChild>
                           <input
@@ -371,7 +371,7 @@ export default function LoginPage(): JSX.Element {
                             name="username"
                             value={username}
                             onChange={handleInput}
-                            placeholder={t("Enter your username")}
+                            placeholder={t("Enter your username or email")}
                             autoComplete="username"
                             className={inputClass}
                           />
