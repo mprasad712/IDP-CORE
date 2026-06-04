@@ -52,8 +52,10 @@ const AccessControlPage      = lazy(() => import("./pages/AccessControlPage"));
 const CostLimitsPage         = lazy(() => import("./pages/CostLimitsPage"));
 const LoginAdminPage         = lazy(() => import("./pages/AdminPage/LoginPage"));
 const DeleteAccountPage      = lazy(() => import("./pages/DeleteAccountPage"));
-const PlaygroundPage         = lazy(() => import("./pages/Playground"));
-const SetPasswordPage        = lazy(() => import("./pages/SetPasswordPage"));
+const PlaygroundPage              = lazy(() => import("./pages/Playground"));
+const SetPasswordPage             = lazy(() => import("./pages/SetPasswordPage"));
+const FieldConfigurationsPage     = lazy(() => import("./pages/FieldConfigurationsPage"));
+const ProcessedDocsPage           = lazy(() => import("./pages/ProcessedDocsPage"));
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -223,6 +225,22 @@ const router = createBrowserRouter(
                     element={
                       <ProtectedPermissionRoute permission="view_control_panel">
                         <Suspense fallback={<PageLoader />}><WorkflowsView /></Suspense>
+                      </ProtectedPermissionRoute>
+                    }
+                  />
+                  <Route
+                    path="field-configurations"
+                    element={
+                      <ProtectedPermissionRoute permission="view_projects_page">
+                        <Suspense fallback={<PageLoader />}><FieldConfigurationsPage /></Suspense>
+                      </ProtectedPermissionRoute>
+                    }
+                  />
+                  <Route
+                    path="processed-docs"
+                    element={
+                      <ProtectedPermissionRoute permission="view_projects_page">
+                        <Suspense fallback={<PageLoader />}><ProcessedDocsPage /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />

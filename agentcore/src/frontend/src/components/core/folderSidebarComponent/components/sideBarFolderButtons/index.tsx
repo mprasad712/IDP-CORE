@@ -525,6 +525,29 @@ const SideBarFoldersButtonsComponent = ({
                 </SidebarMenuItem>
               )}
 
+              {/* ─ IDP ─ */}
+              {(can("view_projects_page")) && (
+                <SectionLabel label="IDP" />
+              )}
+
+              {can("view_projects_page") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/field-configurations")} onClick={() => _navigate("/field-configurations")} className={navBtn}>
+                    <ForwardedIconComponent name="ClipboardList" className="h-4 w-4 flex-shrink-0" />
+                    {t("Field Configurations")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+
+              {can("view_projects_page") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/processed-docs")} onClick={() => _navigate("/processed-docs")} className={navBtn}>
+                    <ForwardedIconComponent name="FileCheck" className="h-4 w-4 flex-shrink-0" />
+                    {t("Processed Docs")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+
               {/* ─ System ─ */}
               {(can("view_platform_configs") || can("view_help_support_page")) && (
                 <SectionLabel label="System" />
