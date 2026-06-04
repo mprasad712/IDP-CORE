@@ -13,6 +13,16 @@ const SIDEBAR_CATEGORY_ACCENTS: Record<string, string> = {
   prompts: "#7c3aed",
   chains: "#f97316",
   helpers: "#0ea5e9",
+  // IDP categories
+  idp_input:          "#D04A02",
+  idp_preprocessing:  "#E07020",
+  idp_ocr:            "#2563EB",
+  idp_extraction:     "#7C3AED",
+  idp_rules:          "#059669",
+  idp_output:         "#DC2626",
+  idp_classification: "#0891B2",
+  idp_detection:      "#9333EA",
+  idp_validation:     "#16A34A",
 };
 
 export const getCategoryAccentColor = (
