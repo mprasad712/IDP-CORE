@@ -282,102 +282,114 @@ const HomePage = ({ type }: { type: "agents" | "components" | "mcp" }) => {
       >
         <div className="flex h-full w-full flex-col 3xl:container">
           {ENABLE_AGENTCORE && <CustomBanner />}
-          <div className="flex flex-1 flex-col justify-start p-4">
-            <div className="flex h-full flex-col justify-start">
-              <HeaderComponent
-                folderName={folderName}
-                agentType={agentType}
-                setAgentType={setAgentType}
-                view={view}
-                setView={setView}
-                setNewProjectModal={setNewProjectModal}
-                setSearch={onSearch}
-                isEmptyFolder={isEmptyFolder}
-                selectedAgents={selectedAgents}
+
+          {/* ── Toolbar / page header ── */}
+          <div className="flex-shrink-0 border-b bg-background px-5 py-4 shadow-sm">
+            <HeaderComponent
+              folderName={folderName}
+              agentType={agentType}
+              setAgentType={setAgentType}
+              view={view}
+              setView={setView}
+              setNewProjectModal={setNewProjectModal}
+              setSearch={onSearch}
+              isEmptyFolder={isEmptyFolder}
+              selectedAgents={selectedAgents}
+              allowCreateInProject={allowCreateInProject}
+              semanticEnabled={semanticEnabled}
+              onSemanticToggle={setSemanticEnabled}
+              isSemanticSearching={isSemanticLoading && isSemanticActive}
+            />
+          </div>
+
+          {/* ── Content area ── */}
+          <div className="flex flex-1 flex-col overflow-y-auto p-5">
+            {isEmptyFolder ? (
+              <EmptyFolder
+                setOpenModal={setNewProjectModal}
                 allowCreateInProject={allowCreateInProject}
-                semanticEnabled={semanticEnabled}
-                onSemanticToggle={setSemanticEnabled}
-                isSemanticSearching={isSemanticLoading && isSemanticActive}
               />
-              {isEmptyFolder ? (
-                <EmptyFolder
-                  setOpenModal={setNewProjectModal}
-                  allowCreateInProject={allowCreateInProject}
-                />
-              ) : (
-                <div className="flex h-full flex-col">
-                  {isLoading ? (
-                    view === "grid" ? (
-                      <div className="mt-4 grid grid-cols-1 gap-1 md:grid-cols-2 lg:grid-cols-3">
-                        <ListSkeleton />
-                        <ListSkeleton />
-                      </div>
-                    ) : (
-                      <div className="mt-4 flex flex-col gap-1">
-                        <ListSkeleton />
-                        <ListSkeleton />
-                      </div>
-                    )
-                  ) : (agentType === "agents" || agentType === "components") &&
-                    data &&
-                    data.pagination.total > 0 ? (
-                    view === "grid" ? (
-                      <div className="mt-4 grid grid-cols-1 gap-1 md:grid-cols-2 lg:grid-cols-3">
-                        {data.agents.map((agent, index) => (
-                          <ListComponent
-                            key={agent.id}
-                            agentData={agent}
-                            index={index}
-                            selected={selectedAgents.includes(agent.id)}
-                            setSelected={(selected) =>
-                              setSelectedAgent(selected, agent.id, index)
-                            }
-                            shiftPressed={isShiftPressed || isCtrlPressed}
-                          />
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="mt-4 flex flex-col gap-1">
-                        {data.agents.map((agent, index) => (
-                          <ListComponent
-                            key={agent.id}
-                            agentData={agent}
-                            index={index}
-                            selected={selectedAgents.includes(agent.id)}
-                            setSelected={(selected) =>
-                              setSelectedAgent(selected, agent.id, index)
-                            }
-                            shiftPressed={isShiftPressed || isCtrlPressed}
-                            disabled={can("view_agents_page") && !can("edit_agents")}
-                          />
-                        ))}
-                      </div>
-                    )
-                  ) : agentType === "agents" ? (
-                    <div className="pt-24 text-center text-sm text-secondary-foreground">
-                      No agents in this project.{" "}
-                      <a
-                        onClick={() => setNewProjectModal(true)}
-                        className="cursor-pointer underline"
-                      >
-                        Create a new agent
-                      </a>
-                      , or browse the store.
+            ) : (
+              <div className="flex h-full flex-col">
+                {isLoading ? (
+                  view === "grid" ? (
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+                      <ListSkeleton /><ListSkeleton /><ListSkeleton />
                     </div>
                   ) : (
-                    <div className="pt-24 text-center text-sm text-secondary-foreground">
-                      No saved or custom components.
+                    <div className="flex flex-col gap-2">
+                      <ListSkeleton /><ListSkeleton /><ListSkeleton />
                     </div>
-                  )}
-                </div>
-              )}
-            </div>
+                  )
+                ) : (agentType === "agents" || agentType === "components") && data && data.pagination.total > 0 ? (
+                  view === "grid" ? (
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+                      {data.agents.map((agent, index) => (
+                        <ListComponent
+                          key={agent.id}
+                          agentData={agent}
+                          index={index}
+                          selected={selectedAgents.includes(agent.id)}
+                          setSelected={(selected) => setSelectedAgent(selected, agent.id, index)}
+                          shiftPressed={isShiftPressed || isCtrlPressed}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-1.5">
+                      {data.agents.map((agent, index) => (
+                        <ListComponent
+                          key={agent.id}
+                          agentData={agent}
+                          index={index}
+                          selected={selectedAgents.includes(agent.id)}
+                          setSelected={(selected) => setSelectedAgent(selected, agent.id, index)}
+                          shiftPressed={isShiftPressed || isCtrlPressed}
+                          disabled={can("view_agents_page") && !can("edit_agents")}
+                        />
+                      ))}
+                    </div>
+                  )
+                ) : (
+                  /* ── Inline empty state when no results match filter/search ── */
+                  <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-background py-16 text-center">
+                    <div
+                      className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl"
+                      style={{ background: "rgba(208,74,2,0.08)" }}
+                    >
+                      <svg className="h-6 w-6 text-[#D04A02]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+                      </svg>
+                    </div>
+                    <p className="text-sm font-semibold text-foreground">
+                      {agentType === "agents" ? "No agents found" : "No components found"}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {agentType === "agents"
+                        ? "Try a different search, or create a new agent."
+                        : "No saved or custom components in this project."}
+                    </p>
+                    {agentType === "agents" && allowCreateInProject && (
+                      <button
+                        onClick={() => setNewProjectModal(true)}
+                        className="mt-4 rounded-lg border border-[#D04A02]/30 bg-[rgba(208,74,2,0.06)] px-4 py-1.5 text-xs font-semibold text-[#D04A02] transition-colors hover:bg-[rgba(208,74,2,0.12)]"
+                      >
+                        Create agent
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
+
+          {/* ── Pagination ── */}
           {(agentType === "agents" || agentType === "components") &&
-            !isLoading &&
-            !isEmptyFolder &&
-            data.pagination.total >= 10 && (
-              <div className="flex justify-end px-3 py-4">
+            !isLoading && !isEmptyFolder && data.pagination.total >= 10 && (
+              <div className="flex flex-shrink-0 items-center justify-between border-t bg-background px-5 py-3">
+                <p className="text-xs text-muted-foreground">
+                  {data.pagination.total} {agentType} total
+                </p>
                 <PaginatorComponent
                   pageIndex={data.pagination.page}
                   pageSize={data.pagination.size}

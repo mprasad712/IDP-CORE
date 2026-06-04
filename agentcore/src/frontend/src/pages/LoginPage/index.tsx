@@ -14,7 +14,7 @@ import { loginRequest, msalConfig } from "@/authConfig";
 import { useTranslation } from "react-i18next";
 import useAuthStore from "@/stores/authStore";
 import useTheme from "@/customization/hooks/use-custom-theme";
-import MothersonLogo from "@/assets/micore.svg";
+import MothersonLogo from "@/assets/MiCore.svg";
 
 /* PwC brand tokens */
 const PwC = {
@@ -217,7 +217,7 @@ export default function LoginPage(): JSX.Element {
           style={{ background: PwC.orange }}
         />
         <div className="relative z-10 flex flex-col h-full px-10 xl:px-14 py-12 justify-between">
-          <img src={MothersonLogo} alt="MiCore" className="h-9 w-auto brightness-0 invert" />
+          <img src={MothersonLogo} alt="Digital Workmate" className="h-9 w-auto brightness-0 invert" />
           <div className="max-w-[300px]">
             <div
               className="inline-flex items-center gap-2 px-3 py-1.5 rounded-sm mb-6"
@@ -262,7 +262,7 @@ export default function LoginPage(): JSX.Element {
             </ul>
           </div>
           <p className="text-[11px] text-white/20">
-            © {new Date().getFullYear()} MiCore · Powered by PwC IDP
+            © {new Date().getFullYear()} Digital Workmate · Powered by PwC IDP
           </p>
         </div>
       </div>
@@ -273,7 +273,7 @@ export default function LoginPage(): JSX.Element {
 
           {/* Mobile logo */}
           <div className="lg:hidden flex justify-center mb-8">
-            <img src={MothersonLogo} alt="MiCore" className="h-8 w-auto dark:invert" />
+            <img src={MothersonLogo} alt="Digital Workmate" className="h-8 w-auto dark:invert" />
           </div>
 
           {/* Card */}
@@ -344,7 +344,7 @@ export default function LoginPage(): JSX.Element {
                       <line x1="16" y1="17" x2="8" y2="17" />
                     </svg>
                     <span className="text-xs font-semibold tracking-widest uppercase text-slate-400 dark:text-slate-500">
-                      MiCore IDP
+                      Digital Workmate IDP
                     </span>
                   </div>
                   <h2 className="text-xl font-bold text-slate-900 dark:text-white">

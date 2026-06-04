@@ -566,9 +566,9 @@ export function AgentSidebarComponent({ isLoading, readOnly = false }: AgentSide
 
   return (
     <Sidebar
-      collapsible="offcanvas"
+      collapsible="none"
       data-testid="shad-sidebar"
-      className="noflow select-none"
+      className="noflow select-none !h-full !w-full !block"
     >
       <div className="flex h-full">
         <div

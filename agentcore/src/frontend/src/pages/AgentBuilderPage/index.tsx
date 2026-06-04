@@ -25,6 +25,7 @@ import {
   AgentSearchProvider,
   AgentSidebarComponent,
 } from "./components/agentSidebarComponent";
+import FloatingPanel from "./components/FloatingPanel";
 import Page from "./components/PageComponent";
 
 export default function AgentBuilderPage({ view }: { view?: boolean }): JSX.Element {
@@ -242,6 +243,14 @@ export default function AgentBuilderPage({ view }: { view?: boolean }): JSX.Elem
   }, [id, currentAgent, isReadOnlyMode]);
 
   const isMobile = useIsMobile();
+  const [sidebarOpen, setSidebarOpen] = useState(!isMobile ? true : false);
+
+  useEffect(() => {
+    const handleToggle = () => setSidebarOpen((v) => !v);
+    window.addEventListener("lf:toggle-sidebar", handleToggle);
+    return () => window.removeEventListener("lf:toggle-sidebar", handleToggle);
+  }, []);
+
   const handleBackToProject = () => {
     if (folderId) {
       navigate(`/agents/folder/${folderId}`);
@@ -255,48 +264,55 @@ export default function AgentBuilderPage({ view }: { view?: boolean }): JSX.Elem
       <VersionSavePrompt />
       <div className="agent-page-positioning">
         {currentAgent && (
-          <div className="flex h-full overflow-hidden">
+          <div className="relative flex h-full overflow-hidden">
             {isReadOnlyMode ? (
               <SidebarProvider
-                width="17.5rem"
-                defaultOpen={!isMobile}
+                width="0"
+                defaultOpen={false}
                 segmentedSidebar={ENABLE_NEW_SIDEBAR}
               >
                 <AgentSearchProvider>
-                  <AgentSidebarComponent isLoading={isLoading} readOnly />
-                  <main className="relative flex w-full overflow-hidden">
-                    <div className="flex h-full w-full flex-col overflow-hidden">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="absolute left-4 top-12 z-40 gap-2 bg-background shadow-lg"
-                        onClick={handleBackToProject}
-                      >
-                        <ArrowLeft className="h-4 w-4" />
-                        Back
-                      </Button>
-                      <div className="h-full w-full">
-                        <Page
-                          view
-                          enableViewportInteractions
-                          showToolbarInView
-                          toolbarReadOnly
-                          setIsLoading={setIsLoading}
-                        />
-                      </div>
+                  {/* Floating component panel */}
+                  {sidebarOpen && (
+                    <FloatingPanel
+                      defaultPos={{ x: 12, y: 52 }}
+                      onClose={() => setSidebarOpen(false)}
+                    >
+                      <AgentSidebarComponent isLoading={isLoading} readOnly />
+                    </FloatingPanel>
+                  )}
+                  {/* Full-screen canvas */}
+                  <main className="h-full w-full overflow-hidden">
+                    <div className="h-full w-full">
+                      <Page
+                        view
+                        enableViewportInteractions
+                        showToolbarInView
+                        toolbarReadOnly
+                        setIsLoading={setIsLoading}
+                      />
                     </div>
                   </main>
                 </AgentSearchProvider>
               </SidebarProvider>
             ) : (
               <SidebarProvider
-                width="17.5rem"
-                defaultOpen={!isMobile}
+                width="0"
+                defaultOpen={false}
                 segmentedSidebar={ENABLE_NEW_SIDEBAR}
               >
                 <AgentSearchProvider>
-                  <AgentSidebarComponent isLoading={isLoading} />
-                  <main className="flex w-full overflow-hidden">
+                  {/* Floating component panel */}
+                  {sidebarOpen && (
+                    <FloatingPanel
+                      defaultPos={{ x: 12, y: 52 }}
+                      onClose={() => setSidebarOpen(false)}
+                    >
+                      <AgentSidebarComponent isLoading={isLoading} />
+                    </FloatingPanel>
+                  )}
+                  {/* Full-screen canvas */}
+                  <main className="h-full w-full overflow-hidden">
                     <div className="h-full w-full">
                       <Page setIsLoading={setIsLoading} />
                     </div>

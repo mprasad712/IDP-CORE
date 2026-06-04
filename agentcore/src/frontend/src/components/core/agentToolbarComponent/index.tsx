@@ -99,123 +99,147 @@ const AgentToolbar = memo(function AgentToolbar({ readOnly = false }: { readOnly
 
   return (
     <>
-      <Panel className="!left-0 !right-0 !top-0 !m-0 !w-full" position="top-left">
+      <Panel position="top-center" className="!top-3 !m-0 z-30">
         <div
           className={cn(
-            "flex h-11 w-full items-center justify-between border-b bg-background px-2",
+            "flex items-center gap-1 rounded-xl border bg-background/95 px-2.5 py-1.5 shadow-lg backdrop-blur-sm",
             readOnly && "pointer-events-none opacity-60",
           )}
         >
-          <div className="flex min-w-0 items-center gap-1.5 xl:gap-2">
-            <div className="flex items-center gap-1 rounded-md border bg-muted/30 p-0.5">
-              <ShadTooltip content="Undo">
+          {/* Sidebar toggle */}
+          {!readOnly && (
+            <>
+              <ShadTooltip content="Toggle components panel">
                 <Button
                   variant="ghost"
                   size="iconSm"
                   className="h-7 w-7"
-                  onClick={undo}
-                  data-testid="navbar-undo-button"
+                  onClick={() =>
+                    window.dispatchEvent(new Event("lf:toggle-sidebar"))
+                  }
+                  data-testid="navbar-sidebar-toggle"
                 >
-                  <IconComponent name="Undo" className="h-4 w-4" />
+                  <IconComponent name="PanelLeft" className="h-4 w-4" />
                 </Button>
               </ShadTooltip>
-              <ShadTooltip content="Redo">
-                <Button
-                  variant="ghost"
-                  size="iconSm"
-                  className="h-7 w-7"
-                  onClick={redo}
-                  data-testid="navbar-redo-button"
-                >
-                  <IconComponent name="Redo" className="h-4 w-4" />
-                </Button>
-              </ShadTooltip>
-              <ShadTooltip content="Zoom In">
-                <Button
-                  variant="ghost"
-                  size="iconSm"
-                  className="h-7 w-7"
-                  onClick={() => reactFlowInstance?.zoomIn?.()}
-                  data-testid="navbar-zoom-plus-button"
-                >
-                  <IconComponent name="Plus" className="h-4 w-4" />
-                </Button>
-              </ShadTooltip>
-              <ShadTooltip content="Zoom Out">
-                <Button
-                  variant="ghost"
-                  size="iconSm"
-                  className="h-7 w-7"
-                  onClick={() => reactFlowInstance?.zoomOut?.()}
-                  data-testid="navbar-zoom-minus-button"
-                >
-                  <IconComponent name="Minus" className="h-4 w-4" />
-                </Button>
-              </ShadTooltip>
-            </div>
+              <div className="h-4 w-px bg-border" />
+            </>
+          )}
 
-            <div className="hidden h-5 w-px bg-border lg:block" />
-
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1.5 px-2 lg:px-3"
-              onClick={() => setOpenTemplatesModal(true)}
-              data-testid="navbar-templates-button"
-            >
-              <IconComponent name="LayoutPanelTop" className="h-4 w-4" />
-              <span className="hidden xl:inline">Templates</span>
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1.5 px-2 lg:px-3"
-              disabled={!customComponent}
-              onClick={() => {
-                if (customComponent) {
-                  addComponent(customComponent, "CustomComponent");
-                }
-              }}
-              data-testid="navbar-custom-code-button"
-            >
-              <IconComponent name="Plus" className="h-4 w-4" />
-              <span className="hidden xl:inline">Create Custom</span>
-            </Button>
-
-            <div className="hidden h-5 w-px bg-border lg:block" />
-
-            <ShadTooltip
-              content={
-                effectiveAutoSaving
-                  ? "Turn off auto-save in settings to enable manual save only"
-                  : "Save agent"
-              }
-            >
-              <div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="gap-1.5 px-2 lg:px-3"
-                  disabled={!changesNotSaved || isBuilding || saveLoading}
-                  onClick={handleSave}
-                  data-testid="navbar-save-button"
-                >
-                  <IconComponent
-                    name={saveLoading ? "Loader2" : "Save"}
-                    className={cn("h-4 w-4", saveLoading && "animate-spin")}
-                  />
-                  <span className="hidden xl:inline">Save</span>
-                </Button>
-              </div>
+          {/* History + zoom */}
+          <div className="flex items-center gap-0.5 rounded-md border bg-muted/30 p-0.5">
+            <ShadTooltip content="Undo">
+              <Button
+                variant="ghost"
+                size="iconSm"
+                className="h-7 w-7"
+                onClick={undo}
+                data-testid="navbar-undo-button"
+              >
+                <IconComponent name="Undo" className="h-4 w-4" />
+              </Button>
             </ShadTooltip>
-            <span
-              className="min-w-0 max-w-[110px] truncate whitespace-nowrap text-xs text-muted-foreground sm:max-w-[160px] md:max-w-[220px]"
-              data-testid="navbar-autosave-status"
-              title={autoSaveStatus}
-            >
-              {autoSaveStatus}
-            </span>
+            <ShadTooltip content="Redo">
+              <Button
+                variant="ghost"
+                size="iconSm"
+                className="h-7 w-7"
+                onClick={redo}
+                data-testid="navbar-redo-button"
+              >
+                <IconComponent name="Redo" className="h-4 w-4" />
+              </Button>
+            </ShadTooltip>
+            <ShadTooltip content="Zoom In">
+              <Button
+                variant="ghost"
+                size="iconSm"
+                className="h-7 w-7"
+                onClick={() => reactFlowInstance?.zoomIn?.()}
+                data-testid="navbar-zoom-plus-button"
+              >
+                <IconComponent name="Plus" className="h-4 w-4" />
+              </Button>
+            </ShadTooltip>
+            <ShadTooltip content="Zoom Out">
+              <Button
+                variant="ghost"
+                size="iconSm"
+                className="h-7 w-7"
+                onClick={() => reactFlowInstance?.zoomOut?.()}
+                data-testid="navbar-zoom-minus-button"
+              >
+                <IconComponent name="Minus" className="h-4 w-4" />
+              </Button>
+            </ShadTooltip>
           </div>
+
+          <div className="h-4 w-px bg-border" />
+
+          {/* Tools */}
+          <Button
+            variant="ghost"
+            size="iconSm"
+            className="h-7 w-7"
+            onClick={() => setOpenTemplatesModal(true)}
+            data-testid="navbar-templates-button"
+            title="Templates"
+          >
+            <IconComponent name="LayoutPanelTop" className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="iconSm"
+            className="h-7 w-7"
+            disabled={!customComponent}
+            onClick={() => {
+              if (customComponent) {
+                addComponent(customComponent, "CustomComponent");
+              }
+            }}
+            data-testid="navbar-custom-code-button"
+            title="Create Custom"
+          >
+            <IconComponent name="Plus" className="h-4 w-4" />
+          </Button>
+
+          <div className="h-4 w-px bg-border" />
+
+          {/* Save */}
+          <ShadTooltip
+            content={
+              effectiveAutoSaving
+                ? "Turn off auto-save in settings to enable manual save only"
+                : "Save agent"
+            }
+          >
+            <div>
+              <Button
+                variant="ghost"
+                size="iconSm"
+                className="h-7 w-7"
+                disabled={!changesNotSaved || isBuilding || saveLoading}
+                onClick={handleSave}
+                data-testid="navbar-save-button"
+              >
+                <IconComponent
+                  name={saveLoading ? "Loader2" : "Save"}
+                  className={cn("h-4 w-4", saveLoading && "animate-spin")}
+                />
+              </Button>
+            </div>
+          </ShadTooltip>
+          <span
+            className="max-w-[100px] truncate whitespace-nowrap text-xs text-muted-foreground"
+            data-testid="navbar-autosave-status"
+            title={autoSaveStatus}
+          >
+            {autoSaveStatus}
+          </span>
+
+          <div className="h-4 w-px bg-border mx-0.5" />
+
+          {/* Right actions */}
           <AgentToolbarOptions
             open={open}
             setOpen={setOpen}
