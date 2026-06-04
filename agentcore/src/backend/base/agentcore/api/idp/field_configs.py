@@ -53,6 +53,18 @@ class HeaderRead(BaseModel):
     class Config:
         from_attributes = True
 
+class LineItemCreate(BaseModel):
+    column_name: str = PydanticField(..., description="The name of the line-item column")
+    column_type: str = PydanticField(..., description="Type: text, number, or date")
+    is_required: bool = PydanticField(default=False, description="Is this column required")
+    display_order: int = PydanticField(..., description="The order index for display")
+
+class LineItemUpdate(BaseModel):
+    column_name: str | None = None
+    column_type: str | None = None
+    is_required: bool | None = None
+    display_order: int | None = None
+
 class LineItemRead(BaseModel):
     id: UUID
     config_id: UUID
@@ -102,6 +114,10 @@ class FieldConfigRead(BaseModel):
         from_attributes = True
 
 class HeaderReorderItem(BaseModel):
+    id: UUID
+    display_order: int
+
+class LineItemReorderItem(BaseModel):
     id: UUID
     display_order: int
 
@@ -663,3 +679,233 @@ async def reorder_headers(
 
     await session.commit()
     return {"message": "Headers reordered successfully."}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Line-Item Sub-Resources Endpoints
+# ──────────────────────────────────────────────────────────────────────
+
+# Line-item columns only support text/number/date (no boolean), matching the
+# idp_field_config_line_items CHECK constraint.
+_LINE_ITEM_TYPES = ('text', 'number', 'date')
+
+
+@router.post("/{id}/line-items", response_model=LineItemRead, status_code=status.HTTP_201_CREATED)
+async def create_line_item(
+    *,
+    session: DbSession,
+    id: UUID,
+    payload: LineItemCreate,
+    current_user: CurrentActiveUser,
+):
+    config = (
+        await session.exec(
+            select(IdpFieldConfiguration).where(
+                IdpFieldConfiguration.id == id, IdpFieldConfiguration.deleted_at.is_(None)
+            )
+        )
+    ).first()
+    if not config:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field configuration not found")
+
+    if not await _can_modify_config(session, current_user, config):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to modify this configuration.")
+
+    # Check column name uniqueness within the configuration
+    existing = (
+        await session.exec(
+            select(IdpFieldConfigLineItem).where(
+                IdpFieldConfigLineItem.config_id == id, IdpFieldConfigLineItem.column_name == payload.column_name
+            )
+        )
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Line-item column name already exists in this configuration.",
+        )
+
+    # Valid column_type check
+    if payload.column_type not in _LINE_ITEM_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid column type. Must be 'text', 'number', or 'date'.",
+        )
+
+    new_line_item = IdpFieldConfigLineItem(
+        config_id=id,
+        column_name=payload.column_name,
+        column_type=payload.column_type,
+        is_required=payload.is_required,
+        display_order=payload.display_order,
+    )
+    session.add(new_line_item)
+
+    config.updated_at = datetime.now(timezone.utc)
+    config.updated_by = current_user.id
+    session.add(config)
+
+    await session.commit()
+    await session.refresh(new_line_item)
+    return new_line_item
+
+
+@router.put("/{id}/line-items/{line_item_id}", response_model=LineItemRead, status_code=status.HTTP_200_OK)
+async def update_line_item(
+    *,
+    session: DbSession,
+    id: UUID,
+    line_item_id: UUID,
+    payload: LineItemUpdate,
+    current_user: CurrentActiveUser,
+):
+    config = (
+        await session.exec(
+            select(IdpFieldConfiguration).where(
+                IdpFieldConfiguration.id == id, IdpFieldConfiguration.deleted_at.is_(None)
+            )
+        )
+    ).first()
+    if not config:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field configuration not found")
+
+    if not await _can_modify_config(session, current_user, config):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to modify this configuration.")
+
+    line_item = (
+        await session.exec(
+            select(IdpFieldConfigLineItem).where(
+                IdpFieldConfigLineItem.id == line_item_id, IdpFieldConfigLineItem.config_id == id
+            )
+        )
+    ).first()
+    if not line_item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Line-item column not found in this configuration."
+        )
+
+    line_item_data = payload.model_dump(exclude_unset=True)
+    if "column_name" in line_item_data and line_item_data["column_name"] != line_item.column_name:
+        # Check uniqueness
+        existing = (
+            await session.exec(
+                select(IdpFieldConfigLineItem).where(
+                    IdpFieldConfigLineItem.config_id == id,
+                    IdpFieldConfigLineItem.column_name == line_item_data["column_name"],
+                    IdpFieldConfigLineItem.id != line_item_id,
+                )
+            )
+        ).first()
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Line-item column name already exists in this configuration.",
+            )
+
+    if "column_type" in line_item_data and line_item_data["column_type"] not in _LINE_ITEM_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid column type. Must be 'text', 'number', or 'date'.",
+        )
+
+    for key, value in line_item_data.items():
+        setattr(line_item, key, value)
+
+    line_item.updated_at = datetime.now(timezone.utc)
+    session.add(line_item)
+
+    config.updated_at = datetime.now(timezone.utc)
+    config.updated_by = current_user.id
+    session.add(config)
+
+    await session.commit()
+    await session.refresh(line_item)
+    return line_item
+
+
+@router.delete("/{id}/line-items/{line_item_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_line_item(
+    *,
+    session: DbSession,
+    id: UUID,
+    line_item_id: UUID,
+    current_user: CurrentActiveUser,
+):
+    config = (
+        await session.exec(
+            select(IdpFieldConfiguration).where(
+                IdpFieldConfiguration.id == id, IdpFieldConfiguration.deleted_at.is_(None)
+            )
+        )
+    ).first()
+    if not config:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field configuration not found")
+
+    if not await _can_modify_config(session, current_user, config):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to modify this configuration.")
+
+    line_item = (
+        await session.exec(
+            select(IdpFieldConfigLineItem).where(
+                IdpFieldConfigLineItem.id == line_item_id, IdpFieldConfigLineItem.config_id == id
+            )
+        )
+    ).first()
+    if not line_item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Line-item column not found in this configuration."
+        )
+
+    await session.delete(line_item)
+
+    config.updated_at = datetime.now(timezone.utc)
+    config.updated_by = current_user.id
+    session.add(config)
+
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.patch("/{id}/line-items/reorder", status_code=status.HTTP_200_OK)
+async def reorder_line_items(
+    *,
+    session: DbSession,
+    id: UUID,
+    payload: list[LineItemReorderItem],
+    current_user: CurrentActiveUser,
+):
+    config = (
+        await session.exec(
+            select(IdpFieldConfiguration).where(
+                IdpFieldConfiguration.id == id, IdpFieldConfiguration.deleted_at.is_(None)
+            )
+        )
+    ).first()
+    if not config:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field configuration not found")
+
+    if not await _can_modify_config(session, current_user, config):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to modify this configuration.")
+
+    for item in payload:
+        line_item = (
+            await session.exec(
+                select(IdpFieldConfigLineItem).where(
+                    IdpFieldConfigLineItem.id == item.id, IdpFieldConfigLineItem.config_id == id
+                )
+            )
+        ).first()
+        if not line_item:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Line item with ID {item.id} not found in this configuration.",
+            )
+        line_item.display_order = item.display_order
+        session.add(line_item)
+
+    config.updated_at = datetime.now(timezone.utc)
+    config.updated_by = current_user.id
+    session.add(config)
+
+    await session.commit()
+    return {"message": "Line items reordered successfully."}

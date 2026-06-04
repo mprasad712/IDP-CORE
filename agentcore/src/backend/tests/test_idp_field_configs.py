@@ -7,14 +7,17 @@ from sqlmodel import select
 from agentcore.main import create_app
 from agentcore.services.deps import session_scope
 from agentcore.services.auth.utils import get_current_active_user
+from agentcore.api.idp import idp_rbac
 from agentcore.services.database.models.user.model import User
 from agentcore.services.database.models.organization.model import Organization
 from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
 from agentcore.services.database.models.idp.config import (
     IdpFieldConfiguration,
     IdpFieldConfigHeader,
+    IdpFieldConfigLineItem,
     IdpAgent,
 )
+from agentcore.services.database.models.role.model import Role
 
 # Global test variables to control current user
 mock_user = None
@@ -32,12 +35,12 @@ async def setup_test_data():
     """Sets up a test organization, root user, standard user, and memberships."""
     async with session_scope() as session:
         # Check if root user exists or create a test one
-        root_user = (await session.exec(select(User).where(User.username == "ather8576@gmail.com"))).first()
+        root_user = (await session.exec(select(User).where(User.username == "idp_root_admin@example.com"))).first()
         if not root_user:
             root_user = User(
                 id=uuid4(),
-                username="ather8576@gmail.com",
-                email="ather8576@gmail.com",
+                username="idp_root_admin@example.com",
+                email="idp_root_admin@example.com",
                 password="testpassword",
                 is_active=True,
                 is_superuser=True,
@@ -73,13 +76,16 @@ async def setup_test_data():
         await session.refresh(std_user)
         await session.refresh(test_org)
 
+        # Resolve the developer role by name (UUIDs differ per environment)
+        developer_role = (await session.exec(select(Role).where(Role.name == "developer"))).first()
+
         # Create user organization membership
         membership = UserOrganizationMembership(
             id=uuid4(),
             user_id=std_user.id,
             org_id=test_org.id,
             status="active",
-            role_id=UUID("90e033dd-5ddf-473c-83a5-3bbd5fd954a6"), # developer role
+            role_id=developer_role.id, # developer role
         )
         session.add(membership)
         await session.commit()
@@ -100,10 +106,13 @@ async def setup_test_data():
                 agents = (await cleanup_session.exec(select(IdpAgent).where(IdpAgent.field_config_id.in_(config_ids)))).all()
                 for a in agents:
                     await cleanup_session.delete(a)
-                # Headers are deleted by cascade, but let's delete them just in case
+                # Headers/line-items are deleted by cascade, but let's delete them just in case
                 headers = (await cleanup_session.exec(select(IdpFieldConfigHeader).where(IdpFieldConfigHeader.config_id.in_(config_ids)))).all()
                 for h in headers:
                     await cleanup_session.delete(h)
+                line_items = (await cleanup_session.exec(select(IdpFieldConfigLineItem).where(IdpFieldConfigLineItem.config_id.in_(config_ids)))).all()
+                for li in line_items:
+                    await cleanup_session.delete(li)
                 for c in configs:
                     await cleanup_session.delete(c)
 
@@ -140,6 +149,10 @@ async def test_field_configs_flow(setup_test_data):
 
     app = create_app()
     app.dependency_overrides[get_current_active_user] = get_mock_user
+    # Bypass the Redis-backed idp_rbac router guard under TestClient (its own
+    # event loop conflicts with the module-level async Redis pool); endpoint-level
+    # scope checks are still exercised. The guard itself is covered by the IDP permissions tests.
+    app.dependency_overrides[idp_rbac] = get_mock_user
     client = TestClient(app)
 
     # ──────────────────────────────────────────────────────────────────
@@ -290,7 +303,7 @@ async def test_field_configs_flow(setup_test_data):
     assert response.status_code == 403
 
     # ──────────────────────────────────────────────────────────────────
-    # 6. Header Sub-resources Endpoints (B05)
+    # 6. Header Sub-resources Endpoints
     # ──────────────────────────────────────────────────────────────────
     mock_user = root_user
     # POST new header
@@ -338,6 +351,100 @@ async def test_field_configs_flow(setup_test_data):
     # DELETE header
     response = client.delete(f"/api/v1/idp/field-configs/{config_id}/headers/{new_header_id}")
     assert response.status_code == 204
+
+    # ──────────────────────────────────────────────────────────────────
+    # 6b. Line-Item Sub-resources Endpoints
+    # ──────────────────────────────────────────────────────────────────
+    mock_user = root_user
+    # POST new line-item column
+    new_li_payload = {
+        "column_name": "item_description",
+        "column_type": "text",
+        "is_required": True,
+        "display_order": 1,
+    }
+    response = client.post(f"/api/v1/idp/field-configs/{config_id}/line-items", json=new_li_payload)
+    assert response.status_code == 201
+    new_line_item_id = response.json()["id"]
+    assert response.json()["column_name"] == "item_description"
+
+    # Add a second column
+    second_li_payload = {
+        "column_name": "quantity",
+        "column_type": "number",
+        "is_required": False,
+        "display_order": 2,
+    }
+    response = client.post(f"/api/v1/idp/field-configs/{config_id}/line-items", json=second_li_payload)
+    assert response.status_code == 201
+    second_line_item_id = response.json()["id"]
+
+    # Verify uniqueness within configuration
+    response = client.post(f"/api/v1/idp/field-configs/{config_id}/line-items", json=new_li_payload)
+    assert response.status_code == 400
+    assert "already exists" in response.json()["detail"]
+
+    # Invalid column_type ('boolean' is NOT allowed for line items) -> 400
+    bad_type_payload = {
+        "column_name": "is_taxable",
+        "column_type": "boolean",
+        "display_order": 3,
+    }
+    response = client.post(f"/api/v1/idp/field-configs/{config_id}/line-items", json=bad_type_payload)
+    assert response.status_code == 400
+    assert "Invalid column type" in response.json()["detail"]
+
+    # PUT update line-item
+    up_li_payload = {
+        "display_order": 5,
+        "is_required": False,
+    }
+    response = client.put(
+        f"/api/v1/idp/field-configs/{config_id}/line-items/{new_line_item_id}", json=up_li_payload
+    )
+    assert response.status_code == 200
+    assert response.json()["display_order"] == 5
+    assert response.json()["is_required"] is False
+
+    # PUT update with invalid type -> 400
+    response = client.put(
+        f"/api/v1/idp/field-configs/{config_id}/line-items/{new_line_item_id}",
+        json={"column_type": "boolean"},
+    )
+    assert response.status_code == 400
+
+    # PATCH reorder line-items
+    li_reorder_payload = [
+        {"id": new_line_item_id, "display_order": 1},
+        {"id": second_line_item_id, "display_order": 2},
+    ]
+    response = client.patch(
+        f"/api/v1/idp/field-configs/{config_id}/line-items/reorder", json=li_reorder_payload
+    )
+    assert response.status_code == 200
+
+    # GET details to confirm line_items present and sorted
+    details_res_li = client.get(f"/api/v1/idp/field-configs/{config_id}")
+    line_items_list = details_res_li.json()["line_items"]
+    assert len(line_items_list) == 2
+    assert line_items_list[0]["display_order"] <= line_items_list[1]["display_order"]
+
+    # Standard user (no modify rights on this root-owned org config) -> 403 on create
+    mock_user = std_user
+    response = client.post(
+        f"/api/v1/idp/field-configs/{config_id}/line-items",
+        json={"column_name": "blocked", "column_type": "text", "display_order": 9},
+    )
+    assert response.status_code == 403
+    mock_user = root_user
+
+    # DELETE line-item
+    response = client.delete(f"/api/v1/idp/field-configs/{config_id}/line-items/{second_line_item_id}")
+    assert response.status_code == 204
+
+    # Confirm deletion
+    details_res_li2 = client.get(f"/api/v1/idp/field-configs/{config_id}")
+    assert len(details_res_li2.json()["line_items"]) == 1
 
     # ──────────────────────────────────────────────────────────────────
     # 7. DELETE (Soft-delete & Blocker Check)
@@ -411,3 +518,12 @@ async def test_field_configs_flow(setup_test_data):
 
     # Cleanup app dependency overrides
     app.dependency_overrides.clear()
+
+
+def test_idp_health():
+    """The IDP router is mounted and its health endpoint is reachable."""
+    app = create_app()
+    client = TestClient(app)
+    response = client.get("/api/v1/idp/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "service": "IDP feature layer"}
