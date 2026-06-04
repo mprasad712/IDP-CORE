@@ -194,6 +194,11 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_hitl_approvals_page",
         "hitl_approve",
         "hitl_reject",
+        # IDP
+        "view_idp",
+        "manage_idp",
+        "review_docs",
+        "admin_idp",
     ],
     "leader_executive": [
         "view_dashboard",
@@ -246,6 +251,11 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_hitl_approvals_page",
         "hitl_approve",
         "hitl_reject",
+        # IDP
+        "view_idp",
+        "manage_idp",
+        "review_docs",
+        "admin_idp",
     ],
     "department_admin": [
         "view_dashboard",
@@ -295,6 +305,11 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_hitl_approvals_page",
         "hitl_approve",
         "hitl_reject",
+        # IDP
+        "view_idp",
+        "manage_idp",
+        "review_docs",
+        "admin_idp",
     ],
     "developer": [
         "view_dashboard",
@@ -326,6 +341,10 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_connector_page",
         "add_connector",
         "view_hitl_approvals_page",
+        # IDP: developers build + review, not admin
+        "view_idp",
+        "manage_idp",
+        "review_docs",
     ],
     "business_user": [
         "view_dashboard",
@@ -366,7 +385,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
     ],
 }
 
-PERMISSION_VERSION = "v22"  # bump when permissions change
+PERMISSION_VERSION = "v23"  # bump when permissions change (v23: + IDP perms view_idp/manage_idp/review_docs/admin_idp)
 
 
 class PermissionCacheService:
