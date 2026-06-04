@@ -23,7 +23,7 @@ from sqlalchemy import (
     Uuid,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlmodel import Field, SQLModel
+from sqlmodel import Field, SQLModel, Relationship
 
 
 def _utcnow() -> datetime:
@@ -49,6 +49,15 @@ class IdpFieldConfiguration(SQLModel, table=True):  # type: ignore[call-arg]
     created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
     updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
 
+    headers: list[IdpFieldConfigHeader] = Relationship(
+        back_populates="field_config",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+    line_items: list[IdpFieldConfigLineItem] = Relationship(
+        back_populates="field_config",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+
     __table_args__ = (
         UniqueConstraint("org_id", "name", name="uq_idp_field_config_org_name"),
     )
@@ -70,6 +79,8 @@ class IdpFieldConfigHeader(SQLModel, table=True):  # type: ignore[call-arg]
     created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
     updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
 
+    field_config: IdpFieldConfiguration = Relationship(back_populates="headers")
+
     __table_args__ = (
         UniqueConstraint("config_id", "field_name", name="uq_idp_cfg_header_config_field"),
         CheckConstraint("field_type IN ('text','number','date','boolean')", name="ck_idp_cfg_header_type"),
@@ -90,6 +101,8 @@ class IdpFieldConfigLineItem(SQLModel, table=True):  # type: ignore[call-arg]
     display_order: int = Field(sa_column=Column(Integer, nullable=False))
     created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
     updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
+
+    field_config: IdpFieldConfiguration = Relationship(back_populates="line_items")
 
     __table_args__ = (
         UniqueConstraint("config_id", "column_name", name="uq_idp_cfg_line_config_col"),
