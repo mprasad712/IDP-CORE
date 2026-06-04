@@ -60,7 +60,43 @@ from .cost_limit import CostLimit
 from .cost_limit_notification import CostLimitNotification
 from .guardrail_execution_log import GuardrailExecutionLog
 
+# IDP (Intelligent Document Processing) — 16 new additive idp_* tables
+from .idp import (
+    IdpAgent,
+    IdpAgentRule,
+    IdpBulkProcessingBatch,
+    IdpDetectedElement,
+    IdpDocument,
+    IdpDocumentBatch,
+    IdpDocumentClassification,
+    IdpDocumentSection,
+    IdpEntityLink,
+    IdpExtractedHeader,
+    IdpExtractedLineItem,
+    IdpFieldConfigHeader,
+    IdpFieldConfigLineItem,
+    IdpFieldConfiguration,
+    IdpProcessingJob,
+    IdpReviewSession,
+)
+
 __all__ = [
+    "IdpAgent",
+    "IdpAgentRule",
+    "IdpBulkProcessingBatch",
+    "IdpDetectedElement",
+    "IdpDocument",
+    "IdpDocumentBatch",
+    "IdpDocumentClassification",
+    "IdpDocumentSection",
+    "IdpEntityLink",
+    "IdpExtractedHeader",
+    "IdpExtractedLineItem",
+    "IdpFieldConfigHeader",
+    "IdpFieldConfigLineItem",
+    "IdpFieldConfiguration",
+    "IdpProcessingJob",
+    "IdpReviewSession",
     "Agent",
     "AgentApiKey",
     "AgentBundle",
