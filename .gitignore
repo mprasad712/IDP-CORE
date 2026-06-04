@@ -1,0 +1,21 @@
+# Python compiled files
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Environment/secret variables
+.env
+**/node_modules/
+./agentcore/src/backend/node_modules/
+
+# Logs
+*.log
+**/loguru/
+
+# Local storage and keys
+**/knowledge_base_storage/
