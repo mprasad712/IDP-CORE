@@ -42,7 +42,7 @@ export default function FloatingPanel({
 
   return (
     <div
-      className="absolute z-50 flex flex-col overflow-hidden rounded-xl border bg-background shadow-2xl"
+      className="absolute z-[40] flex flex-col overflow-hidden rounded-xl border bg-background shadow-2xl"
       style={{
         left: pos.x,
         top: pos.y,

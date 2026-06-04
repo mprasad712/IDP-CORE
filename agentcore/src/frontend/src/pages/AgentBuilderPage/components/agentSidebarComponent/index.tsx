@@ -36,6 +36,7 @@ import useAgentStore from "../../../../stores/agentStore";
 import { useTypesStore } from "../../../../stores/typesStore";
 import type { APIClassType } from "../../../../types/api";
 import isWrappedWithClass from "../PageComponent/utils/is-wrapped-with-class";
+import { IDP_NODES } from "./idpNodes";
 import { CategoryGroup } from "./components/categoryGroup";
 import NoResultsMessage from "./components/emptySearchComponent";
 import McpSidebarGroup from "./components/McpSidebarPanel";
@@ -223,37 +224,41 @@ export function AgentSidebarComponent({ isLoading, readOnly = false }: AgentSide
   }, []);
   const [mcpSearchData, setMcpSearchData] = useState<any[]>([]);
 
-  // Create base data that includes MCP category when available
+  // ── IDP mode: IDP static nodes + backend Models category ─────────────────
   const baseData = useMemo(() => {
-    if (mcpSuccess && mcpServers && data["agents"]?.["MCPTools"]) {
-      const mcpComponent = data["agents"]["MCPTools"];
-      const newMcpSearchData = mcpServers.map((mcpServer) => ({
-        ...mcpComponent,
-        display_name: mcpServer.name,
-        description: `MCP Server: ${mcpServer.name}`,
-        category: "MCP",
-        key: `mcp_${mcpServer.name}`,
-        template: {
-          ...mcpComponent.template,
-          mcp_server: {
-            ...mcpComponent.template.mcp_server,
-            value: mcpServer,
-          },
-        },
-      }));
-
-      const mcpCategoryData: Record<string, any> = {};
-      newMcpSearchData.forEach((mcp) => {
-        mcpCategoryData[mcp.display_name] = mcp;
-      });
-
-      return {
-        ...data,
-        MCP: mcpCategoryData,
-      };
+    const merged: Record<string, any> = { ...IDP_NODES };
+    if (data["models"]) {
+      merged["models"] = data["models"];
     }
-    return data;
-  }, [data, mcpSuccess, mcpServers]);
+    return merged;
+  }, [data]);
+
+  // ── Previous full mode (preserved for rollback) ───────────────────────────
+  // const baseData = useMemo(() => {
+  //   if (mcpSuccess && mcpServers && data["agents"]?.["MCPTools"]) {
+  //     const mcpComponent = data["agents"]["MCPTools"];
+  //     const newMcpSearchData = mcpServers.map((mcpServer) => ({
+  //       ...mcpComponent,
+  //       display_name: mcpServer.name,
+  //       description: `MCP Server: ${mcpServer.name}`,
+  //       category: "MCP",
+  //       key: `mcp_${mcpServer.name}`,
+  //       template: {
+  //         ...mcpComponent.template,
+  //         mcp_server: {
+  //           ...mcpComponent.template.mcp_server,
+  //           value: mcpServer,
+  //         },
+  //       },
+  //     }));
+  //     const mcpCategoryData: Record<string, any> = {};
+  //     newMcpSearchData.forEach((mcp) => {
+  //       mcpCategoryData[mcp.display_name] = mcp;
+  //     });
+  //     return { ...data, MCP: mcpCategoryData };
+  //   }
+  //   return data;
+  // }, [data, mcpSuccess, mcpServers]);
 
   const [dataFilter, setFilterData] = useState(baseData);
 

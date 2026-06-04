@@ -52,7 +52,7 @@ const LogCanvasControls = () => {
       {/* Toggle button — bottom-left corner */}
       <Panel
         data-testid="canvas_controls"
-        className="react-flow__controls !m-2 rounded-md"
+        className="react-flow__controls !m-2 !z-[45] rounded-md"
         position="bottom-left"
       >
         <Button
@@ -73,7 +73,7 @@ const LogCanvasControls = () => {
       {/* Slide-up drawer — spans full width at bottom of canvas */}
       <Panel
         position="bottom-left"
-        className="!left-0 !right-0 !bottom-0 !m-0 !w-full pointer-events-none"
+        className="!left-0 !right-0 !bottom-0 !m-0 !w-full !z-[45] pointer-events-none"
       >
         <div
           className={cn(

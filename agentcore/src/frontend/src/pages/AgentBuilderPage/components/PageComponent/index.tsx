@@ -818,7 +818,7 @@ export default function Page({
             {!view && (
               <>
                 <Panel
-                  className="react-flow__controls !left-0 !top-14 !m-2 rounded-md"
+                  className="react-flow__controls !left-0 !top-14 !m-2 !z-[45] rounded-md"
                   position="top-left"
                 >
                   <Button
