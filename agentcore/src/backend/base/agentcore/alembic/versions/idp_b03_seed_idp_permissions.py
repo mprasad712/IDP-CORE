@@ -1,4 +1,4 @@
-"""Seed IDP permissions + grant them to non-root roles (B03).
+"""Seed IDP permissions + grant them to non-root roles.
 
 Inserts the four IDP permission keys into the ``permission`` table and grants them
 to the relevant roles via ``role_permission`` (non-root roles resolve permissions

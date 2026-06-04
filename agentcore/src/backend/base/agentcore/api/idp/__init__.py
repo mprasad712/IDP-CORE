@@ -26,10 +26,10 @@ async def idp_rbac(
     request: Request,
     current_user: User = Depends(get_current_active_user),
 ) -> User:
-    """B03 — baseline auth + RBAC for every IDP endpoint (method-aware).
+    """Baseline auth + RBAC for every IDP endpoint (method-aware).
 
     Reads (GET/HEAD/OPTIONS) require ``view_idp``; writes require ``manage_idp``.
-    Endpoint-specific permissions are layered by their owners as features are built:
+    Endpoint-specific permissions are layered as features are built:
     Processed-Docs review/approve -> ``review_docs``; admin/config overrides -> ``admin_idp``.
     """
     required = "view_idp" if request.method in _READ_METHODS else "manage_idp"

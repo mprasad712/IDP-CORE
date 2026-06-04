@@ -194,7 +194,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_hitl_approvals_page",
         "hitl_approve",
         "hitl_reject",
-        # IDP (Phase 0 — B03)
+        # IDP
         "view_idp",
         "manage_idp",
         "review_docs",
@@ -251,7 +251,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_hitl_approvals_page",
         "hitl_approve",
         "hitl_reject",
-        # IDP (Phase 0 — B03)
+        # IDP
         "view_idp",
         "manage_idp",
         "review_docs",
@@ -305,7 +305,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_hitl_approvals_page",
         "hitl_approve",
         "hitl_reject",
-        # IDP (Phase 0 — B03)
+        # IDP
         "view_idp",
         "manage_idp",
         "review_docs",
@@ -341,7 +341,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_connector_page",
         "add_connector",
         "view_hitl_approvals_page",
-        # IDP (Phase 0 — B03): developers build + review, not admin
+        # IDP: developers build + review, not admin
         "view_idp",
         "manage_idp",
         "review_docs",
