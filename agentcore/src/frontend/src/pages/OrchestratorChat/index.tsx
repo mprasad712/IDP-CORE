@@ -46,7 +46,7 @@ import cohereLogo from "@/assets/cohere_logo.svg";
 import perplexityLogo from "@/assets/perplexity_logo.svg";
 import nvidiaLogo from "@/assets/nvidia_logo.svg";
 import huggingfaceLogo from "@/assets/huggingface_logo.svg";
-import micoreLogo from "@/assets/mibuddy_logo.png";
+import MiCoreLogo from "@/assets/mibuddy_logo.png";
 import grokLogo from "@/assets/grok_logo.png";
 import nanoBananaLogo from "@/assets/nano_banana_logo.png";
 import dalleLogo from "@/assets/dalle_logo.svg";
@@ -435,7 +435,7 @@ function resolveModelIcon(model: { model_id?: string; model_name?: string; displ
   // If display_name starts with "mibuddy", always show mibuddy icon regardless of model family.
   // Only check display_name — model_id may contain "mibuddy" as a prefix for all models (e.g. "mibuddy-gpt-5.2-chat").
   const displayName = (model.display_name || "").toLowerCase();
-  if (/^mibuddy/.test(displayName)) return micoreLogo;
+  if (/^mibuddy/.test(displayName)) return MiCoreLogo;
 
   // Combine all name fields + provider so we can match the actual model family
   // even when it's deployed behind a provider like Azure.
@@ -457,12 +457,12 @@ function resolveModelIcon(model: { model_id?: string; model_name?: string; displ
   if (/gpt|openai|o[13][\s_-]|o[13]$|o4/.test(hay)) return openaiLogo;
 
   // 2. MiBuddy / MiCore — only if no known model family matched above
-  if (/mibuddy|mi[\s_-]?core|micore/.test(hay)) return micoreLogo;
+  if (/mibuddy|mi[\s_-]?core|MiCore/.test(hay)) return MiCoreLogo;
 
   // 3. Provider-based fallbacks (e.g. azure with a custom deployment name)
   const provider = (model.provider || "").toLowerCase();
   if (provider === "openai" || provider === "openai_compatible") return openaiLogo;
-  if (provider === "azure" || provider === "azure_ai") return micoreLogo;
+  if (provider === "azure" || provider === "azure_ai") return MiCoreLogo;
   if (provider === "anthropic") return claudeLogo;
   if (provider === "google" || provider === "google_vertex") return geminiLogo;
   return defaultLlmLogo;

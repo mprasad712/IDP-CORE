@@ -205,140 +205,218 @@ export default function ApprovalPage() {
 
   };
 
+  /* ── Status colour map ── */
+  const statusColors: Record<string, string> = {
+    pending:   "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+    approved:  "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+    rejected:  "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+    deployed:  "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+    cancelled: "bg-muted text-muted-foreground",
+  };
+
+  const approvedCount  = sourceApprovals.filter((a) => a.status === "approved").length;
+  const rejectedCount  = sourceApprovals.filter((a) => a.status === "rejected").length;
+  const deployedCount  = sourceApprovals.filter((a) => a.status === "deployed").length;
+
+  const filterOptions = activeTab === "package"
+    ? (["all", "pending", "approved", "rejected", "deployed", "cancelled"] as FilterType[])
+    : (["all", "pending", "approved", "rejected"] as FilterType[]);
+
+  const filterCount = (f: FilterType) =>
+    f === "all" ? sourceApprovals.length : sourceApprovals.filter((a) => a.status === f).length;
+
   return (
-    <div className="flex h-full w-full flex-col overflow-auto">
-      {/* Header */}
-      <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6 md:px-8 md:py-4">
-        <div>
-          <div className="mb-1 flex items-center gap-3">
-            <h1 className="text-lg font-semibold md:text-xl">{t("Review & Approval")}</h1>
-            {pendingCount > 0 && (
-              <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-amber-300">
-                {t("{{count}} pending", { count: pendingCount })}
-              </span>
-            )}
-          </div>
-          <p className="text-sm text-muted-foreground">
-            {t("Review and approve model, MCP, AI agent, and package requests")}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {isRoot && regions.length > 0 && (
-            <div className="flex items-center gap-2">
-              <Globe className="h-4 w-4 text-muted-foreground" />
-              <Select value={selectedRegionCode ?? ""} onValueChange={setSelectedRegion}>
-                <SelectTrigger className="w-[220px]">
-                  <SelectValue placeholder={t("Select region")} />
-                </SelectTrigger>
-                <SelectContent>
-                  {regions
-                    .filter((region) => region.code)
-                    .map((region) => (
-                      <SelectItem key={region.code} value={region.code}>
-                        {region.name}
-                        {region.is_hub ? ` (${t("Hub")})` : ""}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          {/* Search Bar */}
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <input
-              type="text"
-              placeholder={t("Search agents...")}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full rounded-lg border border-border bg-card py-2.5 pl-10 pr-4 text-sm text-foreground placeholder:text-muted-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring sm:w-64"
-            />
-          </div>
-        </div>
-      </div>
+    <div className="flex h-full w-full flex-col overflow-hidden bg-[#F7F5F3] dark:bg-[hsl(222,28%,8%)]">
 
-      {isRoot && isRemoteRegion && selectedRegionCode && (
-        <div className="border-b border-amber-200 bg-amber-50/70 px-4 py-3 sm:px-6 md:px-8 dark:border-amber-900/30 dark:bg-amber-950/10">
-          <p className="text-sm text-amber-800 dark:text-amber-200">
-            {t("Viewing and managing package approvals for {{region}} from hub.", {
-              region: regions.find((r) => r.code === selectedRegionCode)?.name ?? selectedRegionCode,
-            })}
-          </p>
-        </div>
-      )}
+      {/* ══ PAGE HEADER ══ */}
+      <div className="flex-shrink-0 border-b bg-background shadow-sm">
+        <div className="px-6 py-5">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
 
-      {/* Filter Tabs + Status Tabs */}
-      <div className="flex items-center gap-3 border-b border-border px-4 py-3 sm:px-6 md:px-8">
-        {visibleTabs.map((tab) => (
-          <Button
-            key={tab.id}
-            size="sm"
-            variant={activeTab === tab.id ? "default" : "outline"}
-            onClick={() => setActiveTab(tab.id)}
-          >
-            {t(tab.label)}
-          </Button>
-        ))}
-
-        <div className="h-6 w-px bg-border mx-1" />
-
-        {(activeTab === "package"
-          ? (["all", "pending", "approved", "rejected", "deployed", "cancelled"] as FilterType[])
-          : (["all", "pending", "approved", "rejected"] as FilterType[])
-        ).map((type) => (
-          <Button
-            key={type}
-            size="sm"
-            variant={filter === type ? "default" : "outline"}
-            onClick={() => setFilter(type)}
-          >
-            {t(type.charAt(0).toUpperCase() + type.slice(1))}
-          </Button>
-        ))}
-      </div>
-
-      {/* Agent Cards */}
-      <div className="flex-1 overflow-auto p-4 sm:p-6">
-        {isLoadingAgents || (activeTab === "package" && isLoadingPackageRequests) ? (
-          <div className="flex h-full items-center justify-center">
-            <CustomLoader />
-          </div>
-        ) : (
-          <div className="space-y-6">
-            {filteredAgents.length === 0 ? (
-              <div className="rounded-lg border border-border bg-card p-12 text-center">
-                <p className="text-muted-foreground">
-                  {searchQuery
-                    ? t("No agents found matching your search")
-                    : noAgentsMessage}
+            {/* Title + description */}
+            <div className="flex items-center gap-3">
+              <div
+                className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl shadow-sm"
+                style={{ background: "linear-gradient(135deg,rgba(208,74,2,0.15) 0%,rgba(208,74,2,0.06) 100%)" }}
+              >
+                <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="#D04A02" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/>
+                </svg>
+              </div>
+              <div>
+                <h1 className="text-xl font-bold text-foreground">{t("Review & Approval")}</h1>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {t("Manage agent, model, MCP, and package requests")}
                 </p>
               </div>
-            ) : (
-              filteredAgents.map((agent) => (
-                <AgentCard
-                  key={agent.id}
-                  {...agent}
-                  entityType={agent.entityType}
-                  onReject={() => handleRejectClick(agent)}
-                  onApprove={() => handleApproveClick(agent)}
-                  onReviewDetails={() =>
-                    agent.entityType === "mcp"
-                      ? setErrorData({ title: t("Use MCP Config for MCP approvals") })
-                      : agent.entityType === "package"
-                        ? undefined
-                      : navigate(`/approval/${agent.id}/review`)
-                  }
-                  onViewMcpConfig={() => handleMcpConfigClick(agent)}
-                  onDeploy={() => handlePackageDeploy(agent)}
+            </div>
+
+            {/* Region + Search */}
+            <div className="flex flex-wrap items-center gap-2">
+              {isRoot && regions.length > 0 && (
+                <div className="flex items-center gap-1.5 rounded-lg border border-border bg-muted/40 px-2 py-1.5">
+                  <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                  <Select value={selectedRegionCode ?? ""} onValueChange={setSelectedRegion}>
+                    <SelectTrigger className="h-auto border-none bg-transparent p-0 text-xs font-medium shadow-none focus:ring-0 w-[160px]">
+                      <SelectValue placeholder={t("Select region")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {regions.filter((r) => r.code).map((r) => (
+                        <SelectItem key={r.code} value={r.code}>
+                          {r.name}{r.is_hub ? ` (${t("Hub")})` : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  type="text"
+                  placeholder={t("Search…")}
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="h-9 rounded-lg border border-border bg-background py-2 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-[#D04A02] focus:outline-none focus:ring-2 focus:ring-[#D04A02]/10 sm:w-56"
                 />
-              ))
-            )}
+              </div>
+            </div>
+          </div>
+
+          {/* ── Stats strip ── */}
+          <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {[
+              { label: t("Total"),    value: sourceApprovals.length, accent: "text-foreground",       bg: "bg-muted/50" },
+              { label: t("Pending"),  value: pendingCount,           accent: "text-amber-600 dark:text-amber-400",   bg: "bg-amber-50 dark:bg-amber-900/20" },
+              { label: t("Approved"), value: approvedCount,          accent: "text-emerald-600 dark:text-emerald-400", bg: "bg-emerald-50 dark:bg-emerald-900/20" },
+              { label: t("Rejected"), value: rejectedCount,          accent: "text-red-600 dark:text-red-400",       bg: "bg-red-50 dark:bg-red-900/20" },
+            ].map((s) => (
+              <div
+                key={s.label}
+                className={`flex items-center gap-3 rounded-xl border border-border/50 px-4 py-3 ${s.bg}`}
+              >
+                <span className={`text-2xl font-bold tabular-nums ${s.accent}`}>{s.value}</span>
+                <span className="text-xs font-medium text-muted-foreground">{s.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Remote region notice */}
+        {isRoot && isRemoteRegion && selectedRegionCode && (
+          <div className="border-t border-amber-200 bg-amber-50/70 px-6 py-2.5 dark:border-amber-900/30 dark:bg-amber-950/10">
+            <p className="text-xs text-amber-800 dark:text-amber-200">
+              {t("Viewing package approvals for {{region}} from hub.", {
+                region: regions.find((r) => r.code === selectedRegionCode)?.name ?? selectedRegionCode,
+              })}
+            </p>
           </div>
         )}
 
+        {/* ── Type tabs + Status filter pills ── */}
+        <div className="flex flex-wrap items-center gap-3 border-t border-border/50 px-6 py-3">
+
+          {/* Segmented type selector */}
+          {visibleTabs.length > 1 && (
+            <div className="flex items-center rounded-lg border border-border bg-muted/50 p-0.5 gap-0.5">
+              {visibleTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id)}
+                  className={[
+                    "rounded-md px-3 py-1.5 text-xs font-semibold transition-all duration-150",
+                    activeTab === tab.id
+                      ? "bg-background shadow-sm text-[#D04A02]"
+                      : "text-muted-foreground hover:text-foreground",
+                  ].join(" ")}
+                >
+                  {t(tab.label)}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="h-5 w-px bg-border/60" />
+
+          {/* Status filter pills */}
+          <div className="flex flex-wrap gap-1.5">
+            {filterOptions.map((type) => {
+              const count = filterCount(type);
+              const active = filter === type;
+              return (
+                <button
+                  key={type}
+                  type="button"
+                  onClick={() => setFilter(type)}
+                  className={[
+                    "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-all duration-150",
+                    active
+                      ? "border-[#D04A02] bg-[#D04A02] text-white shadow-sm"
+                      : "border-border text-muted-foreground hover:border-[#D04A02]/50 hover:text-[#D04A02]",
+                  ].join(" ")}
+                >
+                  {t(type.charAt(0).toUpperCase() + type.slice(1))}
+                  {count > 0 && (
+                    <span className={`rounded-full px-1.5 text-[9px] font-bold ${active ? "bg-white/20" : "bg-muted"}`}>
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </div>
 
-      {/* Action Modal */}
+      {/* ══ CONTENT ══ */}
+      <div className="flex-1 overflow-auto p-6">
+        {isLoadingAgents || (activeTab === "package" && isLoadingPackageRequests) ? (
+          <div className="flex h-48 items-center justify-center">
+            <CustomLoader />
+          </div>
+        ) : filteredAgents.length === 0 ? (
+          /* ── Empty state ── */
+          <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-background py-20 text-center">
+            <div
+              className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl"
+              style={{ background: "rgba(208,74,2,0.08)" }}
+            >
+              <svg className="h-8 w-8 text-[#D04A02]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/>
+              </svg>
+            </div>
+            <h3 className="text-base font-semibold text-foreground">
+              {searchQuery ? t('No results for “{{q}}”', { q: searchQuery }) : t("Nothing to review")}
+            </h3>
+            <p className="mt-1 max-w-xs text-sm text-muted-foreground">
+              {searchQuery ? t("Try a different search term or clear the filter.") : noAgentsMessage}
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {filteredAgents.map((agent) => (
+              <AgentCard
+                key={agent.id}
+                {...agent}
+                entityType={agent.entityType}
+                onReject={() => handleRejectClick(agent)}
+                onApprove={() => handleApproveClick(agent)}
+                onReviewDetails={() =>
+                  agent.entityType === "mcp"
+                    ? setErrorData({ title: t("Use MCP Config for MCP approvals") })
+                    : agent.entityType === "package"
+                      ? undefined
+                      : navigate(`/approval/${agent.id}/review`)
+                }
+                onViewMcpConfig={() => handleMcpConfigClick(agent)}
+                onDeploy={() => handlePackageDeploy(agent)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
       <ActionModal
         open={isOpen}
         setOpen={closeModal}

@@ -270,7 +270,7 @@ async def send_admin_user_created_email(
         logger.warning("Skipping admin-created-user email because SMTP config is incomplete: %s", exc)
         return False, str(exc)
 
-    subject = "Your MiCore IDP account has been created"
+    subject = "Your Digital Workmate IDP account has been created"
 
     dept_row = f"<b>Department:</b> {escape(department_name or '-')}<br>" if department_name else ""
     org_row = f"<b>Organization:</b> {escape(organization_name or '-')}<br>" if organization_name else ""
@@ -280,7 +280,7 @@ async def send_admin_user_created_email(
 <body style="font-family: Calibri, Arial, sans-serif; font-size: 11pt; color: #000; max-width: 600px; margin: 0 auto;">
 <div style="border-top: 4px solid #D04A02; padding: 32px 24px;">
   <p>Hello <b>{escape(recipient_name)}</b>,</p>
-  <p>An administrator has created an account for you on <b>MiCore IDP</b>.</p>
+  <p>An administrator has created an account for you on <b>Digital Workmate IDP</b>.</p>
   <p>
     <b>Username:</b> {escape(recipient_email)}<br>
     <b>Role:</b> {escape(role)}<br>
@@ -301,7 +301,7 @@ async def send_admin_user_created_email(
     This link expires in 72 hours. If you did not expect this email, please contact your administrator.
   </p>
   <p style="color:#666; font-size: 9pt;">
-    This is an automated notification from MiCore IDP. Please do not reply to this email.
+    This is an automated notification from Digital Workmate IDP. Please do not reply to this email.
   </p>
 </div>
 </body>
@@ -309,7 +309,7 @@ async def send_admin_user_created_email(
 
     text_body = (
         f"Hello {recipient_name},\n\n"
-        "An administrator has created an account for you on MiCore IDP.\n\n"
+        "An administrator has created an account for you on Digital Workmate IDP.\n\n"
         f"Username: {recipient_email}\n"
         f"Role: {role}\n"
         f"Organization: {organization_name or '-'}\n"
@@ -318,7 +318,7 @@ async def send_admin_user_created_email(
         "To set your password, visit the link below:\n"
         f"{set_password_link}\n\n"
         "This link expires in 72 hours.\n\n"
-        "— MiCore IDP Team"
+        "— Digital Workmate IDP Team"
     )
 
     try:
@@ -353,16 +353,16 @@ async def send_verification_email(
         logger.warning("Skipping verification email because SMTP config is incomplete: %s", exc)
         return False, str(exc)
 
-    subject = "Verify your email address - MiCore IDP"
+    subject = "Verify your email address - Digital Workmate IDP"
 
     text_body = (
         f"Hello {recipient_name},\n\n"
-        "Thank you for registering with MiCore IDP.\n\n"
+        "Thank you for registering with Digital Workmate IDP.\n\n"
         "Please verify your email address by visiting the link below:\n"
         f"{verification_link}\n\n"
         "This link expires in 24 hours.\n\n"
         "If you did not create an account, you can ignore this email.\n\n"
-        "— MiCore IDP Team"
+        "— Digital Workmate IDP Team"
     )
 
     html_body = f"""<!DOCTYPE html>
@@ -370,7 +370,7 @@ async def send_verification_email(
 <body style="font-family: Calibri, Arial, sans-serif; font-size: 11pt; color: #000; max-width: 600px; margin: 0 auto;">
 <div style="border-top: 4px solid #D04A02; padding: 32px 24px;">
   <p>Hello <b>{escape(recipient_name)}</b>,</p>
-  <p>Thank you for registering with <b>MiCore IDP</b>.</p>
+  <p>Thank you for registering with <b>Digital Workmate IDP</b>.</p>
   <p>Please verify your email address by clicking the button below:</p>
   <p style="text-align: center; margin: 32px 0;">
     <a href="{verification_link}"
@@ -385,7 +385,7 @@ async def send_verification_email(
     This link expires in 24 hours. If you did not create an account, you can ignore this email.
   </p>
   <p style="color:#666; font-size: 9pt;">
-    This is an automated notification from MiCore IDP. Please do not reply to this email.
+    This is an automated notification from Digital Workmate IDP. Please do not reply to this email.
   </p>
 </div>
 </body>

@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "@/controllers/API/api";
 import { getURL } from "@/controllers/API/helpers/constants";
-import MothersonLogo from "@/assets/micore.svg";
+import MothersonLogo from "@/assets/Digital Workmate.svg";
 
 const PwC = {
   orange: "#D04A02",
@@ -78,7 +78,7 @@ export default function SetPasswordPage(): JSX.Element {
     <div className="min-h-screen flex items-center justify-center px-6 bg-[#F7F7F7] dark:bg-[#111115]">
       <div className="w-full max-w-[400px]">
         <div className="flex justify-center mb-8">
-          <img src={MothersonLogo} alt="MiCore" className="h-9 w-auto dark:invert" />
+          <img src={MothersonLogo} alt="Digital Workmate" className="h-9 w-auto dark:invert" />
         </div>
 
         <div
@@ -112,7 +112,7 @@ export default function SetPasswordPage(): JSX.Element {
                       <path d="M7 11V7a5 5 0 0 1 10 0v4" />
                     </svg>
                     <span className="text-xs font-semibold tracking-widest uppercase text-slate-400 dark:text-slate-500">
-                      MiCore IDP
+                      Digital Workmate IDP
                     </span>
                   </div>
                   <h2 className="text-xl font-bold text-slate-900 dark:text-white">Set your password</h2>
