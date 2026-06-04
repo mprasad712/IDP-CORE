@@ -4,8 +4,6 @@ These are new ``idp_*`` tables added alongside the existing schema; no existing 
 modified. Any schema change must be applied through an Alembic migration.
 """
 
-from __future__ import annotations
-
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
@@ -49,11 +47,11 @@ class IdpFieldConfiguration(SQLModel, table=True):  # type: ignore[call-arg]
     created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
     updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
 
-    headers: list[IdpFieldConfigHeader] = Relationship(
+    headers: list["IdpFieldConfigHeader"] = Relationship(
         back_populates="field_config",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
-    line_items: list[IdpFieldConfigLineItem] = Relationship(
+    line_items: list["IdpFieldConfigLineItem"] = Relationship(
         back_populates="field_config",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
