@@ -1,0 +1,948 @@
+{
+  "id": "idp-universal-pipeline",
+  "name": "Universal IDP Pipeline",
+  "description": "Complete intelligent document pipeline: detects scanned vs digital, routes through OCR, selects pages, chunks by token count, extracts with LLM, routes by confidence, applies rules, and sends to auto-approved or pending-review output.",
+  "icon": "FileStack",
+  "gradient": "1",
+  "tags": ["all-templates"],
+  "data": {
+    "nodes": [
+      {
+        "id": "DocumentUpload-idp01",
+        "type": "genericNode",
+        "position": { "x": 0, "y": 400 },
+        "data": {
+          "node": {
+            "display_name": "Document Upload",
+            "description": "Manual upload of single or multiple documents (PDF, image, Excel, Word).",
+            "icon": "Upload",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 0,
+            "base_classes": ["Message"],
+            "field_order": ["files", "allow_multiple"],
+            "outputs": [
+              { "types": ["Message"], "selected": "Message", "name": "document", "display_name": "Document", "method": "document", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "files": {
+                "_input_type": "FileInput", "advanced": false, "display_name": "Documents", "dynamic": false,
+                "fileTypes": ["pdf","png","jpg","jpeg","tiff","bmp","xlsx","xls","docx","doc"],
+                "info": "Upload one or more documents to process.", "list": true, "name": "files",
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "file", "value": ""
+              },
+              "allow_multiple": {
+                "_input_type": "BoolInput", "advanced": true, "display_name": "Allow Multiple Files", "dynamic": false,
+                "info": "When enabled, multiple files can be uploaded at once.", "list": false, "name": "allow_multiple",
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "bool", "value": true
+              }
+            }
+          },
+          "showNode": true,
+          "type": "DocumentUpload",
+          "id": "DocumentUpload-idp01"
+        }
+      },
+      {
+        "id": "DocumentTypeDetector-idp02",
+        "type": "genericNode",
+        "position": { "x": 360, "y": 400 },
+        "data": {
+          "node": {
+            "display_name": "Document Type Detector",
+            "description": "Detects whether a document has a native text layer (digital) or is image-only (scanned). Feeds a Condition node.",
+            "icon": "FileScan",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 2,
+            "base_classes": ["Message", "Data"],
+            "field_order": ["document", "min_text_length"],
+            "outputs": [
+              { "types": ["Message"], "selected": "Message", "name": "document_with_type", "display_name": "Document + Type Flag", "method": "document_with_type", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": true, "hidden": false },
+              { "types": ["Data"], "selected": "Data", "name": "document_type_flag", "display_name": "Type Flag (digital / scanned)", "method": "document_type_flag", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "document": {
+                "_input_type": "MessageInput", "advanced": false, "display_name": "Document", "dynamic": false,
+                "info": "Incoming document to inspect.", "input_types": ["Message"], "list": false, "name": "document",
+                "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "min_text_length": {
+                "_input_type": "IntInput", "advanced": true, "display_name": "Min Native Text Length", "dynamic": false,
+                "info": "Minimum character count to classify a page as digital.", "list": false, "name": "min_text_length",
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "int", "value": 50
+              }
+            }
+          },
+          "showNode": true,
+          "type": "DocumentTypeDetector",
+          "id": "DocumentTypeDetector-idp02"
+        }
+      },
+      {
+        "id": "ConditionNode-idp03",
+        "type": "genericNode",
+        "position": { "x": 720, "y": 400 },
+        "data": {
+          "node": {
+            "display_name": "Condition",
+            "description": "If/else branch: routes the document down the true or false path based on a configurable condition.",
+            "icon": "GitBranch",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 0,
+            "base_classes": ["Message"],
+            "field_order": ["document", "field", "operator", "value"],
+            "outputs": [
+              { "types": ["Message"], "selected": "Message", "name": "true_path", "display_name": "True", "method": "true_path", "cache": true, "allows_loop": false, "group_outputs": true, "tool_mode": true, "hidden": false },
+              { "types": ["Message"], "selected": "Message", "name": "false_path", "display_name": "False", "method": "false_path", "cache": true, "allows_loop": false, "group_outputs": true, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "document": {
+                "_input_type": "MessageInput", "advanced": false, "display_name": "Input", "dynamic": false,
+                "info": "Document or data to evaluate the condition against.", "input_types": ["Message","Data"],
+                "list": false, "name": "document", "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "field": {
+                "_input_type": "StrInput", "advanced": false, "display_name": "Field / Flag", "dynamic": false,
+                "info": "Name of the field or flag to test (e.g. document_type, confidence). Leave blank to test the full input.",
+                "list": false, "name": "field", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "str", "value": "document_type"
+              },
+              "operator": {
+                "_input_type": "DropdownInput", "advanced": false, "display_name": "Operator", "dynamic": false,
+                "info": "Comparison operator applied between the field value and the threshold value.",
+                "list": false, "name": "operator",
+                "options": ["equals","not_equals","contains","greater_than","less_than","greater_than_or_equal","less_than_or_equal","is_empty","is_not_empty"],
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": "equals"
+              },
+              "value": {
+                "_input_type": "StrInput", "advanced": false, "display_name": "Threshold Value", "dynamic": false,
+                "info": "Value to compare against. For numeric operators enter a number (e.g. 0.8).",
+                "list": false, "name": "value", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "str", "value": "scanned"
+              }
+            }
+          },
+          "showNode": true,
+          "type": "ConditionNode",
+          "id": "ConditionNode-idp03"
+        }
+      },
+      {
+        "id": "SkewCorrection-idp04",
+        "type": "genericNode",
+        "position": { "x": 1050, "y": 60 },
+        "data": {
+          "node": {
+            "display_name": "Skew Correction",
+            "description": "Detects and corrects skewed scanned pages before OCR.",
+            "icon": "RotateCcw",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 0,
+            "base_classes": ["Message"],
+            "field_order": ["document", "threshold"],
+            "outputs": [
+              { "types": ["Message"], "selected": "Message", "name": "corrected_document", "display_name": "Corrected Document", "method": "corrected_document", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "document": {
+                "_input_type": "MessageInput", "advanced": false, "display_name": "Document", "dynamic": false,
+                "info": "Document to correct.", "input_types": ["Message"], "list": false, "name": "document",
+                "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "threshold": {
+                "_input_type": "FloatInput", "advanced": true, "display_name": "Skew Threshold (°)", "dynamic": false,
+                "info": "Minimum skew angle (degrees) to trigger correction.", "list": false, "name": "threshold",
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "float", "value": 0.5
+              }
+            }
+          },
+          "showNode": true,
+          "type": "SkewCorrection",
+          "id": "SkewCorrection-idp04"
+        }
+      },
+      {
+        "id": "RotationCorrection-idp05",
+        "type": "genericNode",
+        "position": { "x": 1380, "y": 60 },
+        "data": {
+          "node": {
+            "display_name": "Rotation Correction",
+            "description": "Detects and corrects 90 / 180 / 270 degree page rotation.",
+            "icon": "RefreshCw",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 1,
+            "base_classes": ["Message"],
+            "field_order": ["document", "allowed_angles"],
+            "outputs": [
+              { "types": ["Message"], "selected": "Message", "name": "corrected_document", "display_name": "Corrected Document", "method": "corrected_document", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "document": {
+                "_input_type": "MessageInput", "advanced": false, "display_name": "Document", "dynamic": false,
+                "info": "Document to correct.", "input_types": ["Message"], "list": false, "name": "document",
+                "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "allowed_angles": {
+                "_input_type": "StrInput", "advanced": true, "display_name": "Allowed Angles", "dynamic": false,
+                "info": "Comma-separated rotation angles to detect and correct.", "list": false, "name": "allowed_angles",
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": "90,180,270"
+              }
+            }
+          },
+          "showNode": true,
+          "type": "RotationCorrection",
+          "id": "RotationCorrection-idp05"
+        }
+      },
+      {
+        "id": "PaddleOCR-idp06",
+        "type": "genericNode",
+        "position": { "x": 1710, "y": 60 },
+        "data": {
+          "node": {
+            "display_name": "PaddleOCR",
+            "description": "OCR engine optimised for scanned documents; produces structured text blocks.",
+            "icon": "ScanText",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 0,
+            "base_classes": ["Message"],
+            "field_order": ["document", "language", "use_gpu", "confidence_threshold"],
+            "outputs": [
+              { "types": ["Message"], "selected": "Message", "name": "text_blocks", "display_name": "Text Blocks", "method": "text_blocks", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "document": {
+                "_input_type": "MessageInput", "advanced": false, "display_name": "Document", "dynamic": false,
+                "info": "Pre-processed document image to run OCR on.", "input_types": ["Message"],
+                "list": false, "name": "document", "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "language": {
+                "_input_type": "DropdownInput", "advanced": false, "display_name": "Language", "dynamic": false,
+                "info": "Primary language of the document text.", "list": false, "name": "language",
+                "options": ["en","ch","fr","de","es","ar","ja","ko"], "placeholder": "", "required": false,
+                "show": true, "title_case": false, "type": "str", "value": "en"
+              },
+              "use_gpu": {
+                "_input_type": "BoolInput", "advanced": true, "display_name": "Use GPU", "dynamic": false,
+                "info": "Enable GPU acceleration for OCR.", "list": false, "name": "use_gpu",
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "bool", "value": false
+              },
+              "confidence_threshold": {
+                "_input_type": "FloatInput", "advanced": true, "display_name": "Confidence Threshold", "dynamic": false,
+                "info": "Minimum OCR confidence score to include a text block.", "list": false, "name": "confidence_threshold",
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "float", "value": 0.7
+              }
+            }
+          },
+          "showNode": true,
+          "type": "PaddleOCR",
+          "id": "PaddleOCR-idp06"
+        }
+      },
+      {
+        "id": "MergeNode-idp07",
+        "type": "genericNode",
+        "position": { "x": 2040, "y": 400 },
+        "data": {
+          "node": {
+            "display_name": "Merge",
+            "description": "Joins two branches (e.g. after a Condition split) back into a single flow.",
+            "icon": "Merge",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 1,
+            "base_classes": ["Message"],
+            "field_order": ["branch_a", "branch_b"],
+            "outputs": [
+              { "types": ["Message"], "selected": "Message", "name": "merged", "display_name": "Merged", "method": "merged", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "branch_a": {
+                "_input_type": "MessageInput", "advanced": false, "display_name": "Branch A", "dynamic": false,
+                "info": "First branch input (e.g. true / scanned path).", "input_types": ["Message"],
+                "list": false, "name": "branch_a", "placeholder": "", "required": false, "show": true, "type": "other", "value": ""
+              },
+              "branch_b": {
+                "_input_type": "MessageInput", "advanced": false, "display_name": "Branch B", "dynamic": false,
+                "info": "Second branch input (e.g. false / digital path).", "input_types": ["Message"],
+                "list": false, "name": "branch_b", "placeholder": "", "required": false, "show": true, "type": "other", "value": ""
+              }
+            }
+          },
+          "showNode": true,
+          "type": "MergeNode",
+          "id": "MergeNode-idp07"
+        }
+      },
+      {
+        "id": "PageSelector-idp08",
+        "type": "genericNode",
+        "position": { "x": 2380, "y": 400 },
+        "data": {
+          "node": {
+            "display_name": "Page Selector",
+            "description": "Slices a document to a specific page range before OCR or extraction.",
+            "icon": "BookOpen",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 3,
+            "base_classes": ["Message"],
+            "field_order": ["document", "selection_mode", "first_n_pages", "page_range_start", "page_range_end"],
+            "outputs": [
+              { "types": ["Message"], "selected": "Message", "name": "selected_pages", "display_name": "Selected Pages", "method": "selected_pages", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "document": {
+                "_input_type": "MessageInput", "advanced": false, "display_name": "Document", "dynamic": false,
+                "info": "Full document to slice.", "input_types": ["Message"], "list": false, "name": "document",
+                "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "selection_mode": {
+                "_input_type": "DropdownInput", "advanced": false, "display_name": "Selection Mode", "dynamic": false,
+                "info": "How to select pages: first N pages, last N pages, a custom range, or all pages.",
+                "list": false, "name": "selection_mode",
+                "options": ["first_n","last_n","range","all"],
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": "first_n"
+              },
+              "first_n_pages": {
+                "_input_type": "IntInput", "advanced": false, "display_name": "Number of Pages", "dynamic": false,
+                "info": "Used when Selection Mode is 'first_n' or 'last_n'. Number of pages to keep.",
+                "list": false, "name": "first_n_pages", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "int", "value": 3
+              },
+              "page_range_start": {
+                "_input_type": "IntInput", "advanced": true, "display_name": "Range Start (page)", "dynamic": false,
+                "info": "Used when Selection Mode is 'range'. First page number (1-based, inclusive).",
+                "list": false, "name": "page_range_start", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "int", "value": 1
+              },
+              "page_range_end": {
+                "_input_type": "IntInput", "advanced": true, "display_name": "Range End (page)", "dynamic": false,
+                "info": "Used when Selection Mode is 'range'. Last page number (1-based, inclusive).",
+                "list": false, "name": "page_range_end", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "int", "value": 5
+              }
+            }
+          },
+          "showNode": true,
+          "type": "PageSelector",
+          "id": "PageSelector-idp08"
+        }
+      },
+      {
+        "id": "ChunkingStrategy-idp09",
+        "type": "genericNode",
+        "position": { "x": 2720, "y": 400 },
+        "data": {
+          "node": {
+            "display_name": "Chunking Strategy",
+            "description": "Splits a long document into token-bounded chunks before sending to an LLM, respecting the model's context window.",
+            "icon": "Scissors",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 4,
+            "base_classes": ["Message"],
+            "field_order": ["document", "chunk_size_tokens", "overlap_tokens", "chunking_method", "model_name"],
+            "outputs": [
+              { "types": ["Message"], "selected": "Message", "name": "chunks", "display_name": "Document Chunks", "method": "chunks", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "document": {
+                "_input_type": "MessageInput", "advanced": false, "display_name": "Document", "dynamic": false,
+                "info": "Document text to split into chunks.", "input_types": ["Message"],
+                "list": false, "name": "document", "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "chunk_size_tokens": {
+                "_input_type": "IntInput", "advanced": false, "display_name": "Chunk Size (tokens)", "dynamic": false,
+                "info": "Maximum number of tokens per chunk. Keep below the target LLM's context limit.",
+                "list": false, "name": "chunk_size_tokens", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "int", "value": 4096
+              },
+              "overlap_tokens": {
+                "_input_type": "IntInput", "advanced": false, "display_name": "Overlap (tokens)", "dynamic": false,
+                "info": "Number of tokens repeated between adjacent chunks to preserve context across boundaries.",
+                "list": false, "name": "overlap_tokens", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "int", "value": 256
+              },
+              "chunking_method": {
+                "_input_type": "DropdownInput", "advanced": false, "display_name": "Chunking Method", "dynamic": false,
+                "info": "fixed_token: hard split at token count; semantic: split at sentence/paragraph; section_based: split on headings.",
+                "list": false, "name": "chunking_method",
+                "options": ["fixed_token","semantic","section_based"],
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": "fixed_token"
+              },
+              "model_name": {
+                "_input_type": "StrInput", "advanced": true, "display_name": "Target LLM Model", "dynamic": false,
+                "info": "Model whose tokenizer is used to count tokens accurately.",
+                "list": false, "name": "model_name", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "str", "value": "gpt-4o"
+              }
+            }
+          },
+          "showNode": true,
+          "type": "ChunkingStrategy",
+          "id": "ChunkingStrategy-idp09"
+        }
+      },
+      {
+        "id": "DynamicPrompting-idp10",
+        "type": "genericNode",
+        "position": { "x": 3060, "y": 400 },
+        "data": {
+          "node": {
+            "display_name": "Dynamic Prompting",
+            "description": "User writes a freeform prompt describing the fields to extract from the document.",
+            "icon": "MessageSquare",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 0,
+            "base_classes": ["Data"],
+            "field_order": ["document", "prompt", "model_name"],
+            "outputs": [
+              { "types": ["Data"], "selected": "Data", "name": "extracted_data", "display_name": "Extracted Data", "method": "extracted_data", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "document": {
+                "_input_type": "MessageInput", "advanced": false, "display_name": "OCR Text / Document", "dynamic": false,
+                "info": "Text blocks from OCR or raw document.", "input_types": ["Message"],
+                "list": false, "name": "document", "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "prompt": {
+                "_input_type": "MessageTextInput", "advanced": false, "display_name": "Extraction Prompt", "dynamic": false,
+                "info": "Describe the fields to extract. Example: 'Extract invoice number, date, vendor name, and total amount.'",
+                "list": false, "multiline": true, "name": "prompt", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "str",
+                "value": "Extract all key fields from this document: document number, date, parties involved, amounts, and any important terms or conditions. Return as structured JSON."
+              },
+              "model_name": {
+                "_input_type": "StrInput", "advanced": true, "display_name": "LLM Model", "dynamic": false,
+                "info": "Model used for extraction.", "list": false, "name": "model_name",
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": "gpt-4o"
+              }
+            }
+          },
+          "showNode": true,
+          "type": "DynamicPrompting",
+          "id": "DynamicPrompting-idp10"
+        }
+      },
+      {
+        "id": "ChunkAggregator-idp11",
+        "type": "genericNode",
+        "position": { "x": 3400, "y": 400 },
+        "data": {
+          "node": {
+            "display_name": "Chunk Aggregator",
+            "description": "Combines per-chunk extraction results from Chunking Strategy into one unified document result.",
+            "icon": "Combine",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 5,
+            "base_classes": ["Data"],
+            "field_order": ["chunks_data", "dedup_strategy"],
+            "outputs": [
+              { "types": ["Data"], "selected": "Data", "name": "aggregated_data", "display_name": "Aggregated Data", "method": "aggregated_data", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "chunks_data": {
+                "_input_type": "DataInput", "advanced": false, "display_name": "Chunk Results", "dynamic": false,
+                "info": "Extracted data from each chunk, collected from the downstream extraction node.",
+                "input_types": ["Data"], "list": true, "name": "chunks_data",
+                "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "dedup_strategy": {
+                "_input_type": "DropdownInput", "advanced": true, "display_name": "Deduplication Strategy", "dynamic": false,
+                "info": "How to handle the same field appearing in multiple chunks.",
+                "list": false, "name": "dedup_strategy",
+                "options": ["keep_first","keep_highest_confidence","merge_all"],
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": "keep_highest_confidence"
+              }
+            }
+          },
+          "showNode": true,
+          "type": "ChunkAggregator",
+          "id": "ChunkAggregator-idp11"
+        }
+      },
+      {
+        "id": "ConfidenceRouter-idp12",
+        "type": "genericNode",
+        "position": { "x": 3740, "y": 400 },
+        "data": {
+          "node": {
+            "display_name": "Confidence Router",
+            "description": "Routes extracted data based on overall confidence score — high confidence to approval, low to review.",
+            "icon": "Gauge",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 4,
+            "base_classes": ["Data"],
+            "field_order": ["data", "confidence_field", "threshold"],
+            "outputs": [
+              { "types": ["Data"], "selected": "Data", "name": "high_confidence", "display_name": "High Confidence", "method": "high_confidence", "cache": true, "allows_loop": false, "group_outputs": true, "tool_mode": true, "hidden": false },
+              { "types": ["Data"], "selected": "Data", "name": "low_confidence", "display_name": "Low Confidence", "method": "low_confidence", "cache": true, "allows_loop": false, "group_outputs": true, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "data": {
+                "_input_type": "DataInput", "advanced": false, "display_name": "Extracted Data", "dynamic": false,
+                "info": "Extracted data containing a confidence score field.", "input_types": ["Data"],
+                "list": false, "name": "data", "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "confidence_field": {
+                "_input_type": "StrInput", "advanced": false, "display_name": "Confidence Field", "dynamic": false,
+                "info": "Name of the field that holds the overall confidence score (0–1).",
+                "list": false, "name": "confidence_field", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "str", "value": "confidence"
+              },
+              "threshold": {
+                "_input_type": "FloatInput", "advanced": false, "display_name": "Confidence Threshold", "dynamic": false,
+                "info": "Scores at or above this value go to High Confidence; below go to Low Confidence.",
+                "list": false, "name": "threshold", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "float", "value": 0.8
+              }
+            }
+          },
+          "showNode": true,
+          "type": "ConfidenceRouter",
+          "id": "ConfidenceRouter-idp12"
+        }
+      },
+      {
+        "id": "RulesConditions-idp13",
+        "type": "genericNode",
+        "position": { "x": 4080, "y": 100 },
+        "data": {
+          "node": {
+            "display_name": "Rules / Conditions",
+            "description": "Customisable rule builder with multiple condition rows and AND / OR logic.",
+            "icon": "GitBranch",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 0,
+            "base_classes": ["Data"],
+            "field_order": ["data", "logic_operator", "conditions"],
+            "outputs": [
+              { "types": ["Data"], "selected": "Data", "name": "passed", "display_name": "Passed", "method": "passed", "cache": true, "allows_loop": false, "group_outputs": true, "tool_mode": true, "hidden": false },
+              { "types": ["Data"], "selected": "Data", "name": "failed", "display_name": "Failed", "method": "failed", "cache": true, "allows_loop": false, "group_outputs": true, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "data": {
+                "_input_type": "DataInput", "advanced": false, "display_name": "Extracted Data", "dynamic": false,
+                "info": "Extracted data to evaluate rules against.", "input_types": ["Data"],
+                "list": false, "name": "data", "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "logic_operator": {
+                "_input_type": "DropdownInput", "advanced": false, "display_name": "Logic Operator", "dynamic": false,
+                "info": "Combine all condition rows with AND or OR logic.",
+                "list": false, "name": "logic_operator", "options": ["AND","OR"],
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": "AND"
+              },
+              "conditions": {
+                "_input_type": "MessageTextInput", "advanced": false, "display_name": "Conditions (JSON)", "dynamic": false,
+                "info": "Array of condition objects, e.g. [{\"field\":\"total\",\"op\":\"gt\",\"value\":0}]",
+                "list": false, "multiline": true, "name": "conditions",
+                "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "str",
+                "value": "[{\"field\":\"confidence\",\"op\":\"gte\",\"value\":0.85},{\"field\":\"total_amount\",\"op\":\"gt\",\"value\":0}]"
+              }
+            }
+          },
+          "showNode": true,
+          "type": "RulesConditions",
+          "id": "RulesConditions-idp13"
+        }
+      },
+      {
+        "id": "ApprovalGate-idp14",
+        "type": "genericNode",
+        "position": { "x": 4420, "y": 100 },
+        "data": {
+          "node": {
+            "display_name": "Approval Gate",
+            "description": "Reads the rule outcome and routes to auto-approved or pending-review output for the Processed Docs page.",
+            "icon": "ShieldCheck",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "priority": 3,
+            "base_classes": ["Data"],
+            "field_order": ["data", "approval_field", "approve_value"],
+            "outputs": [
+              { "types": ["Data"], "selected": "Data", "name": "auto_approved", "display_name": "Auto Approved", "method": "auto_approved", "cache": true, "allows_loop": false, "group_outputs": true, "tool_mode": true, "hidden": false },
+              { "types": ["Data"], "selected": "Data", "name": "pending_review", "display_name": "Pending Review", "method": "pending_review", "cache": true, "allows_loop": false, "group_outputs": true, "tool_mode": true, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "data": {
+                "_input_type": "DataInput", "advanced": false, "display_name": "Rules Result", "dynamic": false,
+                "info": "Output from Rules / Conditions or Confidence Router.", "input_types": ["Data"],
+                "list": false, "name": "data", "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "approval_field": {
+                "_input_type": "StrInput", "advanced": false, "display_name": "Approval Field", "dynamic": false,
+                "info": "Field name in the data that contains the approval decision.",
+                "list": false, "name": "approval_field", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "str", "value": "rule_action"
+              },
+              "approve_value": {
+                "_input_type": "StrInput", "advanced": false, "display_name": "Auto-Approve Value", "dynamic": false,
+                "info": "Field value that triggers the auto-approved path; anything else goes to pending review.",
+                "list": false, "name": "approve_value", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "str", "value": "auto_approve"
+              }
+            }
+          },
+          "showNode": true,
+          "type": "ApprovalGate",
+          "id": "ApprovalGate-idp14"
+        }
+      },
+      {
+        "id": "ProcessedDocsOutput-idp15",
+        "type": "genericNode",
+        "position": { "x": 4760, "y": 0 },
+        "data": {
+          "node": {
+            "display_name": "Processed Docs Output",
+            "description": "Terminal node that sends extracted results to the global Processed Docs page.",
+            "icon": "FileCheck",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "is_output": true,
+            "priority": 0,
+            "base_classes": [],
+            "field_order": ["data", "label"],
+            "outputs": [],
+            "template": {
+              "_type": "Component",
+              "data": {
+                "_input_type": "DataInput", "advanced": false, "display_name": "Extracted Data", "dynamic": false,
+                "info": "Final extracted (and optionally validated) data to store.", "input_types": ["Data"],
+                "list": false, "name": "data", "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "label": {
+                "_input_type": "StrInput", "advanced": true, "display_name": "Output Label", "dynamic": false,
+                "info": "Optional label shown in the Processed Docs page.", "list": false, "name": "label",
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": "Auto Approved"
+              }
+            }
+          },
+          "showNode": true,
+          "type": "ProcessedDocsOutput",
+          "id": "ProcessedDocsOutput-idp15"
+        }
+      },
+      {
+        "id": "ProcessedDocsOutput-idp16",
+        "type": "genericNode",
+        "position": { "x": 4760, "y": 220 },
+        "data": {
+          "node": {
+            "display_name": "Processed Docs Output",
+            "description": "Terminal node that sends extracted results to the global Processed Docs page.",
+            "icon": "FileCheck",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "is_output": true,
+            "priority": 0,
+            "base_classes": [],
+            "field_order": ["data", "label"],
+            "outputs": [],
+            "template": {
+              "_type": "Component",
+              "data": {
+                "_input_type": "DataInput", "advanced": false, "display_name": "Extracted Data", "dynamic": false,
+                "info": "Final extracted (and optionally validated) data to store.", "input_types": ["Data"],
+                "list": false, "name": "data", "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "label": {
+                "_input_type": "StrInput", "advanced": true, "display_name": "Output Label", "dynamic": false,
+                "info": "Optional label shown in the Processed Docs page.", "list": false, "name": "label",
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": "Pending Review"
+              }
+            }
+          },
+          "showNode": true,
+          "type": "ProcessedDocsOutput",
+          "id": "ProcessedDocsOutput-idp16"
+        }
+      },
+      {
+        "id": "ProcessedDocsOutput-idp17",
+        "type": "genericNode",
+        "position": { "x": 4080, "y": 720 },
+        "data": {
+          "node": {
+            "display_name": "Processed Docs Output",
+            "description": "Terminal node that sends extracted results to the global Processed Docs page.",
+            "icon": "FileCheck",
+            "documentation": "",
+            "beta": false,
+            "legacy": false,
+            "official": true,
+            "is_output": true,
+            "priority": 0,
+            "base_classes": [],
+            "field_order": ["data", "label"],
+            "outputs": [],
+            "template": {
+              "_type": "Component",
+              "data": {
+                "_input_type": "DataInput", "advanced": false, "display_name": "Extracted Data", "dynamic": false,
+                "info": "Final extracted (and optionally validated) data to store.", "input_types": ["Data"],
+                "list": false, "name": "data", "placeholder": "", "required": true, "show": true, "type": "other", "value": ""
+              },
+              "label": {
+                "_input_type": "StrInput", "advanced": true, "display_name": "Output Label", "dynamic": false,
+                "info": "Optional label shown in the Processed Docs page.", "list": false, "name": "label",
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": "Low Confidence Review"
+              }
+            }
+          },
+          "showNode": true,
+          "type": "ProcessedDocsOutput",
+          "id": "ProcessedDocsOutput-idp17"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "source": "DocumentUpload-idp01",
+        "sourceHandle": "{\"dataType\":\"DocumentUpload\",\"id\":\"DocumentUpload-idp01\",\"name\":\"document\",\"output_types\":[\"Message\"]}",
+        "target": "DocumentTypeDetector-idp02",
+        "targetHandle": "{\"fieldName\":\"document\",\"id\":\"DocumentTypeDetector-idp02\",\"inputTypes\":[\"Message\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-DocumentUpload-idp01document-DocumentTypeDetector-idp02document",
+        "data": {
+          "targetHandle": { "fieldName": "document", "id": "DocumentTypeDetector-idp02", "inputTypes": ["Message"], "type": "other" },
+          "sourceHandle": { "dataType": "DocumentUpload", "id": "DocumentUpload-idp01", "name": "document", "output_types": ["Message"] }
+        }
+      },
+      {
+        "source": "DocumentTypeDetector-idp02",
+        "sourceHandle": "{\"dataType\":\"DocumentTypeDetector\",\"id\":\"DocumentTypeDetector-idp02\",\"name\":\"document_with_type\",\"output_types\":[\"Message\"]}",
+        "target": "ConditionNode-idp03",
+        "targetHandle": "{\"fieldName\":\"document\",\"id\":\"ConditionNode-idp03\",\"inputTypes\":[\"Message\",\"Data\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-DocumentTypeDetector-idp02document_with_type-ConditionNode-idp03document",
+        "data": {
+          "targetHandle": { "fieldName": "document", "id": "ConditionNode-idp03", "inputTypes": ["Message","Data"], "type": "other" },
+          "sourceHandle": { "dataType": "DocumentTypeDetector", "id": "DocumentTypeDetector-idp02", "name": "document_with_type", "output_types": ["Message"] }
+        }
+      },
+      {
+        "source": "ConditionNode-idp03",
+        "sourceHandle": "{\"dataType\":\"ConditionNode\",\"id\":\"ConditionNode-idp03\",\"name\":\"true_path\",\"output_types\":[\"Message\"]}",
+        "target": "SkewCorrection-idp04",
+        "targetHandle": "{\"fieldName\":\"document\",\"id\":\"SkewCorrection-idp04\",\"inputTypes\":[\"Message\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-ConditionNode-idp03true_path-SkewCorrection-idp04document",
+        "data": {
+          "targetHandle": { "fieldName": "document", "id": "SkewCorrection-idp04", "inputTypes": ["Message"], "type": "other" },
+          "sourceHandle": { "dataType": "ConditionNode", "id": "ConditionNode-idp03", "name": "true_path", "output_types": ["Message"] }
+        }
+      },
+      {
+        "source": "SkewCorrection-idp04",
+        "sourceHandle": "{\"dataType\":\"SkewCorrection\",\"id\":\"SkewCorrection-idp04\",\"name\":\"corrected_document\",\"output_types\":[\"Message\"]}",
+        "target": "RotationCorrection-idp05",
+        "targetHandle": "{\"fieldName\":\"document\",\"id\":\"RotationCorrection-idp05\",\"inputTypes\":[\"Message\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-SkewCorrection-idp04corrected_document-RotationCorrection-idp05document",
+        "data": {
+          "targetHandle": { "fieldName": "document", "id": "RotationCorrection-idp05", "inputTypes": ["Message"], "type": "other" },
+          "sourceHandle": { "dataType": "SkewCorrection", "id": "SkewCorrection-idp04", "name": "corrected_document", "output_types": ["Message"] }
+        }
+      },
+      {
+        "source": "RotationCorrection-idp05",
+        "sourceHandle": "{\"dataType\":\"RotationCorrection\",\"id\":\"RotationCorrection-idp05\",\"name\":\"corrected_document\",\"output_types\":[\"Message\"]}",
+        "target": "PaddleOCR-idp06",
+        "targetHandle": "{\"fieldName\":\"document\",\"id\":\"PaddleOCR-idp06\",\"inputTypes\":[\"Message\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-RotationCorrection-idp05corrected_document-PaddleOCR-idp06document",
+        "data": {
+          "targetHandle": { "fieldName": "document", "id": "PaddleOCR-idp06", "inputTypes": ["Message"], "type": "other" },
+          "sourceHandle": { "dataType": "RotationCorrection", "id": "RotationCorrection-idp05", "name": "corrected_document", "output_types": ["Message"] }
+        }
+      },
+      {
+        "source": "PaddleOCR-idp06",
+        "sourceHandle": "{\"dataType\":\"PaddleOCR\",\"id\":\"PaddleOCR-idp06\",\"name\":\"text_blocks\",\"output_types\":[\"Message\"]}",
+        "target": "MergeNode-idp07",
+        "targetHandle": "{\"fieldName\":\"branch_a\",\"id\":\"MergeNode-idp07\",\"inputTypes\":[\"Message\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-PaddleOCR-idp06text_blocks-MergeNode-idp07branch_a",
+        "data": {
+          "targetHandle": { "fieldName": "branch_a", "id": "MergeNode-idp07", "inputTypes": ["Message"], "type": "other" },
+          "sourceHandle": { "dataType": "PaddleOCR", "id": "PaddleOCR-idp06", "name": "text_blocks", "output_types": ["Message"] }
+        }
+      },
+      {
+        "source": "ConditionNode-idp03",
+        "sourceHandle": "{\"dataType\":\"ConditionNode\",\"id\":\"ConditionNode-idp03\",\"name\":\"false_path\",\"output_types\":[\"Message\"]}",
+        "target": "MergeNode-idp07",
+        "targetHandle": "{\"fieldName\":\"branch_b\",\"id\":\"MergeNode-idp07\",\"inputTypes\":[\"Message\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-ConditionNode-idp03false_path-MergeNode-idp07branch_b",
+        "data": {
+          "targetHandle": { "fieldName": "branch_b", "id": "MergeNode-idp07", "inputTypes": ["Message"], "type": "other" },
+          "sourceHandle": { "dataType": "ConditionNode", "id": "ConditionNode-idp03", "name": "false_path", "output_types": ["Message"] }
+        }
+      },
+      {
+        "source": "MergeNode-idp07",
+        "sourceHandle": "{\"dataType\":\"MergeNode\",\"id\":\"MergeNode-idp07\",\"name\":\"merged\",\"output_types\":[\"Message\"]}",
+        "target": "PageSelector-idp08",
+        "targetHandle": "{\"fieldName\":\"document\",\"id\":\"PageSelector-idp08\",\"inputTypes\":[\"Message\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-MergeNode-idp07merged-PageSelector-idp08document",
+        "data": {
+          "targetHandle": { "fieldName": "document", "id": "PageSelector-idp08", "inputTypes": ["Message"], "type": "other" },
+          "sourceHandle": { "dataType": "MergeNode", "id": "MergeNode-idp07", "name": "merged", "output_types": ["Message"] }
+        }
+      },
+      {
+        "source": "PageSelector-idp08",
+        "sourceHandle": "{\"dataType\":\"PageSelector\",\"id\":\"PageSelector-idp08\",\"name\":\"selected_pages\",\"output_types\":[\"Message\"]}",
+        "target": "ChunkingStrategy-idp09",
+        "targetHandle": "{\"fieldName\":\"document\",\"id\":\"ChunkingStrategy-idp09\",\"inputTypes\":[\"Message\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-PageSelector-idp08selected_pages-ChunkingStrategy-idp09document",
+        "data": {
+          "targetHandle": { "fieldName": "document", "id": "ChunkingStrategy-idp09", "inputTypes": ["Message"], "type": "other" },
+          "sourceHandle": { "dataType": "PageSelector", "id": "PageSelector-idp08", "name": "selected_pages", "output_types": ["Message"] }
+        }
+      },
+      {
+        "source": "ChunkingStrategy-idp09",
+        "sourceHandle": "{\"dataType\":\"ChunkingStrategy\",\"id\":\"ChunkingStrategy-idp09\",\"name\":\"chunks\",\"output_types\":[\"Message\"]}",
+        "target": "DynamicPrompting-idp10",
+        "targetHandle": "{\"fieldName\":\"document\",\"id\":\"DynamicPrompting-idp10\",\"inputTypes\":[\"Message\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-ChunkingStrategy-idp09chunks-DynamicPrompting-idp10document",
+        "data": {
+          "targetHandle": { "fieldName": "document", "id": "DynamicPrompting-idp10", "inputTypes": ["Message"], "type": "other" },
+          "sourceHandle": { "dataType": "ChunkingStrategy", "id": "ChunkingStrategy-idp09", "name": "chunks", "output_types": ["Message"] }
+        }
+      },
+      {
+        "source": "DynamicPrompting-idp10",
+        "sourceHandle": "{\"dataType\":\"DynamicPrompting\",\"id\":\"DynamicPrompting-idp10\",\"name\":\"extracted_data\",\"output_types\":[\"Data\"]}",
+        "target": "ChunkAggregator-idp11",
+        "targetHandle": "{\"fieldName\":\"chunks_data\",\"id\":\"ChunkAggregator-idp11\",\"inputTypes\":[\"Data\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-DynamicPrompting-idp10extracted_data-ChunkAggregator-idp11chunks_data",
+        "data": {
+          "targetHandle": { "fieldName": "chunks_data", "id": "ChunkAggregator-idp11", "inputTypes": ["Data"], "type": "other" },
+          "sourceHandle": { "dataType": "DynamicPrompting", "id": "DynamicPrompting-idp10", "name": "extracted_data", "output_types": ["Data"] }
+        }
+      },
+      {
+        "source": "ChunkAggregator-idp11",
+        "sourceHandle": "{\"dataType\":\"ChunkAggregator\",\"id\":\"ChunkAggregator-idp11\",\"name\":\"aggregated_data\",\"output_types\":[\"Data\"]}",
+        "target": "ConfidenceRouter-idp12",
+        "targetHandle": "{\"fieldName\":\"data\",\"id\":\"ConfidenceRouter-idp12\",\"inputTypes\":[\"Data\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-ChunkAggregator-idp11aggregated_data-ConfidenceRouter-idp12data",
+        "data": {
+          "targetHandle": { "fieldName": "data", "id": "ConfidenceRouter-idp12", "inputTypes": ["Data"], "type": "other" },
+          "sourceHandle": { "dataType": "ChunkAggregator", "id": "ChunkAggregator-idp11", "name": "aggregated_data", "output_types": ["Data"] }
+        }
+      },
+      {
+        "source": "ConfidenceRouter-idp12",
+        "sourceHandle": "{\"dataType\":\"ConfidenceRouter\",\"id\":\"ConfidenceRouter-idp12\",\"name\":\"high_confidence\",\"output_types\":[\"Data\"]}",
+        "target": "RulesConditions-idp13",
+        "targetHandle": "{\"fieldName\":\"data\",\"id\":\"RulesConditions-idp13\",\"inputTypes\":[\"Data\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-ConfidenceRouter-idp12high_confidence-RulesConditions-idp13data",
+        "data": {
+          "targetHandle": { "fieldName": "data", "id": "RulesConditions-idp13", "inputTypes": ["Data"], "type": "other" },
+          "sourceHandle": { "dataType": "ConfidenceRouter", "id": "ConfidenceRouter-idp12", "name": "high_confidence", "output_types": ["Data"] }
+        }
+      },
+      {
+        "source": "RulesConditions-idp13",
+        "sourceHandle": "{\"dataType\":\"RulesConditions\",\"id\":\"RulesConditions-idp13\",\"name\":\"passed\",\"output_types\":[\"Data\"]}",
+        "target": "ApprovalGate-idp14",
+        "targetHandle": "{\"fieldName\":\"data\",\"id\":\"ApprovalGate-idp14\",\"inputTypes\":[\"Data\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-RulesConditions-idp13passed-ApprovalGate-idp14data",
+        "data": {
+          "targetHandle": { "fieldName": "data", "id": "ApprovalGate-idp14", "inputTypes": ["Data"], "type": "other" },
+          "sourceHandle": { "dataType": "RulesConditions", "id": "RulesConditions-idp13", "name": "passed", "output_types": ["Data"] }
+        }
+      },
+      {
+        "source": "ApprovalGate-idp14",
+        "sourceHandle": "{\"dataType\":\"ApprovalGate\",\"id\":\"ApprovalGate-idp14\",\"name\":\"auto_approved\",\"output_types\":[\"Data\"]}",
+        "target": "ProcessedDocsOutput-idp15",
+        "targetHandle": "{\"fieldName\":\"data\",\"id\":\"ProcessedDocsOutput-idp15\",\"inputTypes\":[\"Data\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-ApprovalGate-idp14auto_approved-ProcessedDocsOutput-idp15data",
+        "data": {
+          "targetHandle": { "fieldName": "data", "id": "ProcessedDocsOutput-idp15", "inputTypes": ["Data"], "type": "other" },
+          "sourceHandle": { "dataType": "ApprovalGate", "id": "ApprovalGate-idp14", "name": "auto_approved", "output_types": ["Data"] }
+        }
+      },
+      {
+        "source": "ApprovalGate-idp14",
+        "sourceHandle": "{\"dataType\":\"ApprovalGate\",\"id\":\"ApprovalGate-idp14\",\"name\":\"pending_review\",\"output_types\":[\"Data\"]}",
+        "target": "ProcessedDocsOutput-idp16",
+        "targetHandle": "{\"fieldName\":\"data\",\"id\":\"ProcessedDocsOutput-idp16\",\"inputTypes\":[\"Data\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-ApprovalGate-idp14pending_review-ProcessedDocsOutput-idp16data",
+        "data": {
+          "targetHandle": { "fieldName": "data", "id": "ProcessedDocsOutput-idp16", "inputTypes": ["Data"], "type": "other" },
+          "sourceHandle": { "dataType": "ApprovalGate", "id": "ApprovalGate-idp14", "name": "pending_review", "output_types": ["Data"] }
+        }
+      },
+      {
+        "source": "ConfidenceRouter-idp12",
+        "sourceHandle": "{\"dataType\":\"ConfidenceRouter\",\"id\":\"ConfidenceRouter-idp12\",\"name\":\"low_confidence\",\"output_types\":[\"Data\"]}",
+        "target": "ProcessedDocsOutput-idp17",
+        "targetHandle": "{\"fieldName\":\"data\",\"id\":\"ProcessedDocsOutput-idp17\",\"inputTypes\":[\"Data\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-ConfidenceRouter-idp12low_confidence-ProcessedDocsOutput-idp17data",
+        "data": {
+          "targetHandle": { "fieldName": "data", "id": "ProcessedDocsOutput-idp17", "inputTypes": ["Data"], "type": "other" },
+          "sourceHandle": { "dataType": "ConfidenceRouter", "id": "ConfidenceRouter-idp12", "name": "low_confidence", "output_types": ["Data"] }
+        }
+      }
+    ]
+  }
+}
