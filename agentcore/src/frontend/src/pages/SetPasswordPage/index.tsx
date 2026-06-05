@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "@/controllers/API/api";
 import { getURL } from "@/controllers/API/helpers/constants";
-import MothersonLogo from "@/assets/Digital Workmate.svg";
+import MothersonLogo from "@/assets/micore.svg";
 
 const PwC = {
   orange: "#D04A02",
