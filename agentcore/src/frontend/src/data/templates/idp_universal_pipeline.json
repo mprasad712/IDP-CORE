@@ -366,16 +366,19 @@
               },
               "prompt": {
                 "_input_type": "MessageTextInput", "advanced": false, "display_name": "Extraction Prompt", "dynamic": false,
-                "info": "Describe the fields to extract. Used when Extraction Mode is 'dynamic_prompt'.",
+                "info": "Describe the fields to extract. Example: 'Extract invoice number, date, vendor name, and total amount.'",
                 "list": false, "multiline": true, "name": "prompt", "placeholder": "", "required": false, "show": true,
+                "show_when": { "field": "extraction_mode", "value": "dynamic_prompt" },
                 "title_case": false, "type": "str",
                 "value": "Extract all key fields from this document: document number, date, parties involved, amounts, and any important terms or conditions. Return as structured JSON."
               },
               "config_name": {
-                "_input_type": "StrInput", "advanced": false, "display_name": "Field Configuration Name", "dynamic": false,
-                "info": "Name of the saved Field Configuration from the Configuration page. Used when Extraction Mode is 'field_configuration'.",
-                "list": false, "name": "config_name", "placeholder": "e.g. Invoice Schema",
-                "required": false, "show": true, "title_case": false, "type": "str", "value": ""
+                "_input_type": "DropdownInput", "advanced": false, "display_name": "Field Configuration", "dynamic": false,
+                "info": "Select a saved Field Configuration from the Configuration page.",
+                "list": false, "name": "config_name", "options": [],
+                "placeholder": "Select a configuration...", "required": false, "show": true,
+                "show_when": { "field": "extraction_mode", "value": "field_configuration" },
+                "title_case": false, "type": "str", "value": ""
               },
               "model_name": {
                 "_input_type": "StrInput", "advanced": true, "display_name": "LLM Model", "dynamic": false,
