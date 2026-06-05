@@ -546,8 +546,8 @@ export const IDP_NODES: IDPData = {
 
   // ── Extraction ────────────────────────────────────────────────────────────
   idp_extraction: {
-    LLMExtractor: {
-      display_name: "LLM Extractor",
+    DocumentExtractor: {
+      display_name: "Document Extractor",
       description: "Extracts structured fields from a document using an LLM. Choose between writing a custom prompt or selecting a saved Field Configuration.",
       icon: "BrainCircuit",
       documentation: "",
@@ -574,11 +574,11 @@ export const IDP_NODES: IDPData = {
           value: "",
         },
         llm: {
-          _input_type: "HandleInput",
+          _input_type: "MessageInput",
           advanced: false,
           display_name: "Language Model",
           dynamic: false,
-          info: "Connect a model from the Models sidebar. Falls back to LLM Model field if not connected.",
+          info: "Connect a Large Language Model node from the Models sidebar.",
           input_types: ["LanguageModel"],
           list: false,
           name: "llm",
