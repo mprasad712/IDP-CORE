@@ -329,12 +329,79 @@
         }
       },
       {
-        "id": "LLMExtractor-idp10",
+        "id": "RegistryModelComponent-idp19",
+        "type": "genericNode",
+        "position": { "x": 2820, "y": 100 },
+        "data": {
+          "node": {
+            "display_name": "Large Language Model",
+            "description": "Select a provider and model from the Model Registry to power your agent.",
+            "icon": "BrainCircuit",
+            "documentation": "",
+            "beta": false, "legacy": false, "official": true, "priority": 0,
+            "base_classes": ["LanguageModel"],
+            "field_order": ["input_value", "system_message", "stream", "provider", "registry_model", "temperature", "max_tokens"],
+            "outputs": [
+              { "types": ["Message"], "selected": "Message", "name": "text_output", "display_name": "Model Response", "method": "text_response", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": false, "hidden": true },
+              { "types": ["LanguageModel"], "selected": "LanguageModel", "name": "model_output", "display_name": "Language Model", "method": "build_model", "cache": true, "allows_loop": false, "group_outputs": false, "tool_mode": false, "hidden": false }
+            ],
+            "template": {
+              "_type": "Component",
+              "input_value": {
+                "_input_type": "MessageInput", "advanced": false, "display_name": "Input", "dynamic": false,
+                "info": "Message input to the model.", "input_types": ["Message"],
+                "list": false, "name": "input_value", "placeholder": "", "required": false, "show": true,
+                "type": "other", "value": ""
+              },
+              "system_message": {
+                "_input_type": "MessageTextInput", "advanced": false, "display_name": "System Message", "dynamic": false,
+                "info": "System message to pass to the model.", "list": false, "multiline": true,
+                "name": "system_message", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "str", "value": ""
+              },
+              "stream": {
+                "_input_type": "BoolInput", "advanced": true, "display_name": "Stream", "dynamic": false,
+                "info": "Stream the response from the model.", "list": false, "name": "stream",
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "bool", "value": false
+              },
+              "provider": {
+                "_input_type": "DropdownInput", "advanced": false, "display_name": "Provider", "dynamic": false,
+                "info": "Select the AI provider. Models onboarded for this provider will appear below.",
+                "list": false, "name": "provider", "real_time_refresh": true,
+                "options": ["OpenAI","Azure","Anthropic","Google","Google Vertex AI","Groq","Custom Model"],
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": ""
+              },
+              "registry_model": {
+                "_input_type": "DropdownInput", "advanced": false, "display_name": "Registry Model", "dynamic": false,
+                "info": "Select a model from the Model Registry.", "combobox": true, "refresh_button": true,
+                "list": false, "name": "registry_model", "real_time_refresh": true,
+                "options": [], "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "str", "value": ""
+              },
+              "temperature": {
+                "_input_type": "FloatInput", "advanced": true, "display_name": "Temperature", "dynamic": false,
+                "info": "Controls randomness (0-2). Leave empty to use model default.",
+                "list": false, "name": "temperature", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "float", "value": 0.1
+              },
+              "max_tokens": {
+                "_input_type": "IntInput", "advanced": true, "display_name": "Max Output Tokens", "dynamic": false,
+                "info": "Maximum number of tokens to generate. Leave empty for model default.",
+                "list": false, "name": "max_tokens", "placeholder": "", "required": false, "show": true,
+                "title_case": false, "type": "int", "value": 4096
+              }
+            }
+          },
+          "showNode": true, "type": "RegistryModelComponent", "id": "RegistryModelComponent-idp19"
+        }
+      },
+      {
+        "id": "DocumentExtractor-idp10",
         "type": "genericNode",
         "position": { "x": 2820, "y": 400 },
         "data": {
           "node": {
-            "display_name": "LLM Extractor",
+            "display_name": "Document Extractor",
             "description": "Extracts structured fields from a document using an LLM. Choose between writing a custom prompt or selecting a saved Field Configuration.",
             "icon": "BrainCircuit",
             "documentation": "",
@@ -388,7 +455,7 @@
               }
             }
           },
-          "showNode": true, "type": "LLMExtractor", "id": "LLMExtractor-idp10"
+          "showNode": true, "type": "LLMExtractor", "id": "DocumentExtractor-idp10"
         }
       },
       {
@@ -716,25 +783,36 @@
         }
       },
       {
+        "source": "RegistryModelComponent-idp19",
+        "sourceHandle": "{\"dataType\":\"RegistryModelComponent\",\"id\":\"RegistryModelComponent-idp19\",\"name\":\"model_output\",\"output_types\":[\"LanguageModel\"]}",
+        "target": "DocumentExtractor-idp10",
+        "targetHandle": "{\"fieldName\":\"llm\",\"id\":\"DocumentExtractor-idp10\",\"inputTypes\":[\"LanguageModel\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-RegistryModelComponent-idp19model_output-DocumentExtractor-idp10llm",
+        "data": {
+          "targetHandle": { "fieldName": "llm", "id": "DocumentExtractor-idp10", "inputTypes": ["LanguageModel"], "type": "other" },
+          "sourceHandle": { "dataType": "RegistryModelComponent", "id": "RegistryModelComponent-idp19", "name": "model_output", "output_types": ["LanguageModel"] }
+        }
+      },
+      {
         "source": "ChunkingStrategy-idp09",
         "sourceHandle": "{\"dataType\":\"ChunkingStrategy\",\"id\":\"ChunkingStrategy-idp09\",\"name\":\"chunks\",\"output_types\":[\"Message\"]}",
-        "target": "LLMExtractor-idp10",
-        "targetHandle": "{\"fieldName\":\"document\",\"id\":\"LLMExtractor-idp10\",\"inputTypes\":[\"Message\"],\"type\":\"other\"}",
-        "id": "reactflow__edge-ChunkingStrategy-idp09chunks-LLMExtractor-idp10document",
+        "target": "DocumentExtractor-idp10",
+        "targetHandle": "{\"fieldName\":\"document\",\"id\":\"DocumentExtractor-idp10\",\"inputTypes\":[\"Message\"],\"type\":\"other\"}",
+        "id": "reactflow__edge-ChunkingStrategy-idp09chunks-DocumentExtractor-idp10document",
         "data": {
-          "targetHandle": { "fieldName": "document", "id": "LLMExtractor-idp10", "inputTypes": ["Message"], "type": "other" },
+          "targetHandle": { "fieldName": "document", "id": "DocumentExtractor-idp10", "inputTypes": ["Message"], "type": "other" },
           "sourceHandle": { "dataType": "ChunkingStrategy", "id": "ChunkingStrategy-idp09", "name": "chunks", "output_types": ["Message"] }
         }
       },
       {
-        "source": "LLMExtractor-idp10",
-        "sourceHandle": "{\"dataType\":\"LLMExtractor\",\"id\":\"LLMExtractor-idp10\",\"name\":\"extracted_data\",\"output_types\":[\"Data\"]}",
+        "source": "DocumentExtractor-idp10",
+        "sourceHandle": "{\"dataType\":\"DocumentExtractor\",\"id\":\"DocumentExtractor-idp10\",\"name\":\"extracted_data\",\"output_types\":[\"Data\"]}",
         "target": "ChunkAggregator-idp11",
         "targetHandle": "{\"fieldName\":\"chunks_data\",\"id\":\"ChunkAggregator-idp11\",\"inputTypes\":[\"Data\"],\"type\":\"other\"}",
-        "id": "reactflow__edge-LLMExtractor-idp10extracted_data-ChunkAggregator-idp11chunks_data",
+        "id": "reactflow__edge-DocumentExtractor-idp10extracted_data-ChunkAggregator-idp11chunks_data",
         "data": {
           "targetHandle": { "fieldName": "chunks_data", "id": "ChunkAggregator-idp11", "inputTypes": ["Data"], "type": "other" },
-          "sourceHandle": { "dataType": "DynamicPrompting", "id": "LLMExtractor-idp10", "name": "extracted_data", "output_types": ["Data"] }
+          "sourceHandle": { "dataType": "DynamicPrompting", "id": "DocumentExtractor-idp10", "name": "extracted_data", "output_types": ["Data"] }
         }
       },
       {
