@@ -8,24 +8,26 @@ if TYPE_CHECKING:
     from agentcore.components.IDP.approval_gate import IDPApprovalGate
     from agentcore.components.IDP.chunk_aggregator import IDPChunkAggregator
     from agentcore.components.IDP.chunking_strategy import IDPChunkingStrategy
-    from agentcore.components.IDP.condition_node import IDPConditionNode
     from agentcore.components.IDP.confidence_router import IDPConfidenceRouter
     from agentcore.components.IDP.document_type_detector import IDPDocumentTypeDetector
-    from agentcore.components.IDP.merge_node import IDPMergeNode
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
     from agentcore.components.IDP.multi_branch_router import IDPMultiBranchRouter
+    from agentcore.components.IDP.output_parser import IDPOutputParser
     from agentcore.components.IDP.page_selector import IDPPageSelector
+    from agentcore.components.IDP.scan_corrector import IDPScanCorrector
     from agentcore.components.IDP.webhook_output import IDPWebhookOutput
 
 _dynamic_imports = {
-    "IDPConditionNode": "condition_node",
-    "IDPMergeNode": "merge_node",
-    "IDPMultiBranchRouter": "multi_branch_router",
     "IDPApprovalGate": "approval_gate",
+    "IDPChunkAggregator": "chunk_aggregator",
+    "IDPChunkingStrategy": "chunking_strategy",
     "IDPConfidenceRouter": "confidence_router",
     "IDPDocumentTypeDetector": "document_type_detector",
+    "IDPLLMExtractor": "llm_extractor",
+    "IDPMultiBranchRouter": "multi_branch_router",
+    "IDPOutputParser": "output_parser",
     "IDPPageSelector": "page_selector",
-    "IDPChunkingStrategy": "chunking_strategy",
-    "IDPChunkAggregator": "chunk_aggregator",
+    "IDPScanCorrector": "scan_corrector",
     "IDPWebhookOutput": "webhook_output",
 }
 

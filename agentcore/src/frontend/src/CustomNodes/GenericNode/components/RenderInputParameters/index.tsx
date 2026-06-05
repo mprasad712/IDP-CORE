@@ -31,11 +31,15 @@ const RenderInputParameters = ({
   const shownTemplateFields = useMemo(() => {
     return templateFields.filter((templateField) => {
       const template = data.node?.template[templateField];
-      return (
-        template?.show &&
-        !template?.advanced &&
-        !(template?.tool_mode && isToolMode)
-      );
+      if (!template?.show || template?.advanced || (template?.tool_mode && isToolMode)) {
+        return false;
+      }
+      // Client-side conditional visibility: show_when: { field, value }
+      if (template?.show_when) {
+        const controllerValue = data.node?.template[template.show_when.field]?.value;
+        return controllerValue === template.show_when.value;
+      }
+      return true;
     });
   }, [templateFields, data.node?.template, isToolMode]);
 
