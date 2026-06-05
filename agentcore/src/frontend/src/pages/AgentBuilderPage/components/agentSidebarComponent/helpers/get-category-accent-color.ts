@@ -23,6 +23,7 @@ const SIDEBAR_CATEGORY_ACCENTS: Record<string, string> = {
   idp_classification: "#0891B2",
   idp_detection:      "#9333EA",
   idp_validation:     "#16A34A",
+  idp_flow_control:   "#D97706",
 };
 
 export const getCategoryAccentColor = (

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
         agents,
         Guardrails,
         HumanInTheLoop,
+        IDP,
         azure,
         custom_component,
         data,
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 
 _dynamic_imports = {
     "agents": "agentcore.components.agents",
+    "IDP": "agentcore.components.IDP",
     "data": "agentcore.components.data",
     "processing": "agentcore.components.processing",
     "vectorstores": "agentcore.components.vectorstores",
@@ -52,6 +54,7 @@ __all__: list[str] = [
     "azure",
     "custom_component",
     "data",
+    "IDP",
     "google",
     "groq",
     "Guardrails",

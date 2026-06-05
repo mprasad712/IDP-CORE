@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from agentcore.components._importing import import_mod
+
+if TYPE_CHECKING:
+    from agentcore.components.IDP.approval_gate import IDPApprovalGate
+    from agentcore.components.IDP.chunk_aggregator import IDPChunkAggregator
+    from agentcore.components.IDP.chunking_strategy import IDPChunkingStrategy
+    from agentcore.components.IDP.condition_node import IDPConditionNode
+    from agentcore.components.IDP.confidence_router import IDPConfidenceRouter
+    from agentcore.components.IDP.document_type_detector import IDPDocumentTypeDetector
+    from agentcore.components.IDP.merge_node import IDPMergeNode
+    from agentcore.components.IDP.multi_branch_router import IDPMultiBranchRouter
+    from agentcore.components.IDP.page_selector import IDPPageSelector
+    from agentcore.components.IDP.webhook_output import IDPWebhookOutput
+
+_dynamic_imports = {
+    "IDPConditionNode": "condition_node",
+    "IDPMergeNode": "merge_node",
+    "IDPMultiBranchRouter": "multi_branch_router",
+    "IDPApprovalGate": "approval_gate",
+    "IDPConfidenceRouter": "confidence_router",
+    "IDPDocumentTypeDetector": "document_type_detector",
+    "IDPPageSelector": "page_selector",
+    "IDPChunkingStrategy": "chunking_strategy",
+    "IDPChunkAggregator": "chunk_aggregator",
+    "IDPWebhookOutput": "webhook_output",
+}
+
+__all__ = list(_dynamic_imports.keys())
+
+
+def __getattr__(attr_name: str) -> Any:
+    if attr_name not in _dynamic_imports:
+        msg = f"module '{__name__}' has no attribute '{attr_name}'"
+        raise AttributeError(msg)
+    try:
+        result = import_mod(attr_name, _dynamic_imports[attr_name], __spec__.parent)
+    except (ModuleNotFoundError, ImportError, AttributeError) as e:
+        msg = f"Could not import '{attr_name}' from '{__name__}': {e}"
+        raise AttributeError(msg) from e
+    globals()[attr_name] = result
+    return result
+
+
+def __dir__() -> list[str]:
+    return list(__all__)
