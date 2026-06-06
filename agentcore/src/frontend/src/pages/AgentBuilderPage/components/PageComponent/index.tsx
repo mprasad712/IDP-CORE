@@ -817,24 +817,6 @@ export default function Page({
           <div id="react-agent-id" className="h-full w-full bg-canvas relative">
             {!view && (
               <>
-                <Panel
-                  className="react-flow__controls !left-0 !top-14 !m-2 !z-[45] rounded-md"
-                  position="top-left"
-                >
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    className="flex items-center !gap-1.5 shadow-sm"
-                    onClick={handleBack}
-                    data-testid="back-button"
-                  >
-                    <ForwardedIconComponent
-                      name="ArrowLeft"
-                      className="text-primary"
-                    />
-                    <span className="text-mmd font-normal">Back</span>
-                  </Button>
-                </Panel>
                 <MemoizedLogCanvasControls />
                 <MemoizedCanvasControls
                   setIsAddingNote={setIsAddingNote}

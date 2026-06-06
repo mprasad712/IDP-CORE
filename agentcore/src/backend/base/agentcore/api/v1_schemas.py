@@ -191,7 +191,8 @@ class StreamData(BaseModel):
 
 class CustomComponentRequest(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    code: str
+    code: str = ""
+    node_id: str | None = None
     frontend_node: dict | None = None
 
 

@@ -18,6 +18,7 @@ import { useTranslation } from 'react-i18next';
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   useSidebar,
 } from "@/components/ui/sidebar";
 import SkeletonGroup from "@/components/ui/skeletonGroup";
@@ -32,7 +33,10 @@ import {
   SIDEBAR_CATEGORIES,
 } from "@/utils/styleUtils";
 import { cn, getBooleanFromStorage } from "@/utils/utils";
+import { useParams } from "react-router-dom";
+import { useCustomNavigate } from "@/customization/hooks/use-custom-navigate";
 import useAgentStore from "../../../../stores/agentStore";
+import useAgentsManagerStore from "../../../../stores/agentsManagerStore";
 import { useTypesStore } from "../../../../stores/typesStore";
 import type { APIClassType } from "../../../../types/api";
 import isWrappedWithClass from "../PageComponent/utils/is-wrapped-with-class";
@@ -150,6 +154,18 @@ interface AgentSidebarComponentProps {
 export function AgentSidebarComponent({ isLoading, readOnly = false }: AgentSidebarComponentProps) {
   const data = useTypesStore((state) => state.data);
   const { t } = useTranslation();
+  const navigate = useCustomNavigate();
+  const { folderId } = useParams();
+  const logsOpen = useAgentsManagerStore((state) => state.logsOpen);
+  const setLogsOpen = useAgentsManagerStore((state) => state.setLogsOpen);
+
+  const handleBack = useCallback(() => {
+    if (folderId) {
+      navigate(`/agents/folder/${folderId}`);
+      return;
+    }
+    navigate("/agents");
+  }, [folderId, navigate]);
   const {
     getFilterEdge,
     setFilterEdge,
@@ -176,6 +192,7 @@ export function AgentSidebarComponent({ isLoading, readOnly = false }: AgentSide
     isLoading: mcpLoading,
     isSuccess: mcpSuccess,
   } = useGetMCPServers({ enabled: ENABLE_NEW_SIDEBAR });
+
 
   // Get search state from context
   const context = useSearchContext();
@@ -599,6 +616,7 @@ export function AgentSidebarComponent({ isLoading, readOnly = false }: AgentSide
             addComponent={addComponentSafe}
             isLoading={Boolean(isLoading)}
             readOnly={readOnly}
+            onBack={handleBack}
           />
 
           <SidebarContent
@@ -672,6 +690,23 @@ export function AgentSidebarComponent({ isLoading, readOnly = false }: AgentSide
               </>
             )}
           </SidebarContent>
+
+          <SidebarFooter className="border-t p-2">
+            <Button
+              variant="primary"
+              size="sm"
+              className="flex w-full items-center justify-start !gap-1.5"
+              onClick={() => setLogsOpen(!logsOpen)}
+              data-testid="sidebar-logs-button"
+            >
+              <ForwardedIconComponent name="Terminal" className="text-primary" />
+              <span className="text-mmd font-normal">{t("Logs")}</span>
+              <ForwardedIconComponent
+                name={logsOpen ? "ChevronDown" : "ChevronUp"}
+                className="ml-auto h-3 w-3 text-primary"
+              />
+            </Button>
+          </SidebarFooter>
         </div>
       </div>
     </Sidebar>

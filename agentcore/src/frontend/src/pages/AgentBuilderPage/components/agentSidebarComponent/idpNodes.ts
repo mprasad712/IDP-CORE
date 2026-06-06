@@ -547,7 +547,7 @@ export const IDP_NODES: IDPData = {
   // ── Extraction ────────────────────────────────────────────────────────────
   idp_extraction: {
     DocumentExtractor: {
-      display_name: "Document Extractor",
+      display_name: "AI Field Extractor",
       description: "Extracts structured fields from a document using an LLM. Choose between writing a custom prompt or selecting a saved Field Configuration.",
       icon: "BrainCircuit",
       documentation: "",
@@ -559,7 +559,7 @@ export const IDP_NODES: IDPData = {
       field_order: ["document", "llm", "extraction_mode", "prompt", "config_name", "model_name"],
       template: {
         document: {
-          _input_type: "MessageInput",
+          _input_type: "HandleInput",
           advanced: false,
           display_name: "OCR Text / Document",
           dynamic: false,
@@ -574,7 +574,7 @@ export const IDP_NODES: IDPData = {
           value: "",
         },
         llm: {
-          _input_type: "MessageInput",
+          _input_type: "HandleInput",
           advanced: false,
           display_name: "Language Model",
           dynamic: false,
@@ -613,14 +613,14 @@ export const IDP_NODES: IDPData = {
           value: "",
         },
         config_name: {
-          _input_type: "DropdownInput",
+          _input_type: "StrInput",
+          idp_config_fetch: true,
           advanced: false,
           display_name: "Field Configuration",
           dynamic: false,
           info: "Select a saved Field Configuration from the Configuration page.",
           list: false,
           name: "config_name",
-          options: [],
           placeholder: "Select a configuration...",
           required: false,
           show: true,

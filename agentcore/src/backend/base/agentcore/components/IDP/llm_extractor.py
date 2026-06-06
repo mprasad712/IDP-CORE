@@ -11,7 +11,7 @@ from agentcore.schema.message import Message
 
 
 class IDPLLMExtractor(Node):
-    display_name = "LLM Extractor"
+    display_name = "AI Field Extractor"
     description = (
         "Extracts structured fields from a document using an LLM. "
         "Choose between writing a custom prompt or selecting a saved Field Configuration."
@@ -102,7 +102,7 @@ class IDPLLMExtractor(Node):
                 ).all()
                 return [n for n in names if n]
         except Exception as exc:
-            logger.warning(f"[LLMExtractor] Could not fetch field configs: {exc}")
+            logger.warning(f"[AIFieldExtractor] Could not fetch field configs: {exc}")
             return []
 
     # ── extraction ────────────────────────────────────────────────────────────
@@ -133,7 +133,7 @@ class IDPLLMExtractor(Node):
             return Data(data=extracted, text=raw)
         except Exception as exc:
             self.status = f"Error: {exc}"
-            logger.error(f"[LLMExtractor] Extraction failed: {exc}")
+            logger.error(f"[AIFieldExtractor] Extraction failed: {exc}")
             return Data(data={"error": str(exc)}, text="")
 
     def _build_config_prompt(self, config_name: str) -> str:
@@ -172,7 +172,7 @@ class IDPLLMExtractor(Node):
                     f"For each field include its value and a confidence score (0–1)."
                 )
         except Exception as exc:
-            logger.warning(f"[LLMExtractor] Config prompt build failed: {exc}")
+            logger.warning(f"[AIFieldExtractor] Config prompt build failed: {exc}")
             return "Extract all key fields from this document as JSON."
 
     @staticmethod

@@ -20,6 +20,7 @@ import PromptAreaComponent from "./components/promptComponent";
 import QueryComponent from "./components/queryComponent";
 import SortableListComponent from "./components/sortableListComponent";
 import { StrRenderComponent } from "./components/strRenderComponent";
+import IDPFieldConfigDropdown from "./components/IDPFieldConfigDropdown";
 import ToolsComponent from "./components/ToolsComponent";
 import ToggleShadComponent from "./components/toggleShadComponent";
 import type { InputProps, NodeInfoType } from "./types";
@@ -77,6 +78,17 @@ export function ParameterRenderComponent({
       nodeInformationMetadata,
       hasRefreshButton: templateData.refresh_button,
     };
+
+    if ((templateData as any).idp_config_fetch === true) {
+      return (
+        <IDPFieldConfigDropdown
+          {...baseInputProps}
+          nodeId={nodeId}
+          nodeClass={nodeClass}
+          handleNodeClass={handleNodeClass}
+        />
+      );
+    }
 
     if (TEXT_FIELD_TYPES.includes(templateData.type ?? "")) {
       if (templateData.list) {

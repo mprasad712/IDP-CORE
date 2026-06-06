@@ -89,6 +89,7 @@ export interface SidebarHeaderComponentProps {
   addComponent?: (component: APIClassType, name: string) => void;
   isLoading?: boolean;
   readOnly?: boolean;
+  onBack?: () => void;
 }
 
 export interface UniqueInputsComponents {

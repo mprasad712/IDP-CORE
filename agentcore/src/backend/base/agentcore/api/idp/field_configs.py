@@ -273,6 +273,42 @@ async def create_field_config(
     return config_db
 
 
+@router.get("/names", response_model=list[str])
+async def list_field_config_names(
+    *,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+):
+    """Return a sorted list of all field configuration names (custom + templates) accessible to the user.
+
+    Used by the AI Field Extractor node in the builder to populate the
+    'Field Configuration' dropdown without needing the full paginated response.
+    """
+    stmt = (
+        select(IdpFieldConfiguration.name)
+        .where(
+            IdpFieldConfiguration.deleted_at.is_(None),
+            IdpFieldConfiguration.is_active == True,
+        )
+    )
+
+    org_ids, _ = await _get_scope_memberships(session, current_user.id)
+    role = normalize_role(getattr(current_user, "role", None))
+
+    if role != "root":
+        # Include org-scoped configs AND global templates (accessible to everyone)
+        stmt = stmt.where(
+            or_(
+                IdpFieldConfiguration.org_id.in_(list(org_ids)),
+                and_(IdpFieldConfiguration.org_id.is_(None), IdpFieldConfiguration.is_template == True),
+            )
+        )
+
+    stmt = stmt.order_by(IdpFieldConfiguration.name.asc())
+    rows = (await session.exec(stmt)).all()
+    return [r for r in rows if r]
+
+
 @router.get("/", response_model=Page[FieldConfigRead])
 async def list_field_configs(
     *,

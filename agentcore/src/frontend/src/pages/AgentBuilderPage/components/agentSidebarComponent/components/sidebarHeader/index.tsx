@@ -31,10 +31,23 @@ export const SidebarHeaderComponent = memo(function SidebarHeaderComponent({
   addComponent,
   isLoading = false,
   readOnly = false,
+  onBack,
 }: SidebarHeaderComponentProps) {
   const { t } = useTranslation();
   return (
     <SidebarHeader className="flex w-full flex-col gap-3 p-4 pb-2">
+      {!readOnly && onBack && (
+        <Button
+          variant="primary"
+          size="sm"
+          className="flex w-full items-center justify-start !gap-1.5 shadow-sm"
+          onClick={onBack}
+          data-testid="sidebar-back-button"
+        >
+          <ForwardedIconComponent name="ArrowLeft" className="text-primary" />
+          <span className="text-mmd font-normal">{t("Back")}</span>
+        </Button>
+      )}
       <Disclosure open={showConfig} onOpenChange={setShowConfig}>
         <div className="flex w-full items-center gap-2">
           <SidebarTrigger className="text-muted-foreground">
@@ -53,21 +66,6 @@ export const SidebarHeaderComponent = memo(function SidebarHeaderComponent({
         handleInputBlur={handleInputBlur}
         handleInputChange={handleInputChange}
       />
-      <Button
-        unstyled
-        disabled={isLoading || readOnly}
-        onClick={() => {
-          if (readOnly) return;
-          if (customComponent && addComponent) {
-            addComponent(customComponent, "CustomComponent");
-          }
-        }}
-        data-testid="sidebar-custom-component-button"
-        className="flex h-9 w-full items-center justify-center gap-2 rounded-md border border-input bg-background hover:bg-muted"
-      >
-        <ForwardedIconComponent name="Plus" className="h-4 w-4 text-muted-foreground" />
-        <span>{t("Create Custom")}</span>
-      </Button>
       {filterName && filterDescription && (
         <SidebarFilterComponent
           name={filterName}

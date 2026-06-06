@@ -48,6 +48,7 @@ export const URLs = {
   TRIGGERS: `triggers`,
   TEAMS: `teams`,
   HITL: `v1/hitl`,
+  IDP_FIELD_CONFIGS: `v1/idp/field-configs`,
   TAGS: `tags`,
   COST_LIMITS: `cost-limits`,
   SEMANTIC_SEARCH: `semantic-search/search`,

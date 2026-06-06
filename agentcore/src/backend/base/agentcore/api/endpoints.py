@@ -61,6 +61,35 @@ from agentcore.utils.version import get_version_info
 
 if TYPE_CHECKING:
     from agentcore.events.event_manager import EventManager
+
+
+def _get_builtin_component_code(node_id: str) -> str | None:
+    """Return source code for a built-in component given its node ID.
+
+    For IDP template nodes whose JSON snapshot has no `code` field, the
+    frontend sends the raw node_id (e.g. "RegistryModelComponent-idp19").
+    We extract the component class name from the ID prefix and look it up
+    in the startup component cache.
+    """
+    comp_name = node_id.split("-")[0] if node_id else ""
+    if not comp_name:
+        return None
+    try:
+        from agentcore.interface.components import component_cache
+
+        if component_cache.all_types_dict:
+            for _cat, comps in component_cache.all_types_dict.items():
+                if not isinstance(comps, dict):
+                    continue
+                for name, data in comps.items():
+                    if name == comp_name:
+                        template = data.get("template", {})
+                        code_field = template.get("code", {})
+                        if isinstance(code_field, dict):
+                            return code_field.get("value")
+    except Exception as exc:
+        logger.debug(f"[builtin_code_lookup] '{comp_name}': {exc}")
+    return None
     from agentcore.services.settings.service import SettingsService
 
 router = APIRouter(tags=["Base"])
@@ -1255,7 +1284,11 @@ async def custom_component_update(
         SerializationError: If serialization of the updated component node fails.
     """
     try:
-        component = Node(_code=code_request.code)
+        code = code_request.code
+        if not code and code_request.node_id:
+            code = _get_builtin_component_code(code_request.node_id) or ""
+
+        component = Node(_code=code)
         component_node, cc_instance = build_custom_component_template(
             component,
             user_id=user.id,
@@ -1289,7 +1322,7 @@ async def custom_component_update(
             field_name=code_request.field,
         )
         if "code" not in updated_build_config:
-            updated_build_config = add_code_field_to_build_config(updated_build_config, code_request.code)
+            updated_build_config = add_code_field_to_build_config(updated_build_config, code)
         component_node["template"] = updated_build_config
 
         if isinstance(cc_instance, Node):

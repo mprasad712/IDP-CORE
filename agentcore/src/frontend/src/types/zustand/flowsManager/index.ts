@@ -38,6 +38,8 @@ export type AgentsManagerStoreType = {
   versionSavePrompt: VersionSavePrompt | null;
   openVersionSavePrompt: (prompt: VersionSavePrompt) => void;
   clearVersionSavePrompt: () => void;
+  logsOpen: boolean;
+  setLogsOpen: (open: boolean) => void;
   resetStore: () => void;
 };
 
