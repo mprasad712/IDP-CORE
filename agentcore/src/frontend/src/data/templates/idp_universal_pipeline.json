@@ -401,7 +401,7 @@
         "position": { "x": 2820, "y": 400 },
         "data": {
           "node": {
-            "display_name": "Document Extractor",
+            "display_name": "AI Field Extractor",
             "description": "Extracts structured fields from a document using an LLM. Choose between writing a custom prompt or selecting a saved Field Configuration.",
             "icon": "BrainCircuit",
             "documentation": "",
@@ -440,9 +440,9 @@
                 "value": "Extract all key fields from this document: document number, date, parties involved, amounts, and any important terms or conditions. Return as structured JSON."
               },
               "config_name": {
-                "_input_type": "DropdownInput", "advanced": false, "display_name": "Field Configuration", "dynamic": false,
+                "_input_type": "StrInput", "idp_config_fetch": true, "advanced": false, "display_name": "Field Configuration", "dynamic": false,
                 "info": "Select a saved Field Configuration from the Configuration page.",
-                "list": false, "name": "config_name", "options": [],
+                "list": false, "name": "config_name",
                 "placeholder": "Select a configuration...", "required": false, "show": true,
                 "show_when": { "field": "extraction_mode", "value": "field_configuration" },
                 "title_case": false, "type": "str", "value": ""
@@ -806,13 +806,13 @@
       },
       {
         "source": "DocumentExtractor-idp10",
-        "sourceHandle": "{\"dataType\":\"DocumentExtractor\",\"id\":\"DocumentExtractor-idp10\",\"name\":\"extracted_data\",\"output_types\":[\"Data\"]}",
+        "sourceHandle": "{\"dataType\":\"LLMExtractor\",\"id\":\"DocumentExtractor-idp10\",\"name\":\"extracted_data\",\"output_types\":[\"Data\"]}",
         "target": "ChunkAggregator-idp11",
         "targetHandle": "{\"fieldName\":\"chunks_data\",\"id\":\"ChunkAggregator-idp11\",\"inputTypes\":[\"Data\"],\"type\":\"other\"}",
         "id": "reactflow__edge-DocumentExtractor-idp10extracted_data-ChunkAggregator-idp11chunks_data",
         "data": {
           "targetHandle": { "fieldName": "chunks_data", "id": "ChunkAggregator-idp11", "inputTypes": ["Data"], "type": "other" },
-          "sourceHandle": { "dataType": "DynamicPrompting", "id": "DocumentExtractor-idp10", "name": "extracted_data", "output_types": ["Data"] }
+          "sourceHandle": { "dataType": "LLMExtractor", "id": "DocumentExtractor-idp10", "name": "extracted_data", "output_types": ["Data"] }
         }
       },
       {

@@ -11,7 +11,8 @@ import useAgentsManagerStore from "@/stores/agentsManagerStore";
 import { cn, convertUTCToLocalTimezone } from "@/utils/utils";
 
 const LogCanvasControls = () => {
-  const [logsOpen, setLogsOpen] = useState(false);
+  const logsOpen = useAgentsManagerStore((state) => state.logsOpen);
+  const setLogsOpen = useAgentsManagerStore((state) => state.setLogsOpen);
   const currentAgentId = useAgentsManagerStore((state) => state.currentAgentId);
   const [pageIndex, setPageIndex] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -49,27 +50,6 @@ const LogCanvasControls = () => {
 
   return (
     <>
-      {/* Toggle button — bottom-left corner */}
-      <Panel
-        data-testid="canvas_controls"
-        className="react-flow__controls !m-2 !z-[45] rounded-md"
-        position="bottom-left"
-      >
-        <Button
-          variant="primary"
-          size="sm"
-          className="flex items-center !gap-1.5"
-          onClick={() => setLogsOpen((v) => !v)}
-        >
-          <ForwardedIconComponent name="Terminal" className="text-primary" />
-          <span className="text-mmd font-normal">Logs</span>
-          <ForwardedIconComponent
-            name={logsOpen ? "ChevronDown" : "ChevronUp"}
-            className="h-3 w-3 text-primary"
-          />
-        </Button>
-      </Panel>
-
       {/* Slide-up drawer — spans full width at bottom of canvas */}
       <Panel
         position="bottom-left"

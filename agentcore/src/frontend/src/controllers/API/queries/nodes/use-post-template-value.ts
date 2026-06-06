@@ -39,7 +39,8 @@ export const usePostTemplateValue: useMutationFunctionType<
     const response = await api.post<APIClassType>(
       getURL("CUSTOM_COMPONENT", { update: "update" }),
       {
-        code: template.code.value,
+        code: template.code?.value ?? "",
+        node_id: nodeId,
         template: template,
         field: parameterId,
         field_value: payload.value,

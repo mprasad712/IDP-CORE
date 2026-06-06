@@ -17,6 +17,8 @@ const past = {};
 const future = {};
 
 const useAgentsManagerStore = create<AgentsManagerStoreType>((set, get) => ({
+  logsOpen: false,
+  setLogsOpen: (logsOpen: boolean) => set({ logsOpen }),
   IOModalOpen: false,
   setIOModalOpen: (IOModalOpen: boolean) => {
     set({ IOModalOpen });

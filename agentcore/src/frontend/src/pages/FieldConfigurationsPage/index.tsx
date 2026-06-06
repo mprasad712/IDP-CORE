@@ -39,13 +39,28 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/utils/utils";
+import {
+  useGetFieldConfigs,
+  usePostFieldConfig,
+  usePutFieldConfig,
+  useDeleteFieldConfig,
+  usePostFieldConfigHeader,
+  usePutFieldConfigHeader,
+  useDeleteFieldConfigHeader,
+  usePostFieldConfigLineItem,
+  usePutFieldConfigLineItem,
+  useDeleteFieldConfigLineItem,
+  type FieldConfig as ApiFieldConfig,
+  type FieldConfigHeader,
+  type FieldConfigLineItem,
+} from "@/controllers/API/queries/field-configs";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type FieldDataType = "text" | "number" | "date" | "boolean";
 
 interface ConfigField {
-  id: string;
+  id: string;       // UUID when from DB, short random string when newly added in form
   name: string;
   dataType: FieldDataType;
   required: boolean;
@@ -60,274 +75,52 @@ interface FieldConfig {
   lineItemColumns: ConfigField[];
   createdBy: string;
   createdDate: string;
-  usedByAgents: number;
+  isTemplate: boolean;
 }
 
-interface TemplateEntry {
-  name: string;
-  description: string;
-  icon: string;
-  headerFields: ConfigField[];
-  lineItemColumns: ConfigField[];
+// ─── Adapter helpers ──────────────────────────────────────────────────────────
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isDbId = (id: string) => UUID_RE.test(id);
+
+function apiHeaderToField(h: FieldConfigHeader): ConfigField {
+  return {
+    id: h.id,
+    name: h.field_name,
+    dataType: h.field_type,
+    required: h.is_required,
+    displayOrder: h.display_order,
+  };
 }
 
-// ─── Template catalogue with full schemas ─────────────────────────────────────
-
-function tf(id: string, name: string, dataType: FieldDataType, required: boolean, order: number): ConfigField {
-  return { id, name, dataType, required, displayOrder: order };
+function apiLineItemToField(li: FieldConfigLineItem): ConfigField {
+  return {
+    id: li.id,
+    name: li.column_name,
+    dataType: li.column_type as FieldDataType,
+    required: li.is_required,
+    displayOrder: li.display_order,
+  };
 }
 
-const TEMPLATE_CATALOGUE: TemplateEntry[] = [
-  {
-    name: "Invoice",
-    description: "Standard invoice with vendor, date, line items and totals.",
-    icon: "FileText",
-    headerFields: [
-      tf("h1", "invoice_number",  "text",    true,  1),
-      tf("h2", "invoice_date",    "date",    true,  2),
-      tf("h3", "vendor_name",     "text",    true,  3),
-      tf("h4", "vendor_address",  "text",    false, 4),
-      tf("h5", "buyer_name",      "text",    false, 5),
-      tf("h6", "due_date",        "date",    false, 6),
-      tf("h7", "subtotal",        "number",  true,  7),
-      tf("h8", "tax_amount",      "number",  false, 8),
-      tf("h9", "total_amount",    "number",  true,  9),
-      tf("h10","currency",        "text",    false, 10),
-    ],
-    lineItemColumns: [
-      tf("l1", "description",  "text",   true,  1),
-      tf("l2", "quantity",     "number", true,  2),
-      tf("l3", "unit_price",   "number", true,  3),
-      tf("l4", "tax_rate",     "number", false, 4),
-      tf("l5", "line_total",   "number", true,  5),
-    ],
-  },
-  {
-    name: "PAN Card",
-    description: "Indian PAN card with name, DOB and PAN number.",
-    icon: "CreditCard",
-    headerFields: [
-      tf("h1", "pan_number",       "text", true,  1),
-      tf("h2", "full_name",        "text", true,  2),
-      tf("h3", "father_name",      "text", false, 3),
-      tf("h4", "date_of_birth",    "date", true,  4),
-      tf("h5", "signature_present","boolean", false, 5),
-    ],
-    lineItemColumns: [],
-  },
-  {
-    name: "Aadhaar Card",
-    description: "Indian Aadhaar card with UID, name and address.",
-    icon: "IdCard",
-    headerFields: [
-      tf("h1", "aadhaar_number", "text",    true,  1),
-      tf("h2", "full_name",      "text",    true,  2),
-      tf("h3", "date_of_birth",  "date",    true,  3),
-      tf("h4", "gender",         "text",    false, 4),
-      tf("h5", "address",        "text",    true,  5),
-      tf("h6", "pincode",        "text",    false, 6),
-      tf("h7", "qr_data",        "text",    false, 7),
-    ],
-    lineItemColumns: [],
-  },
-  {
-    name: "Purchase Order",
-    description: "PO with buyer, supplier, items and delivery terms.",
-    icon: "ShoppingCart",
-    headerFields: [
-      tf("h1", "po_number",       "text",   true,  1),
-      tf("h2", "po_date",         "date",   true,  2),
-      tf("h3", "buyer_name",      "text",   true,  3),
-      tf("h4", "supplier_name",   "text",   true,  4),
-      tf("h5", "delivery_date",   "date",   false, 5),
-      tf("h6", "delivery_terms",  "text",   false, 6),
-      tf("h7", "total_amount",    "number", true,  7),
-      tf("h8", "currency",        "text",   false, 8),
-    ],
-    lineItemColumns: [
-      tf("l1", "item_code",   "text",   false, 1),
-      tf("l2", "description", "text",   true,  2),
-      tf("l3", "quantity",    "number", true,  3),
-      tf("l4", "unit",        "text",   false, 4),
-      tf("l5", "unit_price",  "number", true,  5),
-      tf("l6", "line_total",  "number", true,  6),
-    ],
-  },
-  {
-    name: "Receipt",
-    description: "Point-of-sale or payment receipt.",
-    icon: "Receipt",
-    headerFields: [
-      tf("h1", "merchant_name",     "text",   true,  1),
-      tf("h2", "merchant_address",  "text",   false, 2),
-      tf("h3", "transaction_date",  "date",   true,  3),
-      tf("h4", "transaction_time",  "text",   false, 4),
-      tf("h5", "total_amount",      "number", true,  5),
-      tf("h6", "payment_method",    "text",   false, 6),
-      tf("h7", "receipt_number",    "text",   false, 7),
-    ],
-    lineItemColumns: [
-      tf("l1", "item",     "text",   true,  1),
-      tf("l2", "quantity", "number", false, 2),
-      tf("l3", "price",    "number", true,  3),
-    ],
-  },
-  {
-    name: "Contract",
-    description: "Legal contract with parties, dates and clauses.",
-    icon: "Scroll",
-    headerFields: [
-      tf("h1", "contract_title",   "text", true,  1),
-      tf("h2", "party_one",        "text", true,  2),
-      tf("h3", "party_two",        "text", true,  3),
-      tf("h4", "effective_date",   "date", true,  4),
-      tf("h5", "expiry_date",      "date", false, 5),
-      tf("h6", "governing_law",    "text", false, 6),
-      tf("h7", "contract_value",   "number", false, 7),
-      tf("h8", "signature_present","boolean", false, 8),
-    ],
-    lineItemColumns: [],
-  },
-  {
-    name: "Bank Statement",
-    description: "Bank account transactions for a given period.",
-    icon: "Building2",
-    headerFields: [
-      tf("h1", "bank_name",       "text",   true,  1),
-      tf("h2", "account_number",  "text",   true,  2),
-      tf("h3", "account_holder",  "text",   true,  3),
-      tf("h4", "statement_from",  "date",   true,  4),
-      tf("h5", "statement_to",    "date",   true,  5),
-      tf("h6", "opening_balance", "number", false, 6),
-      tf("h7", "closing_balance", "number", true,  7),
-      tf("h8", "currency",        "text",   false, 8),
-    ],
-    lineItemColumns: [
-      tf("l1", "date",        "date",   true,  1),
-      tf("l2", "description", "text",   true,  2),
-      tf("l3", "debit",       "number", false, 3),
-      tf("l4", "credit",      "number", false, 4),
-      tf("l5", "balance",     "number", true,  5),
-    ],
-  },
-  {
-    name: "Pay Slip",
-    description: "Employee salary slip with earnings and deductions.",
-    icon: "Wallet",
-    headerFields: [
-      tf("h1", "employee_name",   "text",   true,  1),
-      tf("h2", "employee_id",     "text",   false, 2),
-      tf("h3", "designation",     "text",   false, 3),
-      tf("h4", "pay_period",      "text",   true,  4),
-      tf("h5", "basic_salary",    "number", true,  5),
-      tf("h6", "gross_salary",    "number", true,  6),
-      tf("h7", "total_deductions","number", false, 7),
-      tf("h8", "net_salary",      "number", true,  8),
-    ],
-    lineItemColumns: [
-      tf("l1", "component",  "text",   true,  1),
-      tf("l2", "type",       "text",   false, 2),
-      tf("l3", "amount",     "number", true,  3),
-    ],
-  },
-  {
-    name: "Passport",
-    description: "Passport with MRZ, name, nationality and expiry.",
-    icon: "Globe",
-    headerFields: [
-      tf("h1", "passport_number", "text", true,  1),
-      tf("h2", "surname",         "text", true,  2),
-      tf("h3", "given_names",     "text", true,  3),
-      tf("h4", "nationality",     "text", true,  4),
-      tf("h5", "date_of_birth",   "date", true,  5),
-      tf("h6", "gender",          "text", false, 6),
-      tf("h7", "issue_date",      "date", true,  7),
-      tf("h8", "expiry_date",     "date", true,  8),
-      tf("h9", "mrz_line1",       "text", false, 9),
-      tf("h10","mrz_line2",       "text", false, 10),
-    ],
-    lineItemColumns: [],
-  },
-  {
-    name: "Driving Licence",
-    description: "Driving licence with number, class and expiry.",
-    icon: "Car",
-    headerFields: [
-      tf("h1", "licence_number",  "text", true,  1),
-      tf("h2", "full_name",       "text", true,  2),
-      tf("h3", "date_of_birth",   "date", true,  3),
-      tf("h4", "address",         "text", false, 4),
-      tf("h5", "issue_date",      "date", true,  5),
-      tf("h6", "expiry_date",     "date", true,  6),
-      tf("h7", "vehicle_class",   "text", false, 7),
-      tf("h8", "issuing_authority","text", false, 8),
-    ],
-    lineItemColumns: [],
-  },
-  {
-    name: "Utility Bill",
-    description: "Electricity / water / gas bill with usage and amount.",
-    icon: "Zap",
-    headerFields: [
-      tf("h1", "provider_name",   "text",   true,  1),
-      tf("h2", "customer_name",   "text",   true,  2),
-      tf("h3", "account_number",  "text",   false, 3),
-      tf("h4", "bill_date",       "date",   true,  4),
-      tf("h5", "due_date",        "date",   false, 5),
-      tf("h6", "billing_period",  "text",   false, 6),
-      tf("h7", "units_consumed",  "number", false, 7),
-      tf("h8", "total_amount",    "number", true,  8),
-    ],
-    lineItemColumns: [],
-  },
-  {
-    name: "Medical Report",
-    description: "Lab / diagnostic report with patient and findings.",
-    icon: "Stethoscope",
-    headerFields: [
-      tf("h1", "patient_name",    "text", true,  1),
-      tf("h2", "patient_id",      "text", false, 2),
-      tf("h3", "date_of_birth",   "date", false, 3),
-      tf("h4", "report_date",     "date", true,  4),
-      tf("h5", "report_type",     "text", true,  5),
-      tf("h6", "referring_doctor","text", false, 6),
-      tf("h7", "lab_name",        "text", false, 7),
-    ],
-    lineItemColumns: [
-      tf("l1", "test_name",   "text", true,  1),
-      tf("l2", "result",      "text", true,  2),
-      tf("l3", "reference",   "text", false, 3),
-      tf("l4", "unit",        "text", false, 4),
-      tf("l5", "status",      "text", false, 5),
-    ],
-  },
-];
+function apiConfigToLocal(c: ApiFieldConfig): FieldConfig {
+  return {
+    id: c.id,
+    name: c.name,
+    description: c.description ?? "",
+    headerFields: [...c.headers]
+      .sort((a, b) => a.display_order - b.display_order)
+      .map(apiHeaderToField),
+    lineItemColumns: [...c.line_items]
+      .sort((a, b) => a.display_order - b.display_order)
+      .map(apiLineItemToField),
+    createdBy: c.created_by ?? "system",
+    createdDate: c.created_at.slice(0, 10),
+    isTemplate: c.is_template,
+  };
+}
 
-// ─── Seed custom configs ──────────────────────────────────────────────────────
-
-const INITIAL_CONFIGS: FieldConfig[] = [
-  {
-    id: "1",
-    name: "Standard Invoice",
-    description: "Extracts all key invoice fields plus line items.",
-    headerFields: [
-      { id: "h1", name: "invoice_number", dataType: "text",   required: true,  displayOrder: 1 },
-      { id: "h2", name: "invoice_date",   dataType: "date",   required: true,  displayOrder: 2 },
-      { id: "h3", name: "vendor_name",    dataType: "text",   required: true,  displayOrder: 3 },
-      { id: "h4", name: "total_amount",   dataType: "number", required: true,  displayOrder: 4 },
-      { id: "h5", name: "tax_amount",     dataType: "number", required: false, displayOrder: 5 },
-    ],
-    lineItemColumns: [
-      { id: "l1", name: "description", dataType: "text",   required: true,  displayOrder: 1 },
-      { id: "l2", name: "quantity",    dataType: "number", required: true,  displayOrder: 2 },
-      { id: "l3", name: "unit_price",  dataType: "number", required: true,  displayOrder: 3 },
-      { id: "l4", name: "line_total",  dataType: "number", required: true,  displayOrder: 4 },
-    ],
-    createdBy: "admin",
-    createdDate: "2026-05-10",
-    usedByAgents: 2,
-  },
-];
+// ─── Constants ────────────────────────────────────────────────────────────────
 
 const DATA_TYPES: FieldDataType[] = ["text", "number", "date", "boolean"];
 
@@ -428,11 +221,12 @@ function SchemaPreview({ config }: { config: Partial<FieldConfig> }) {
 
 // ─── Edit / Create dialog ─────────────────────────────────────────────────────
 
-function ConfigDialog({ open, initial, onSave, onClose }: {
+function ConfigDialog({ open, initial, onSave, onClose, saving }: {
   open: boolean;
   initial: Partial<FieldConfig> | null;
   onSave: (cfg: FieldConfig) => void;
   onClose: () => void;
+  saving?: boolean;
 }) {
   const isNew = !initial?.id;
   const [name,           setName]           = useState(initial?.name ?? "");
@@ -448,9 +242,9 @@ function ConfigDialog({ open, initial, onSave, onClose }: {
       description: description.trim(),
       headerFields,
       lineItemColumns,
-      createdBy:    initial?.createdBy   ?? "me",
-      createdDate:  initial?.createdDate ?? new Date().toISOString().slice(0, 10),
-      usedByAgents: initial?.usedByAgents ?? 0,
+      createdBy:   initial?.createdBy  ?? "me",
+      createdDate: initial?.createdDate ?? new Date().toISOString().slice(0, 10),
+      isTemplate:  initial?.isTemplate ?? false,
     });
   };
 
@@ -487,9 +281,9 @@ function ConfigDialog({ open, initial, onSave, onClose }: {
           </div>
         </div>
         <DialogFooter className="px-6 py-4 border-t flex-shrink-0">
-          <Button variant="outline" onClick={onClose} className="rounded-lg">Cancel</Button>
-          <Button onClick={handleSave} disabled={!name.trim()} className="bg-[#D04A02] hover:bg-[#B84000] text-white rounded-lg">
-            {isNew ? "Create Configuration" : "Save Changes"}
+          <Button variant="outline" onClick={onClose} className="rounded-lg" disabled={saving}>Cancel</Button>
+          <Button onClick={handleSave} disabled={!name.trim() || saving} className="bg-[#D04A02] hover:bg-[#B84000] text-white rounded-lg">
+            {saving ? "Saving…" : isNew ? "Create Configuration" : "Save Changes"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -500,8 +294,8 @@ function ConfigDialog({ open, initial, onSave, onClose }: {
 // ─── Template Preview Dialog ──────────────────────────────────────────────────
 
 function TemplatePreviewDialog({ template, onClone, onClose }: {
-  template: TemplateEntry | null;
-  onClone: (t: TemplateEntry) => void;
+  template: FieldConfig | null;
+  onClone: (t: FieldConfig) => void;
   onClose: () => void;
 }) {
   if (!template) return null;
@@ -550,7 +344,6 @@ function TemplatePreviewDialog({ template, onClone, onClose }: {
   return (
     <Dialog open={!!template} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="max-w-2xl h-[80vh] flex flex-col p-0 gap-0">
-        {/* Header */}
         <DialogHeader className="px-6 pt-5 pb-4 border-b flex-shrink-0">
           <div className="flex items-start gap-3">
             <div className="h-10 w-10 rounded-xl bg-[#D04A02]/10 flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -580,21 +373,11 @@ function TemplatePreviewDialog({ template, onClone, onClose }: {
           </div>
         </DialogHeader>
 
-        {/* Scrollable schema */}
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6 min-h-0">
-          <FieldSection
-            title="Header Fields"
-            fields={template.headerFields}
-            accent="text-[#D04A02]"
-          />
-          <FieldSection
-            title="Line Item Columns"
-            fields={template.lineItemColumns}
-            accent="text-blue-500"
-          />
+          <FieldSection title="Header Fields"     fields={template.headerFields}   accent="text-[#D04A02]" />
+          <FieldSection title="Line Item Columns" fields={template.lineItemColumns} accent="text-blue-500" />
         </div>
 
-        {/* Footer */}
         <DialogFooter className="px-6 py-4 border-t flex-shrink-0 bg-muted/5">
           <p className="text-xs text-muted-foreground mr-auto self-center">
             Cloning creates an editable copy in your organisation.
@@ -602,9 +385,9 @@ function TemplatePreviewDialog({ template, onClone, onClose }: {
           <Button variant="outline" onClick={onClose} className="rounded-lg">Close</Button>
           <Button
             onClick={() => { onClone(template); onClose(); }}
-            className="bg-[#D04A02] hover:bg-[#B84000] text-white rounded-lg gap-1.5"
+            className="flex-1 gap-1.5 text-xs rounded-lg bg-[#D04A02] hover:bg-[#B84000] text-white"
           >
-            <Copy className="h-4 w-4" /> Clone & Edit
+            <Copy className="h-3.5 w-3.5" /> Clone & Edit
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -615,11 +398,24 @@ function TemplatePreviewDialog({ template, onClone, onClose }: {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function FieldConfigurationsPage() {
-  const [configs,     setConfigs]     = useState<FieldConfig[]>(INITIAL_CONFIGS);
-  const [search,      setSearch]      = useState("");
-  const [dialogOpen,  setDialogOpen]  = useState(false);
-  const [editing,     setEditing]     = useState<Partial<FieldConfig> | null>(null);
-  const [previewing,  setPreviewing]  = useState<TemplateEntry | null>(null);
+  const [search,     setSearch]     = useState("");
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editing,    setEditing]    = useState<FieldConfig | null>(null);
+  const [previewing, setPreviewing] = useState<FieldConfig | null>(null);
+  const [saving,     setSaving]     = useState(false);
+
+  // ── Queries ──
+  const { data: customPage, isLoading: loadingCustom } = useGetFieldConfigs(
+    { is_template: false, size: 200 },
+    { staleTime: 30_000 },
+  );
+  const { data: templatePage, isLoading: loadingTemplates } = useGetFieldConfigs(
+    { is_template: true, size: 100 },
+    { staleTime: 60_000 },
+  );
+
+  const configs   = (customPage?.items ?? []).map(apiConfigToLocal);
+  const templates = (templatePage?.items ?? []).map(apiConfigToLocal);
 
   const filtered = configs.filter(
     (c) =>
@@ -627,37 +423,126 @@ export default function FieldConfigurationsPage() {
       c.description.toLowerCase().includes(search.toLowerCase()),
   );
 
+  // ── Mutations ──
+  const { mutateAsync: createConfig }   = usePostFieldConfig();
+  const { mutateAsync: updateConfig }   = usePutFieldConfig();
+  const { mutateAsync: deleteConfig }   = useDeleteFieldConfig();
+  const { mutateAsync: createHeader }   = usePostFieldConfigHeader();
+  const { mutateAsync: updateHeader }   = usePutFieldConfigHeader();
+  const { mutateAsync: deleteHeader }   = useDeleteFieldConfigHeader();
+  const { mutateAsync: createLineItem } = usePostFieldConfigLineItem();
+  const { mutateAsync: updateLineItem } = usePutFieldConfigLineItem();
+  const { mutateAsync: deleteLineItem } = useDeleteFieldConfigLineItem();
+
+  // ── Helpers ──
   const openCreate = () => { setEditing(null); setDialogOpen(true); };
   const openEdit   = (cfg: FieldConfig) => { setEditing(cfg); setDialogOpen(true); };
 
-  const handleClone = (cfg: FieldConfig) =>
-    setConfigs((prev) => [...prev, { ...cfg, id: uid(), name: `${cfg.name} (Copy)`, createdDate: new Date().toISOString().slice(0, 10), usedByAgents: 0 }]);
+  const syncHeaders = async (configId: string, newFields: ConfigField[], originalFields: ConfigField[]) => {
+    const originalMap = new Map(originalFields.map((f) => [f.id, f]));
+    const newIds = new Set(newFields.filter((f) => isDbId(f.id)).map((f) => f.id));
 
-  const handleDelete = (id: string) => setConfigs((prev) => prev.filter((c) => c.id !== id));
-
-  const cloneTemplate = (tpl: TemplateEntry) => {
-    setConfigs((prev) => [
-      ...prev,
-      {
-        id: uid(),
-        name: tpl.name,
-        description: tpl.description,
-        headerFields: tpl.headerFields.map((f) => ({ ...f, id: uid() })),
-        lineItemColumns: tpl.lineItemColumns.map((f) => ({ ...f, id: uid() })),
-        createdBy: "me",
-        createdDate: new Date().toISOString().slice(0, 10),
-        usedByAgents: 0,
-      },
-    ]);
+    // Delete removed
+    for (const orig of originalFields) {
+      if (!newIds.has(orig.id)) {
+        await deleteHeader({ configId, headerId: orig.id });
+      }
+    }
+    // Create new / update existing
+    for (const f of newFields) {
+      if (!isDbId(f.id)) {
+        await createHeader({ configId, payload: { field_name: f.name, field_type: f.dataType, is_required: f.required, display_order: f.displayOrder } });
+      } else {
+        const orig = originalMap.get(f.id);
+        const changed = !orig || orig.name !== f.name || orig.dataType !== f.dataType || orig.required !== f.required || orig.displayOrder !== f.displayOrder;
+        if (changed) {
+          await updateHeader({ configId, headerId: f.id, payload: { field_name: f.name, field_type: f.dataType, is_required: f.required, display_order: f.displayOrder } });
+        }
+      }
+    }
   };
 
-  const handleSave = (cfg: FieldConfig) => {
-    setConfigs((prev) => {
-      const idx = prev.findIndex((c) => c.id === cfg.id);
-      if (idx >= 0) { const next = [...prev]; next[idx] = cfg; return next; }
-      return [...prev, cfg];
-    });
-    setDialogOpen(false);
+  const syncLineItems = async (configId: string, newFields: ConfigField[], originalFields: ConfigField[]) => {
+    const originalMap = new Map(originalFields.map((f) => [f.id, f]));
+    const newIds = new Set(newFields.filter((f) => isDbId(f.id)).map((f) => f.id));
+
+    for (const orig of originalFields) {
+      if (!newIds.has(orig.id)) {
+        await deleteLineItem({ configId, lineItemId: orig.id });
+      }
+    }
+    for (const f of newFields) {
+      const colType = (f.dataType === "boolean" ? "text" : f.dataType) as "text" | "number" | "date";
+      if (!isDbId(f.id)) {
+        await createLineItem({ configId, payload: { column_name: f.name, column_type: colType, is_required: f.required, display_order: f.displayOrder } });
+      } else {
+        const orig = originalMap.get(f.id);
+        const changed = !orig || orig.name !== f.name || orig.dataType !== f.dataType || orig.required !== f.required || orig.displayOrder !== f.displayOrder;
+        if (changed) {
+          await updateLineItem({ configId, lineItemId: f.id, payload: { column_name: f.name, column_type: colType, is_required: f.required, display_order: f.displayOrder } });
+        }
+      }
+    }
+  };
+
+  const handleSave = async (cfg: FieldConfig) => {
+    setSaving(true);
+    try {
+      if (!isDbId(cfg.id)) {
+        // Create new
+        const created = await createConfig({
+          name: cfg.name,
+          description: cfg.description || null,
+          is_template: false,
+          headers: cfg.headerFields.map((f) => ({
+            field_name: f.name,
+            field_type: f.dataType,
+            is_required: f.required,
+            display_order: f.displayOrder,
+          })),
+        });
+        // Add line items (not supported in bulk create payload)
+        for (const f of cfg.lineItemColumns) {
+          const colType = (f.dataType === "boolean" ? "text" : f.dataType) as "text" | "number" | "date";
+          await createLineItem({ configId: created.id, payload: { column_name: f.name, column_type: colType, is_required: f.required, display_order: f.displayOrder } });
+        }
+      } else {
+        // Update existing
+        await updateConfig({ id: cfg.id, payload: { name: cfg.name, description: cfg.description || null } });
+        await syncHeaders(cfg.id, cfg.headerFields, editing?.headerFields ?? []);
+        await syncLineItems(cfg.id, cfg.lineItemColumns, editing?.lineItemColumns ?? []);
+      }
+      setDialogOpen(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleClone = async (cfg: FieldConfig) => {
+    setSaving(true);
+    try {
+      const created = await createConfig({
+        name: `${cfg.name} (Copy)`,
+        description: cfg.description || null,
+        is_template: false,
+        headers: cfg.headerFields.map((f) => ({
+          field_name: f.name,
+          field_type: f.dataType,
+          is_required: f.required,
+          display_order: f.displayOrder,
+        })),
+      });
+      for (const f of cfg.lineItemColumns) {
+        const colType = (f.dataType === "boolean" ? "text" : f.dataType) as "text" | "number" | "date";
+        await createLineItem({ configId: created.id, payload: { column_name: f.name, column_type: colType, is_required: f.required, display_order: f.displayOrder } });
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    await deleteConfig(id);
   };
 
   return (
@@ -680,8 +565,8 @@ export default function FieldConfigurationsPage() {
         <div className="flex-shrink-0 px-6 pt-3 border-b">
           <TabsList className="h-9 bg-transparent p-0 gap-1">
             {([
-              { value: "custom",    label: "Custom Configurations", count: configs.length           },
-              { value: "templates", label: "Templates / Catalogue",  count: TEMPLATE_CATALOGUE.length },
+              { value: "custom",    label: "Custom Configurations", count: configs.length    },
+              { value: "templates", label: "Templates / Catalogue",  count: templates.length },
             ] as const).map(({ value, label, count }) => (
               <TabsTrigger
                 key={value}
@@ -726,7 +611,14 @@ export default function FieldConfigurationsPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {filtered.length === 0 && (
+                  {loadingCustom && (
+                    <TableRow>
+                      <TableCell colSpan={6} className="text-center text-sm text-muted-foreground py-14">
+                        Loading…
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  {!loadingCustom && filtered.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={6} className="text-center text-sm text-muted-foreground py-14">
                         {search ? "No configurations match your search." : "No custom configurations yet — create one or clone a template."}
@@ -742,12 +634,9 @@ export default function FieldConfigurationsPage() {
                       <TableCell className="text-sm text-muted-foreground tabular-nums">{cfg.createdDate}</TableCell>
                       <TableCell>
                         <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                          {cfg.usedByAgents > 0 && (
-                            <Badge variant="secondary" className="text-[10px] mr-1.5 rounded-md">{cfg.usedByAgents} agents</Badge>
-                          )}
-                          <button title="Edit"   onClick={() => openEdit(cfg)}     className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"><Pencil  className="h-3.5 w-3.5" /></button>
-                          <button title="Clone"  onClick={() => handleClone(cfg)}  className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"><Copy    className="h-3.5 w-3.5" /></button>
-                          <button title="Delete" onClick={() => handleDelete(cfg.id)} className={cn("p-1.5 rounded-lg hover:bg-accent transition-colors", cfg.usedByAgents > 0 ? "text-amber-500" : "text-muted-foreground hover:text-destructive")}><Trash2  className="h-3.5 w-3.5" /></button>
+                          <button title="Edit"   onClick={() => openEdit(cfg)}         className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"><Pencil  className="h-3.5 w-3.5" /></button>
+                          <button title="Clone"  onClick={() => handleClone(cfg)}      className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"><Copy    className="h-3.5 w-3.5" /></button>
+                          <button title="Delete" onClick={() => handleDelete(cfg.id)}  className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-destructive transition-colors"><Trash2  className="h-3.5 w-3.5" /></button>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -764,45 +653,50 @@ export default function FieldConfigurationsPage() {
             <p className="text-sm text-muted-foreground mb-5">
               Ready-made extraction schemas. Preview a template to see its fields, then clone it to create an editable copy.
             </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-              {TEMPLATE_CATALOGUE.map((tpl) => (
-                <div
-                  key={tpl.name}
-                  className="group flex flex-col rounded-xl border bg-card p-4 gap-3 hover:border-[#D04A02]/30 hover:shadow-sm transition-all cursor-default"
-                >
-                  <div className="flex items-center gap-2.5">
-                    <div className="h-8 w-8 rounded-lg bg-[#D04A02]/10 flex items-center justify-center flex-shrink-0">
-                      <FileText className="h-4 w-4 text-[#D04A02]" />
+            {loadingTemplates ? (
+              <p className="text-sm text-muted-foreground">Loading templates…</p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+                {templates.map((tpl) => (
+                  <div
+                    key={tpl.id}
+                    className="group flex flex-col rounded-xl border bg-card p-4 gap-3 hover:border-[#D04A02]/30 hover:shadow-sm transition-all cursor-default"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <div className="h-8 w-8 rounded-lg bg-[#D04A02]/10 flex items-center justify-center flex-shrink-0">
+                        <FileText className="h-4 w-4 text-[#D04A02]" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="font-semibold text-sm leading-tight">{tpl.name}</p>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">
+                          {tpl.headerFields.length} fields
+                          {tpl.lineItemColumns.length > 0 && ` · ${tpl.lineItemColumns.length} line cols`}
+                        </p>
+                      </div>
                     </div>
-                    <div className="min-w-0">
-                      <p className="font-semibold text-sm leading-tight">{tpl.name}</p>
-                      <p className="text-[10px] text-muted-foreground mt-0.5">
-                        {tpl.headerFields.length} fields
-                        {tpl.lineItemColumns.length > 0 && ` · ${tpl.lineItemColumns.length} line cols`}
-                      </p>
+                    <p className="text-xs text-muted-foreground flex-1 leading-relaxed">{tpl.description}</p>
+                    <div className="flex items-center gap-2 pt-1">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setPreviewing(tpl)}
+                        className="flex-1 gap-1.5 text-xs rounded-lg hover:border-[#D04A02]/30 hover:text-[#D04A02]"
+                      >
+                        <Eye className="h-3.5 w-3.5" /> Preview
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => handleClone(tpl)}
+                        disabled={saving}
+                        className="flex-1 gap-1.5 text-xs rounded-lg bg-[#D04A02] hover:bg-[#B84000] text-white"
+                      >
+                        <Copy className="h-3.5 w-3.5" /> Clone
+                      </Button>
                     </div>
                   </div>
-                  <p className="text-xs text-muted-foreground flex-1 leading-relaxed">{tpl.description}</p>
-                  <div className="flex items-center gap-2 pt-1">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setPreviewing(tpl)}
-                      className="flex-1 gap-1.5 text-xs rounded-lg hover:border-[#D04A02]/30 hover:text-[#D04A02]"
-                    >
-                      <Eye className="h-3.5 w-3.5" /> Preview
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={() => cloneTemplate(tpl)}
-                      className="flex-1 gap-1.5 text-xs rounded-lg bg-[#D04A02] hover:bg-[#B84000] text-white"
-                    >
-                      <Copy className="h-3.5 w-3.5" /> Clone
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         </TabsContent>
       </Tabs>
@@ -812,11 +706,12 @@ export default function FieldConfigurationsPage() {
         initial={editing}
         onSave={handleSave}
         onClose={() => setDialogOpen(false)}
+        saving={saving}
       />
 
       <TemplatePreviewDialog
         template={previewing}
-        onClone={cloneTemplate}
+        onClone={handleClone}
         onClose={() => setPreviewing(null)}
       />
     </div>
