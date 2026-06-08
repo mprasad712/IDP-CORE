@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -36,21 +38,21 @@ class IDPLLMExtractor(Node):
         DropdownInput(
             name="extraction_mode",
             display_name="Extraction Mode",
-            options=["dynamic_prompt", "field_configuration"],
+            options=["dynamic_prompt", "field_configuration", "multimodal_prompt", "multimodal_config"],
             value="dynamic_prompt",
-            info="dynamic_prompt: write a freeform extraction prompt. field_configuration: select a saved schema.",
+            info="dynamic_prompt: freeform text prompt. field_configuration: text schema. multimodal_prompt: vision prompt. multimodal_config: vision schema.",
         ),
         MultilineInput(
             name="prompt",
             display_name="Extraction Prompt",
             value="",
-            info="Describe the fields to extract. Used when Extraction Mode is 'dynamic_prompt'.",
+            info="Describe the fields to extract. Used when Extraction Mode is 'dynamic_prompt' or 'multimodal_prompt'.",
         ),
         MessageTextInput(
             name="config_name",
             display_name="Field Configuration Name",
             value="",
-            info="Name of the saved Field Configuration from the Configuration page. Used when Extraction Mode is 'field_configuration'.",
+            info="Name of the saved Field Configuration from the Configuration page. Used when Extraction Mode is 'field_configuration' or 'multimodal_config'.",
         ),
         MessageTextInput(
             name="model_name",
@@ -69,7 +71,7 @@ class IDPLLMExtractor(Node):
 
     def update_build_config(self, build_config: dict, field_value: str, field_name: str | None = None) -> dict:
         if field_name == "extraction_mode":
-            is_prompt = field_value == "dynamic_prompt"
+            is_prompt = field_value in ("dynamic_prompt", "multimodal_prompt")
             build_config["prompt"]["show"] = is_prompt
             build_config["config_name"]["show"] = not is_prompt
 
@@ -104,13 +106,72 @@ class IDPLLMExtractor(Node):
             logger.warning(f"[AIFieldExtractor] Could not fetch field configs: {exc}")
             return []
 
+    def _resolve_document_path(self, src: Any) -> Path | None:
+        if not src:
+            return None
+
+        # Check attributes / dict fields
+        candidates: list[str] = []
+
+        if isinstance(src, str):
+            candidates.append(src)
+        elif isinstance(src, dict):
+            for key in ("file_path", "path", "file", "text", "source"):
+                val = src.get(key)
+                if val and isinstance(val, str):
+                    candidates.append(val)
+        else:
+            # Check message files list
+            files = getattr(src, "files", None)
+            if files and isinstance(files, list):
+                for f in files:
+                    if isinstance(f, str):
+                        candidates.append(f)
+                    elif hasattr(f, "path"):
+                        candidates.append(str(f.path))
+            
+            # Check .data dict
+            data_dict = getattr(src, "data", None)
+            if data_dict and isinstance(data_dict, dict):
+                for key in ("file_path", "path", "file", "text", "source"):
+                    val = data_dict.get(key)
+                    if val and isinstance(val, str) and val.strip():
+                        candidates.append(val.strip())
+
+            # Check .text attribute
+            text_val = getattr(src, "text", None)
+            if text_val and isinstance(text_val, str) and text_val.strip():
+                # Only treat text_val as path if it looks like a path/file
+                t_val = text_val.strip()
+                if any(t_val.lower().endswith(ext) for ext in [".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp", ".xlsx", ".xls", ".docx"]):
+                    candidates.append(t_val)
+
+            # Check .path attribute
+            path_val = getattr(src, "path", None)
+            if path_val is not None:
+                path_str = str(path_val).strip()
+                if path_str and path_str != "None":
+                    candidates.append(path_str)
+
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if not candidate or candidate == "None":
+                continue
+            try:
+                p = Path(candidate)
+                if p.exists() and p.is_file():
+                    return p
+            except Exception:
+                pass
+        return None
+
     # ── extraction ────────────────────────────────────────────────────────────
 
     async def extract(self) -> Data:
         src = self.document
         text = src.text if isinstance(src, Message) else str(src)
 
-        if self.extraction_mode == "field_configuration" and self.config_name:
+        if self.extraction_mode in ("field_configuration", "multimodal_config") and self.config_name:
             prompt = self._build_config_prompt(self.config_name)
         else:
             prompt = (self.prompt or "").strip()
@@ -126,7 +187,8 @@ class IDPLLMExtractor(Node):
                     from agentcore.services.idp.extraction import extract_dynamic
                     extracted = await extract_dynamic(ocr_text=text, prompt=prompt, llm_model=self.llm)
                     raw = json.dumps(extracted, indent=2)
-            else:
+
+            elif self.extraction_mode == "field_configuration":
                 if not self.llm:
                     raw = f"[No model connected — config would be: {self.config_name}]"
                     extracted = {"error": "No model connected"}
@@ -155,6 +217,49 @@ class IDPLLMExtractor(Node):
                             llm_model=self.llm
                         )
                         raw = json.dumps(extracted, indent=2)
+
+            elif self.extraction_mode in ("multimodal_prompt", "multimodal_config"):
+                file_path = self._resolve_document_path(src)
+                if not file_path:
+                    raise ValueError("Could not resolve document file path for multimodal extraction.")
+
+                if not self.llm:
+                    raw = f"[No model connected — multimodal prompt/config would be processed]"
+                    extracted = {"error": "No model connected"}
+                else:
+                    from agentcore.services.idp.extraction import extract_multimodal
+
+                    if self.extraction_mode == "multimodal_prompt":
+                        extracted = await extract_multimodal(
+                            file_path=file_path,
+                            prompt_or_config_id=prompt,
+                            llm_model=self.llm
+                        )
+                        raw = json.dumps(extracted, indent=2)
+                    else:
+                        from agentcore.services.deps import session_scope
+                        from agentcore.services.database.models.idp.config import IdpFieldConfiguration
+                        from sqlmodel import select
+
+                        async with session_scope() as session:
+                            config = (await session.exec(
+                                select(IdpFieldConfiguration)
+                                .where(
+                                    IdpFieldConfiguration.name == self.config_name,
+                                    IdpFieldConfiguration.deleted_at.is_(None)
+                                )
+                            )).first()
+
+                            if not config:
+                                raise ValueError(f"Active field configuration '{self.config_name}' not found.")
+
+                            extracted = await extract_multimodal(
+                                file_path=file_path,
+                                prompt_or_config_id=config.id,
+                                llm_model=self.llm,
+                                session=session
+                            )
+                            raw = json.dumps(extracted, indent=2)
 
             headers_count = len(extracted.get("headers", {})) if isinstance(extracted, dict) else 0
             line_items_count = len(extracted.get("line_items", [])) if isinstance(extracted, dict) else 0

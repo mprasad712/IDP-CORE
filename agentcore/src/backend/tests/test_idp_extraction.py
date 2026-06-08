@@ -355,3 +355,154 @@ async def test_llm_extractor_node_named_config_integration():
         if db_cfg:
             await session.delete(db_cfg)
         await session.commit()
+
+
+@pytest.mark.anyio
+async def test_extract_multimodal_success_prompt(tmp_path):
+    """Verify extract_multimodal works with a raw prompt and image input."""
+    from PIL import Image as PILImage
+    from agentcore.services.idp.extraction import extract_multimodal
+
+    # Create a simple image file
+    img_path = tmp_path / "test.png"
+    img = PILImage.new("RGB", (100, 100), color="white")
+    img.save(img_path)
+
+    raw_response = {
+        "headers": {
+            "invoice_number": {
+                "value": "INV-M1",
+                "confidence": 0.9,
+                "reasoning": "Detected from vision prompt"
+            }
+        },
+        "line_items": []
+    }
+    mock_llm = MockLLM(response_text=json.dumps(raw_response))
+
+    res = await extract_multimodal(
+        file_path=img_path,
+        prompt_or_config_id="Extract invoice number",
+        llm_model=mock_llm
+    )
+
+    assert "headers" in res
+    assert res["headers"]["invoice_number"]["value"] == "INV-M1"
+    # Verify the message content sent to the model is multimodal
+    invoked = mock_llm.invoked_messages
+    assert len(invoked) == 2
+    human_msg = invoked[1]
+    assert isinstance(human_msg.content, list)
+    assert human_msg.content[0]["type"] == "text"
+    assert human_msg.content[1]["type"] == "image_url"
+    assert human_msg.content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.anyio
+async def test_extract_multimodal_success_config(tmp_path):
+    """Verify extract_multimodal works with a config schema and PDF input."""
+    from reportlab.pdfgen import canvas
+    from agentcore.services.deps import session_scope
+    from agentcore.services.database.models.idp.config import (
+        IdpFieldConfiguration,
+        IdpFieldConfigHeader,
+    )
+    from agentcore.services.idp.extraction import extract_multimodal
+
+    # Create a simple PDF file
+    pdf_path = tmp_path / "test.pdf"
+    c = canvas.Canvas(str(pdf_path))
+    c.drawString(100, 100, "Multimodal config PDF content")
+    c.showPage()
+    c.save()
+
+    config_id = uuid4()
+    async with session_scope() as session:
+        config = IdpFieldConfiguration(
+            id=config_id,
+            name="Multimodal Config Test",
+            is_active=True,
+        )
+        session.add(config)
+        await session.flush()
+        
+        header = IdpFieldConfigHeader(
+            id=uuid4(),
+            config_id=config_id,
+            field_name="total",
+            field_type="number",
+            display_order=0,
+        )
+        session.add(header)
+        await session.commit()
+
+    raw_response = {
+        "headers": {
+            "total": {
+                "value": "99.99",
+                "confidence": 0.95,
+                "reasoning": "Reason here"
+            },
+            "unconfigured": {
+                "value": "should be filtered",
+                "confidence": 0.1,
+                "reasoning": "filtered"
+            }
+        },
+        "line_items": []
+    }
+    mock_llm = MockLLM(response_text=json.dumps(raw_response))
+
+    async with session_scope() as session:
+        res = await extract_multimodal(
+            file_path=pdf_path,
+            prompt_or_config_id=config_id,
+            llm_model=mock_llm,
+            session=session
+        )
+
+    assert "headers" in res
+    assert "total" in res["headers"]
+    assert "unconfigured" not in res["headers"]
+    assert res["headers"]["total"]["value"] == "99.99"
+
+    # Cleanup
+    async with session_scope() as session:
+        db_cfg = await session.get(IdpFieldConfiguration, config_id)
+        if db_cfg:
+            await session.delete(db_cfg)
+        await session.commit()
+
+
+@pytest.mark.anyio
+async def test_llm_extractor_node_multimodal_integration(tmp_path):
+    """Verify IDPLLMExtractor runs multimodal mode when selected."""
+    from PIL import Image as PILImage
+    
+    img_path = tmp_path / "node_test.png"
+    img = PILImage.new("RGB", (100, 100), color="white")
+    img.save(img_path)
+
+    raw_response = {
+        "headers": {
+            "invoice_number": {
+                "value": "INV-NODE-M1",
+                "confidence": 0.9,
+                "reasoning": "Detected"
+            }
+        },
+        "line_items": []
+    }
+    mock_llm = MockLLM(response_text=json.dumps(raw_response))
+
+    node = IDPLLMExtractor()
+    # Pass path inside Message files
+    node.document = Message(text="Dummy text", files=[str(img_path)])
+    node.llm = mock_llm
+    node.extraction_mode = "multimodal_prompt"
+    node.prompt = "Extract invoice"
+
+    out_data = await node.extract()
+
+    assert isinstance(out_data, Data)
+    assert out_data.data["headers"]["invoice_number"]["value"] == "INV-NODE-M1"
