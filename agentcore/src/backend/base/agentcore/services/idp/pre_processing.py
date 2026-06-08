@@ -27,6 +27,10 @@ def deskew_image(image: np.ndarray) -> tuple[np.ndarray, float]:
     else:
         angle = -angle
 
+    # If the angle is close to 90 or -90, it is axis-aligned (flat), so set to 0.0
+    if abs(angle) > 85.0:
+        angle = 0.0
+
     # Ignore extremely small rotations to avoid unnecessary interpolation
     if abs(angle) < 0.1:
         return image, 0.0
