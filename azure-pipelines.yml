@@ -8,8 +8,8 @@ pool:
   vmImage: ubuntu-latest
 
 variables:
-  acrName: 'agentflowacr1'
-  imageName: 'agentflow-service'
+  acrName: 'idpflowacr1'
+  imageName: 'idpflow-service'
   dockerfilePath: 'Dockerfile'
   tag: '$(Build.BuildId)'
 
@@ -96,7 +96,7 @@ stages:
     - task: AzureCLI@2
       displayName: "Terraform Init"
       inputs:
-        azureSubscription: 'agentflow-sc'
+        azureSubscription: 'idp-sc'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
@@ -111,7 +111,7 @@ stages:
     - task: AzureCLI@2
       displayName: "Terraform Validate"
       inputs:
-        azureSubscription: 'agentflow-sc'
+        azureSubscription: 'idp-sc'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
@@ -121,7 +121,7 @@ stages:
     - task: AzureCLI@2
       displayName: "Terraform Plan"
       inputs:
-        azureSubscription: 'agentflow-sc'
+        azureSubscription: 'idp-sc'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
@@ -151,7 +151,7 @@ stages:
     - task: AzureCLI@2
       displayName: "Terraform Init"
       inputs:
-        azureSubscription: 'agentflow-sc'
+        azureSubscription: 'idp-sc'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
@@ -161,7 +161,7 @@ stages:
     - task: AzureCLI@2
       displayName: "Terraform Apply"
       inputs:
-        azureSubscription: 'agentflow-sc'
+        azureSubscription: 'idp-sc'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
@@ -197,11 +197,11 @@ stages:
     - task: AzureCLI@2
       displayName: "ACR Login"
       inputs:
-        azureSubscription: 'agentflow-sc'
+        azureSubscription: 'idp-sc'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          az acr login --name agentflowacr1
+          az acr login --name idpacr1
 
     # =====================================
     # BACKEND SERVICE
@@ -209,13 +209,13 @@ stages:
     - script: |
         docker build \
         -f agentcore/src/backend/Dockerfile \
-        -t agentflowacr1.azurecr.io/backend:$(Build.BuildId) \
+        -t idpacr1.azurecr.io/backend:$(Build.BuildId) \
         agentcore/src/backend
       displayName: "Build Backend"
       condition: or(eq(variables['backend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
     - script: |
-        docker push agentflowacr1.azurecr.io/backend:$(Build.BuildId)
+        docker push idpacr1.azurecr.io/backend:$(Build.BuildId)
       displayName: "Push Backend"
       condition: or(eq(variables['backend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
@@ -225,13 +225,13 @@ stages:
     - script: |
         docker build \
         -f agentcore/src/frontend/Dockerfile \
-        -t agentflowacr1.azurecr.io/frontend:$(Build.BuildId) \
+        -t idpacr1.azurecr.io/frontend:$(Build.BuildId) \
         agentcore/src/frontend
       displayName: "Build Frontend"
       condition: or(eq(variables['frontend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
     - script: |
-        docker push agentflowacr1.azurecr.io/frontend:$(Build.BuildId)
+        docker push idpacr1.azurecr.io/frontend:$(Build.BuildId)
       displayName: "Push Frontend"
       condition: or(eq(variables['frontend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
@@ -241,12 +241,12 @@ stages:
     - script: |
         docker build \
         -f agentcore/src/services/model-service/Dockerfile \
-        -t agentflowacr1.azurecr.io/model-service:$(Build.BuildId) \
+        -t idpacr1.azurecr.io/model-service:$(Build.BuildId) \
         agentcore/src/services/model-service
       displayName: "Build Model Service"
       condition: or(eq(variables['model_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
     - script: |
-        docker push agentflowacr1.azurecr.io/model-service:$(Build.BuildId)
+        docker push idpacr1.azurecr.io/model-service:$(Build.BuildId)
       displayName: "Push Model Service"
       condition: or(eq(variables['model_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
