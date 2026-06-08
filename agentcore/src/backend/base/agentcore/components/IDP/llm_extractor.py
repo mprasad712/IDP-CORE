@@ -5,7 +5,7 @@ import json
 from loguru import logger
 
 from agentcore.custom.custom_node.node import Node
-from agentcore.io import DataInput, DropdownInput, HandleInput, MessageTextInput, Output
+from agentcore.io import DataInput, DropdownInput, HandleInput, MessageTextInput, MultilineInput, Output
 from agentcore.schema.data import Data
 from agentcore.schema.message import Message
 
@@ -40,11 +40,10 @@ class IDPLLMExtractor(Node):
             value="dynamic_prompt",
             info="dynamic_prompt: write a freeform extraction prompt. field_configuration: select a saved schema.",
         ),
-        MessageTextInput(
+        MultilineInput(
             name="prompt",
             display_name="Extraction Prompt",
             value="",
-            multiline=True,
             info="Describe the fields to extract. Used when Extraction Mode is 'dynamic_prompt'.",
         ),
         MessageTextInput(
@@ -107,7 +106,7 @@ class IDPLLMExtractor(Node):
 
     # ── extraction ────────────────────────────────────────────────────────────
 
-    def extract(self) -> Data:
+    async def extract(self) -> Data:
         src = self.document
         text = src.text if isinstance(src, Message) else str(src)
 
@@ -118,18 +117,29 @@ class IDPLLMExtractor(Node):
             if not prompt:
                 prompt = "Extract all key fields from this document. Return as structured JSON."
 
-        full_prompt = f"{prompt}\n\nDocument:\n{text}"
-
         try:
-            if self.llm:
-                from langchain_core.messages import HumanMessage
-                response = self.llm.invoke([HumanMessage(content=full_prompt)])
-                raw = response.content if hasattr(response, "content") else str(response)
+            if self.extraction_mode == "dynamic_prompt":
+                if not self.llm:
+                    raw = f"[No model connected — prompt would be: {prompt[:200]}...]"
+                    extracted = {"error": "No model connected"}
+                else:
+                    from agentcore.services.idp.extraction import extract_dynamic
+                    extracted = await extract_dynamic(ocr_text=text, prompt=prompt, llm_model=self.llm)
+                    raw = json.dumps(extracted, indent=2)
             else:
-                raw = f"[No model connected — prompt would be: {prompt[:200]}...]"
+                # Legacy / named config fallback before B14 is implemented
+                if self.llm:
+                    from langchain_core.messages import HumanMessage
+                    response = await self.llm.ainvoke([HumanMessage(content=f"{prompt}\n\nDocument:\n{text}")])
+                    raw = response.content if hasattr(response, "content") else str(response)
+                else:
+                    raw = f"[No model connected — prompt would be: {prompt[:200]}...]"
+                
+                extracted = self._parse_json(raw)
 
-            extracted = self._parse_json(raw)
-            self.status = f"Extracted {len(extracted)} field(s)"
+            headers_count = len(extracted.get("headers", {})) if isinstance(extracted, dict) else 0
+            line_items_count = len(extracted.get("line_items", [])) if isinstance(extracted, dict) else 0
+            self.status = f"Extracted {headers_count} header(s) and {line_items_count} line item(s)"
             return Data(data=extracted, text=raw)
         except Exception as exc:
             self.status = f"Error: {exc}"
