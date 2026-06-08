@@ -4,6 +4,13 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from loguru import logger
 from langchain_core.messages import SystemMessage, HumanMessage
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
+from agentcore.services.database.models.idp.config import (
+    IdpFieldConfiguration,
+    IdpFieldConfigHeader,
+    IdpFieldConfigLineItem,
+)
 
 # ──────────────────────────────────────────────────────────────────────
 # Pydantic Schemas for Structured Output
@@ -179,3 +186,98 @@ async def extract_dynamic(
             "line_items": [],
             "error": f"Extraction parsing failed: {str(e)}"
         }
+
+
+async def extract_named_config(
+    session: AsyncSession,
+    ocr_text: str,
+    field_config_id: UUID,
+    llm_model: Any
+) -> Dict[str, Any]:
+    """Extract structured data from a document conforming to a saved Field Configuration schema."""
+    # 1. Fetch Configuration
+    config = await session.get(IdpFieldConfiguration, field_config_id)
+    if not config or config.deleted_at is not None:
+        raise ValueError(f"Active field configuration '{field_config_id}' not found.")
+
+    # 2. Fetch associated headers and line item fields
+    headers_stmt = (
+        select(IdpFieldConfigHeader)
+        .where(IdpFieldConfigHeader.config_id == field_config_id)
+        .order_by(IdpFieldConfigHeader.display_order)
+    )
+    headers = (await session.exec(headers_stmt)).all()
+
+    lines_stmt = (
+        select(IdpFieldConfigLineItem)
+        .where(IdpFieldConfigLineItem.config_id == field_config_id)
+        .order_by(IdpFieldConfigLineItem.display_order)
+    )
+    line_items = (await session.exec(lines_stmt)).all()
+
+    # 3. Format the instructions/prompt based on configuration
+    headers_desc = "\n".join(
+        f"- '{h.field_name}' (type: {h.field_type}{f', description: {h.description}' if h.description else ''})"
+        for h in headers
+    )
+    columns_desc = "\n".join(
+        f"- '{c.column_name}' (type: {c.column_type})"
+        for c in line_items
+    )
+
+    prompt = (
+        f"You must extract the following specific fields from the document:\n\n"
+        f"Header Fields:\n{headers_desc or 'None'}\n\n"
+        f"Line Item Columns (Table):\n{columns_desc or 'None'}\n\n"
+        "Ensure all extracted values conform to their specified type (number, date, text, boolean). "
+        "For dates, return in YYYY-MM-DD format if possible. For numbers, return numeric values as strings. "
+        "For boolean, return 'true' or 'false'."
+    )
+
+    # 4. Invoke the dynamic prompting extractor with our generated prompt
+    raw_result = await extract_dynamic(ocr_text, prompt, llm_model)
+
+    # 5. Filter/Align the output to strictly match the requested configuration fields
+    # (Removes hallucinations and maps missing properties with nulls/defaults)
+    allowed_header_names = {h.field_name for h in headers}
+    filtered_headers = {}
+    for h_name in allowed_header_names:
+        if h_name in raw_result.get("headers", {}):
+            filtered_headers[h_name] = raw_result["headers"][h_name]
+        else:
+            filtered_headers[h_name] = {
+                "value": None,
+                "confidence": 0.0,
+                "reasoning": "Not found in document"
+            }
+
+    allowed_column_names = {c.column_name for c in line_items}
+    filtered_line_items = []
+    for row in raw_result.get("line_items", []):
+        row_idx = row.get("row_index", 0)
+        clean_cols = []
+        # Filter existing columns
+        for col in row.get("columns", []):
+            if col.get("column_name") in allowed_column_names:
+                clean_cols.append(col)
+
+        # Append missing columns
+        existing_cols = {c["column_name"] for c in clean_cols}
+        for col_name in allowed_column_names:
+            if col_name not in existing_cols:
+                clean_cols.append({
+                    "column_name": col_name,
+                    "value": None,
+                    "confidence": 0.0,
+                    "reasoning": "Not found in table"
+                })
+
+        filtered_line_items.append({
+            "row_index": row_idx,
+            "columns": clean_cols
+        })
+
+    return {
+        "headers": filtered_headers,
+        "line_items": filtered_line_items
+    }

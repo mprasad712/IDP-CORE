@@ -187,3 +187,171 @@ async def test_llm_extractor_node_integration():
     assert isinstance(out_data, Data)
     assert out_data.data["headers"]["total"]["value"] == "500.00"
     assert "1 header(s)" in node.status
+
+
+@pytest.mark.anyio
+async def test_extract_named_config_success():
+    """Verify extract_named_config fetches configuration, formats prompts, calls extract_dynamic, and filters outputs."""
+    from agentcore.services.deps import session_scope
+    from agentcore.services.database.models.idp.config import (
+        IdpFieldConfiguration,
+        IdpFieldConfigHeader,
+        IdpFieldConfigLineItem,
+    )
+    from agentcore.services.idp.extraction import extract_named_config
+    
+    # 1. Create a config schema in DB
+    config_id = uuid4()
+    async with session_scope() as session:
+        config = IdpFieldConfiguration(
+            id=config_id,
+            name="Extraction Test Config",
+            is_active=True,
+        )
+        session.add(config)
+        await session.flush()
+        
+        # Add a header field and a line item field
+        header = IdpFieldConfigHeader(
+            id=uuid4(),
+            config_id=config_id,
+            field_name="invoice_number",
+            field_type="text",
+            display_order=0,
+        )
+        line = IdpFieldConfigLineItem(
+            id=uuid4(),
+            config_id=config_id,
+            column_name="price",
+            column_type="number",
+            display_order=0,
+        )
+        session.add(header)
+        session.add(line)
+        await session.commit()
+
+    # 2. Mock LLM output containing both allowed fields and some extra hallucinated fields
+    raw_response = {
+        "headers": {
+            "invoice_number": {
+                "value": "INV-2001",
+                "confidence": 0.96,
+                "reasoning": "Top left"
+            },
+            "extra_hallucinated_header": {
+                "value": "junk",
+                "confidence": 0.5,
+                "reasoning": "should be filtered"
+            }
+        },
+        "line_items": [
+            {
+                "row_index": 0,
+                "columns": [
+                    {
+                        "column_name": "price",
+                        "value": "45.00",
+                        "confidence": 0.9,
+                        "reasoning": "Col 1"
+                    },
+                    {
+                        "column_name": "qty",
+                        "value": "2",
+                        "confidence": 0.9,
+                        "reasoning": "Should be filtered"
+                    }
+                ]
+            }
+        ]
+    }
+    
+    mock_llm = MockLLM(response_text=json.dumps(raw_response))
+    
+    async with session_scope() as session:
+        res = await extract_named_config(
+            session=session,
+            ocr_text="Invoice INV-2001. Price: 45.00, Qty: 2",
+            field_config_id=config_id,
+            llm_model=mock_llm
+        )
+        
+    assert "headers" in res
+    assert "line_items" in res
+    
+    # 3. Verify only configured fields are returned
+    assert "invoice_number" in res["headers"]
+    assert "extra_hallucinated_header" not in res["headers"]
+    assert res["headers"]["invoice_number"]["value"] == "INV-2001"
+    
+    assert len(res["line_items"]) == 1
+    cols = {c["column_name"]: c for c in res["line_items"][0]["columns"]}
+    assert "price" in cols
+    assert "qty" not in cols
+    assert cols["price"]["value"] == "45.00"
+
+    # 4. Clean up
+    async with session_scope() as session:
+        db_cfg = await session.get(IdpFieldConfiguration, config_id)
+        if db_cfg:
+            await session.delete(db_cfg)
+        await session.commit()
+
+
+@pytest.mark.anyio
+async def test_llm_extractor_node_named_config_integration():
+    """Verify IDPLLMExtractor node calls extract_named_config when mode is field_configuration."""
+    from agentcore.services.deps import session_scope
+    from agentcore.services.database.models.idp.config import (
+        IdpFieldConfiguration,
+        IdpFieldConfigHeader,
+    )
+    
+    config_id = uuid4()
+    async with session_scope() as session:
+        config = IdpFieldConfiguration(
+            id=config_id,
+            name="Node Config Test",
+            is_active=True,
+        )
+        session.add(config)
+        await session.flush()
+        
+        header = IdpFieldConfigHeader(
+            id=uuid4(),
+            config_id=config_id,
+            field_name="total",
+            field_type="number",
+            display_order=0,
+        )
+        session.add(header)
+        await session.commit()
+
+    raw_response = {
+        "headers": {
+            "total": {
+                "value": "750.00",
+                "confidence": 0.99,
+                "reasoning": "Total text"
+            }
+        },
+        "line_items": []
+    }
+    mock_llm = MockLLM(response_text=json.dumps(raw_response))
+    
+    node = IDPLLMExtractor()
+    node.document = Message(text="Total sum is 750.00")
+    node.llm = mock_llm
+    node.extraction_mode = "field_configuration"
+    node.config_name = "Node Config Test"
+    
+    out_data = await node.extract()
+    
+    assert isinstance(out_data, Data)
+    assert out_data.data["headers"]["total"]["value"] == "750.00"
+    
+    # Cleanup
+    async with session_scope() as session:
+        db_cfg = await session.get(IdpFieldConfiguration, config_id)
+        if db_cfg:
+            await session.delete(db_cfg)
+        await session.commit()

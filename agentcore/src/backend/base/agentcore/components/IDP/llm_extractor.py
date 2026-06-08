@@ -127,15 +127,34 @@ class IDPLLMExtractor(Node):
                     extracted = await extract_dynamic(ocr_text=text, prompt=prompt, llm_model=self.llm)
                     raw = json.dumps(extracted, indent=2)
             else:
-                # Legacy / named config fallback before B14 is implemented
-                if self.llm:
-                    from langchain_core.messages import HumanMessage
-                    response = await self.llm.ainvoke([HumanMessage(content=f"{prompt}\n\nDocument:\n{text}")])
-                    raw = response.content if hasattr(response, "content") else str(response)
+                if not self.llm:
+                    raw = f"[No model connected — config would be: {self.config_name}]"
+                    extracted = {"error": "No model connected"}
                 else:
-                    raw = f"[No model connected — prompt would be: {prompt[:200]}...]"
-                
-                extracted = self._parse_json(raw)
+                    from agentcore.services.deps import session_scope
+                    from agentcore.services.idp.extraction import extract_named_config
+                    from agentcore.services.database.models.idp.config import IdpFieldConfiguration
+                    from sqlmodel import select
+
+                    async with session_scope() as session:
+                        config = (await session.exec(
+                            select(IdpFieldConfiguration)
+                            .where(
+                                IdpFieldConfiguration.name == self.config_name,
+                                IdpFieldConfiguration.deleted_at.is_(None)
+                            )
+                        )).first()
+
+                        if not config:
+                            raise ValueError(f"Active field configuration '{self.config_name}' not found.")
+
+                        extracted = await extract_named_config(
+                            session=session,
+                            ocr_text=text,
+                            field_config_id=config.id,
+                            llm_model=self.llm
+                        )
+                        raw = json.dumps(extracted, indent=2)
 
             headers_count = len(extracted.get("headers", {})) if isinstance(extracted, dict) else 0
             line_items_count = len(extracted.get("line_items", [])) if isinstance(extracted, dict) else 0
