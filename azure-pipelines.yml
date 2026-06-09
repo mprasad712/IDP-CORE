@@ -264,6 +264,8 @@ stages:
     displayName: "Install ArgoCD if not present"
     steps:
 
+    - checkout: self
+
     - task: AzureCLI@2
       displayName: "Get AKS credentials"
       inputs:
