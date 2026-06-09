@@ -75,25 +75,17 @@ resource "azurerm_postgresql_flexible_server" "postgres" {
 }
 
 # =========================================
-# AZURE MANAGED REDIS (OSS CLUSTER)
+# AZURE MANAGED REDIS
 # =========================================
-resource "azurerm_redis_enterprise_cluster" "redis" {
+resource "azurerm_managed_redis" "redis" {
   name                = "idpflow-redis-dev"
   resource_group_name = azurerm_resource_group.rg.name
   location            = azurerm_resource_group.rg.location
-  sku_name            = "Enterprise_E10-2"
-  minimum_tls_version = "1.2"
+  sku_name            = "Balanced_B1"
 
   tags = {
     environment = "dev"
   }
-}
-
-resource "azurerm_redis_enterprise_database" "db" {
-  name              = "default"
-  cluster_id        = azurerm_redis_enterprise_cluster.redis.id
-  client_protocol   = "Encrypted"
-  clustering_policy = "OSSCluster"
 }
 
 # =========================================
@@ -108,7 +100,7 @@ resource "azurerm_kubernetes_cluster" "aks" {
   default_node_pool {
     name       = "system"
     node_count = 2
-    vm_size    = "Standard_B2s"
+    vm_size    = "Standard_B2s_v2"
   }
 
   identity {
