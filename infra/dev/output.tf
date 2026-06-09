@@ -16,8 +16,8 @@ output "postgres_fqdn" {
 
 output "redis_connection_info" {
   value = {
-    host = azurerm_managed_redis.redis.host_name
-    port = azurerm_managed_redis.redis.port
+    host = azurerm_managed_redis.redis.hostname
+    port = 10000
   }
 }
 
