@@ -3,7 +3,7 @@ import json
 import mimetypes
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 from loguru import logger
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -528,3 +528,119 @@ async def extract_multimodal(
         }
 
     return raw_result
+
+
+async def save_extraction_results(
+    session: AsyncSession,
+    document_id: UUID,
+    job_id: UUID,
+    extraction_result: Dict[str, Any],
+    ocr_tokens: Optional[List[Dict[str, Any]]] = None
+) -> float:
+    """Save the structured extraction results to the database and compute/update confidence.
+    
+    Persists data to idp_extracted_headers and idp_extracted_line_items,
+    maps source locations (bounding boxes) using OCR tokens, and
+    calculates/updates the overall document confidence.
+    """
+    from sqlalchemy import delete
+    from agentcore.services.database.models.idp.documents import (
+        IdpExtractedHeader,
+        IdpExtractedLineItem,
+        IdpDocument
+    )
+
+    # 1. Clean up existing extraction records for this job to ensure idempotency
+    await session.execute(delete(IdpExtractedHeader).where(IdpExtractedHeader.job_id == job_id))
+    await session.execute(delete(IdpExtractedLineItem).where(IdpExtractedLineItem.job_id == job_id))
+
+    confidences = []
+    
+    # 2. Save headers
+    headers_dict = extraction_result.get("headers", {})
+    for field_name, field_data in headers_dict.items():
+        val = field_data.get("value")
+        extracted_val = str(val) if val is not None else None
+        conf = float(field_data.get("confidence", 0.0))
+        reasoning = field_data.get("reasoning")
+        
+        # Resolve source location using ocr_tokens matching
+        source_loc = None
+        if ocr_tokens and extracted_val:
+            val_lower = extracted_val.strip().lower()
+            for token in ocr_tokens:
+                tok_text = str(token.get("text", "")).strip().lower()
+                if val_lower in tok_text or tok_text in val_lower:
+                    source_loc = {
+                        "page_number": token.get("page_number", 1),
+                        "bounding_box": token.get("bounding_box"),
+                        "confidence": token.get("confidence", 1.0)
+                    }
+                    break
+
+        header_rec = IdpExtractedHeader(
+            id=uuid4(),
+            document_id=document_id,
+            job_id=job_id,
+            field_name=field_name,
+            extracted_value=extracted_val,
+            confidence_score=conf,
+            reasoning_trace=reasoning,
+            source_location=source_loc,
+            is_reviewed=False
+        )
+        session.add(header_rec)
+        confidences.append(conf)
+
+    # 3. Save line items
+    line_items_list = extraction_result.get("line_items", [])
+    for row in line_items_list:
+        row_idx = row.get("row_index", 0)
+        cols = row.get("columns", [])
+        for col in cols:
+            col_name = col.get("column_name")
+            val = col.get("value")
+            extracted_val = str(val) if val is not None else None
+            conf = float(col.get("confidence", 0.0))
+            reasoning = col.get("reasoning")
+            
+            # Resolve source location
+            source_loc = None
+            if ocr_tokens and extracted_val:
+                val_lower = extracted_val.strip().lower()
+                for token in ocr_tokens:
+                    tok_text = str(token.get("text", "")).strip().lower()
+                    if val_lower in tok_text or tok_text in val_lower:
+                        source_loc = {
+                            "page_number": token.get("page_number", 1),
+                            "bounding_box": token.get("bounding_box"),
+                            "confidence": token.get("confidence", 1.0)
+                        }
+                        break
+
+            line_rec = IdpExtractedLineItem(
+                id=uuid4(),
+                document_id=document_id,
+                job_id=job_id,
+                row_index=row_idx,
+                column_name=col_name,
+                extracted_value=extracted_val,
+                confidence_score=conf,
+                reasoning_trace=reasoning,
+                source_location=source_loc,
+                is_reviewed=False
+            )
+            session.add(line_rec)
+            confidences.append(conf)
+
+    # 4. Calculate overall weighted average confidence
+    overall_conf = sum(confidences) / len(confidences) if confidences else 1.0
+
+    # 5. Update IdpDocument overall confidence
+    doc = await session.get(IdpDocument, document_id)
+    if doc:
+        doc.overall_confidence = overall_conf
+        session.add(doc)
+
+    await session.commit()
+    return overall_conf

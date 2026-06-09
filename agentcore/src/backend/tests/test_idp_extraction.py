@@ -506,3 +506,171 @@ async def test_llm_extractor_node_multimodal_integration(tmp_path):
 
     assert isinstance(out_data, Data)
     assert out_data.data["headers"]["invoice_number"]["value"] == "INV-NODE-M1"
+
+
+@pytest.mark.anyio
+async def test_save_extraction_results_success():
+    """Verify that save_extraction_results computes confidence and maps source locations correctly."""
+    from agentcore.services.deps import session_scope
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent
+    from agentcore.services.database.models.idp.documents import (
+        IdpDocument,
+        IdpProcessingJob,
+        IdpExtractedHeader,
+        IdpExtractedLineItem
+    )
+    from agentcore.services.idp.extraction import save_extraction_results
+    from sqlmodel import select
+
+    agent_id = uuid4()
+    doc_id = uuid4()
+    job_id = uuid4()
+
+    async with session_scope() as session:
+        # Create base Agent
+        base_agent = Agent(
+            id=agent_id,
+            name="Extraction Helper Agent",
+        )
+        session.add(base_agent)
+        await session.flush()
+
+        idp_agent = IdpAgent(
+            id=agent_id,
+            agent_id=agent_id,
+            extraction_mode="dynamic_prompting",
+        )
+        session.add(idp_agent)
+        await session.flush()
+
+        doc = IdpDocument(
+            id=doc_id,
+            agent_id=agent_id,
+            original_filename="test.pdf",
+            file_path="/tmp/test.pdf",
+            file_type="pdf",
+            file_size_bytes=1000,
+            source="upload",
+            status="queued"
+        )
+        session.add(doc)
+        await session.flush()
+
+        job = IdpProcessingJob(
+            id=job_id,
+            document_id=doc_id,
+            agent_id=agent_id,
+            status="queued"
+        )
+        session.add(job)
+        await session.commit()
+
+    # Define mock extracted result
+    extraction_result = {
+        "headers": {
+            "invoice_number": {
+                "value": "INV-TEST-100",
+                "confidence": 0.95,
+                "reasoning": "Top left location"
+            },
+            "date": {
+                "value": "2026-06-08",
+                "confidence": 0.85,
+                "reasoning": "Top right"
+            }
+        },
+        "line_items": [
+            {
+                "row_index": 0,
+                "columns": [
+                    {
+                        "column_name": "item",
+                        "value": "Widgets",
+                        "confidence": 0.9,
+                        "reasoning": "First item"
+                    }
+                ]
+            }
+        ]
+    }
+
+    # Define OCR tokens with matching word to check source location mapping
+    ocr_tokens = [
+        {
+            "text": "INV-TEST-100",
+            "bounding_box": [[10, 10], [50, 10], [50, 20], [10, 20]],
+            "confidence": 0.99,
+            "page_number": 1
+        },
+        {
+            "text": "Widgets",
+            "bounding_box": [[100, 100], [200, 100], [200, 120], [100, 120]],
+            "confidence": 0.98,
+            "page_number": 1
+        }
+    ]
+
+    async with session_scope() as session:
+        overall_conf = await save_extraction_results(
+            session=session,
+            document_id=doc_id,
+            job_id=job_id,
+            extraction_result=extraction_result,
+            ocr_tokens=ocr_tokens
+        )
+
+    # Simple average of 0.95, 0.85, and 0.9 should be 0.9
+    assert abs(overall_conf - 0.9) < 1e-4
+
+    async with session_scope() as session:
+        # Check persisted headers
+        headers = (await session.exec(
+            select(IdpExtractedHeader).where(IdpExtractedHeader.job_id == job_id)
+        )).all()
+        assert len(headers) == 2
+        header_map = {h.field_name: h for h in headers}
+        assert "invoice_number" in header_map
+        assert header_map["invoice_number"].extracted_value == "INV-TEST-100"
+        assert float(header_map["invoice_number"].confidence_score) == 0.95
+        assert header_map["invoice_number"].reasoning_trace == "Top left location"
+        assert header_map["invoice_number"].source_location is not None
+        assert header_map["invoice_number"].source_location["page_number"] == 1
+        assert header_map["invoice_number"].source_location["bounding_box"] == [[10, 10], [50, 10], [50, 20], [10, 20]]
+
+        assert "date" in header_map
+        assert header_map["date"].extracted_value == "2026-06-08"
+        # Date wasn't in ocr_tokens, so source_location should be None
+        assert header_map["date"].source_location is None
+
+        # Check line items
+        line_items = (await session.exec(
+            select(IdpExtractedLineItem).where(IdpExtractedLineItem.job_id == job_id)
+        )).all()
+        assert len(line_items) == 1
+        assert line_items[0].column_name == "item"
+        assert line_items[0].extracted_value == "Widgets"
+        assert line_items[0].row_index == 0
+        assert line_items[0].source_location is not None
+        assert line_items[0].source_location["bounding_box"] == [[100, 100], [200, 100], [200, 120], [100, 120]]
+
+        # Check updated document confidence
+        db_doc = await session.get(IdpDocument, doc_id)
+        assert float(db_doc.overall_confidence) == overall_conf
+
+    # 6. Cleanup
+    async with session_scope() as session:
+        # Delete created entries (cascade will clean extraction results)
+        db_job = await session.get(IdpProcessingJob, job_id)
+        if db_job:
+            await session.delete(db_job)
+        db_doc = await session.get(IdpDocument, doc_id)
+        if db_doc:
+            await session.delete(db_doc)
+        db_idp = await session.get(IdpAgent, agent_id)
+        if db_idp:
+            await session.delete(db_idp)
+        db_agent = await session.get(Agent, agent_id)
+        if db_agent:
+            await session.delete(db_agent)
+        await session.commit()
