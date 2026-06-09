@@ -77,6 +77,18 @@ resource "azurerm_postgresql_flexible_server" "postgres" {
 # =========================================
 # AZURE MANAGED REDIS (OSS CLUSTER)
 # =========================================
+resource "azurerm_redis_enterprise_cluster" "redis" {
+  name                = "idpflow-redis-dev"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  sku_name            = "Enterprise_E10-2"
+  minimum_tls_version = "1.2"
+
+  tags = {
+    environment = "dev"
+  }
+}
+
 resource "azurerm_redis_enterprise_database" "db" {
   name              = "default"
   cluster_id        = azurerm_redis_enterprise_cluster.redis.id
