@@ -83,6 +83,11 @@ resource "azurerm_managed_redis" "redis" {
   location            = azurerm_resource_group.rg.location
   sku_name            = "Balanced_B1"
 
+  default_database {
+    clustering_policy = "OSSCluster"
+    eviction_policy   = "NoEviction"
+  }
+
   tags = {
     environment = "dev"
   }
