@@ -201,7 +201,7 @@ stages:
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          az acr login --name idpacr1
+          az acr login --name idpflowacr1
 
     # =====================================
     # BACKEND SERVICE
@@ -209,13 +209,13 @@ stages:
     - script: |
         docker build \
         -f agentcore/src/backend/Dockerfile \
-        -t idpacr1.azurecr.io/backend:$(Build.BuildId) \
+        -t idpflowacr1.azurecr.io/backend:$(Build.BuildId) \
         agentcore/src/backend
       displayName: "Build Backend"
       condition: or(eq(variables['backend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
     - script: |
-        docker push idpacr1.azurecr.io/backend:$(Build.BuildId)
+        docker push idpflowacr1.azurecr.io/backend:$(Build.BuildId)
       displayName: "Push Backend"
       condition: or(eq(variables['backend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
@@ -225,13 +225,13 @@ stages:
     - script: |
         docker build \
         -f agentcore/src/frontend/Dockerfile \
-        -t idpacr1.azurecr.io/frontend:$(Build.BuildId) \
+        -t idpflowacr1.azurecr.io/frontend:$(Build.BuildId) \
         agentcore/src/frontend
       displayName: "Build Frontend"
       condition: or(eq(variables['frontend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
     - script: |
-        docker push idpacr1.azurecr.io/frontend:$(Build.BuildId)
+        docker push idpflowacr1.azurecr.io/frontend:$(Build.BuildId)
       displayName: "Push Frontend"
       condition: or(eq(variables['frontend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
@@ -241,12 +241,119 @@ stages:
     - script: |
         docker build \
         -f agentcore/src/services/model-service/Dockerfile \
-        -t idpacr1.azurecr.io/model-service:$(Build.BuildId) \
+        -t idpflowacr1.azurecr.io/model-service:$(Build.BuildId) \
         agentcore/src/services/model-service
       displayName: "Build Model Service"
       condition: or(eq(variables['model_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
     - script: |
-        docker push idpacr1.azurecr.io/model-service:$(Build.BuildId)
+        docker push idpflowacr1.azurecr.io/model-service:$(Build.BuildId)
       displayName: "Push Model Service"
       condition: or(eq(variables['model_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+
+# =========================================
+# STAGE 4 - INSTALL ARGOCD (first time only)
+# =========================================
+- stage: ArgocdBootstrap
+  displayName: "Bootstrap ArgoCD on AKS"
+  dependsOn: BuildAndPush
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+
+  jobs:
+  - job: Bootstrap
+    displayName: "Install ArgoCD if not present"
+    steps:
+
+    - task: AzureCLI@2
+      displayName: "Get AKS credentials"
+      inputs:
+        azureSubscription: 'idp-sc'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az aks get-credentials \
+            --resource-group idpflow-rg \
+            --name idpflow-aks \
+            --overwrite-existing
+
+    - script: |
+        # Install ArgoCD only if not already present
+        if ! kubectl get namespace argocd &>/dev/null; then
+          kubectl create namespace argocd
+          kubectl apply -n argocd \
+            -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+          echo "ArgoCD installed — waiting for pods to be ready..."
+          kubectl wait --for=condition=available deployment/argocd-server \
+            -n argocd --timeout=180s
+        else
+          echo "ArgoCD already installed, skipping."
+        fi
+      displayName: "Install ArgoCD"
+
+    - script: |
+        # Apply the ArgoCD Application manifest
+        kubectl apply -f aimldevteam/manifests/argocd/argocd-app.yaml
+      displayName: "Apply ArgoCD Application"
+
+# =========================================
+# STAGE 5 - UPDATE IMAGE TAGS IN MANIFESTS
+# =========================================
+- stage: UpdateManifests
+  displayName: "Update Image Tags & Trigger ArgoCD Sync"
+  dependsOn:
+  - BuildAndPush
+  - DetectChanges
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+
+  variables:
+    full_pipeline:   $[ stageDependencies.DetectChanges.Detect.outputs['detect.full_pipeline'] ]
+    backend_changed: $[ stageDependencies.DetectChanges.Detect.outputs['detect.backend_changed'] ]
+    frontend_changed: $[ stageDependencies.DetectChanges.Detect.outputs['detect.frontend_changed'] ]
+    model_changed:   $[ stageDependencies.DetectChanges.Detect.outputs['detect.model_changed'] ]
+
+  jobs:
+  - job: PatchManifests
+    displayName: "Patch deployment image tags"
+    steps:
+
+    - checkout: self
+      persistCredentials: true
+
+    - script: |
+        git config user.email "ado-pipeline@idpflow.dev"
+        git config user.name "ADO Pipeline"
+      displayName: "Configure git"
+
+    - script: |
+        TAG=$(Build.BuildId)
+
+        patch_image() {
+          local file="$1" image="$2"
+          sed -i "s|image: ${image}:.*|image: ${image}:${TAG}|g" "$file"
+        }
+
+        if [ "$(backend_changed)" = "true" ] || [ "$(full_pipeline)" = "true" ]; then
+          patch_image aimldevteam/manifests/dev/deployments/backend-deployment.yaml \
+            idpflowacr1.azurecr.io/backend
+          echo "Patched backend → :${TAG}"
+        fi
+
+        if [ "$(frontend_changed)" = "true" ] || [ "$(full_pipeline)" = "true" ]; then
+          patch_image aimldevteam/manifests/dev/deployments/frontend-deployment.yaml \
+            idpflowacr1.azurecr.io/frontend
+          echo "Patched frontend → :${TAG}"
+        fi
+
+        if [ "$(model_changed)" = "true" ] || [ "$(full_pipeline)" = "true" ]; then
+          patch_image aimldevteam/manifests/dev/deployments/model-service-deployment.yaml \
+            idpflowacr1.azurecr.io/model-service
+          echo "Patched model-service → :${TAG}"
+        fi
+      displayName: "Patch image tags in manifests"
+
+    - script: |
+        git add aimldevteam/manifests/dev/deployments/
+        git diff --cached --quiet && echo "No manifest changes, skipping commit." && exit 0
+        git commit -m "ci: update image tags to build $(Build.BuildId) [skip ci]"
+        git push origin HEAD:main
+      displayName: "Commit and push manifest changes"

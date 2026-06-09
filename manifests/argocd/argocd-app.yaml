@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: idpflow-dev
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    # Replace with your actual Azure DevOps repo URL
+    repoURL: https://dev.azure.com/<YOUR_ORG>/<YOUR_PROJECT>/_git/<YOUR_REPO>
+    targetRevision: main
+    path: aimldevteam/manifests/dev
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: idpflow
+
+  syncPolicy:
+    automated:
+      prune: true       # Remove resources deleted from git
+      selfHeal: true    # Revert manual changes in cluster
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true

@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-service-config
+  namespace: idpflow
+data:
+  ENVIRONMENT: "dev"
+  LOG_LEVEL: "INFO"
+
+  # PostgreSQL (model metadata store)
+  POSTGRES_HOST: "idpflow-postgres.postgres.database.azure.com"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "idpflowdb"
+  POSTGRES_USER: "pgadmin"
+
+  # Redis (result cache)
+  REDIS_HOST: "idpflow-redis.redis.cache.windows.net"
+  REDIS_PORT: "6380"
+  REDIS_SSL: "true"
+
+  # Azure Storage (model artifacts)
+  STORAGE_ACCOUNT_NAME: "idpflowappstore1"
+  STORAGE_CONTAINER_NAME: "app-storage-container"

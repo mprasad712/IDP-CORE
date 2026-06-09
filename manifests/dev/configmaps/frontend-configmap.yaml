@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-config
+  namespace: idpflow
+data:
+  ENVIRONMENT: "dev"
+  # URL of the backend service inside the cluster
+  REACT_APP_API_URL: "http://backend-svc:8000"
+  NODE_ENV: "production"
