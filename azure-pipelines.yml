@@ -294,7 +294,7 @@ stages:
 
     - script: |
         # Apply the ArgoCD Application manifest
-        kubectl apply -f aimldevteam/manifests/argocd/argocd-app.yaml
+        kubectl apply -f manifests/argocd/argocd-app.yaml
       displayName: "Apply ArgoCD Application"
 
 # =========================================
@@ -335,26 +335,26 @@ stages:
         }
 
         if [ "$(backend_changed)" = "true" ] || [ "$(full_pipeline)" = "true" ]; then
-          patch_image aimldevteam/manifests/dev/deployments/backend-deployment.yaml \
+          patch_image manifests/dev/deployments/backend-deployment.yaml \
             idpflowacr1.azurecr.io/backend
           echo "Patched backend → :${TAG}"
         fi
 
         if [ "$(frontend_changed)" = "true" ] || [ "$(full_pipeline)" = "true" ]; then
-          patch_image aimldevteam/manifests/dev/deployments/frontend-deployment.yaml \
+          patch_image manifests/dev/deployments/frontend-deployment.yaml \
             idpflowacr1.azurecr.io/frontend
           echo "Patched frontend → :${TAG}"
         fi
 
         if [ "$(model_changed)" = "true" ] || [ "$(full_pipeline)" = "true" ]; then
-          patch_image aimldevteam/manifests/dev/deployments/model-service-deployment.yaml \
+          patch_image manifests/dev/deployments/model-service-deployment.yaml \
             idpflowacr1.azurecr.io/model-service
           echo "Patched model-service → :${TAG}"
         fi
       displayName: "Patch image tags in manifests"
 
     - script: |
-        git add aimldevteam/manifests/dev/deployments/
+        git add manifests/dev/deployments/
         git diff --cached --quiet && echo "No manifest changes, skipping commit." && exit 0
         git commit -m "ci: update image tags to build $(Build.BuildId) [skip ci]"
         git push origin HEAD:main

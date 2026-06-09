@@ -12,7 +12,7 @@ spec:
     # Replace with your actual Azure DevOps repo URL
     repoURL: https://dev.azure.com/<YOUR_ORG>/<YOUR_PROJECT>/_git/<YOUR_REPO>
     targetRevision: main
-    path: aimldevteam/manifests/dev
+    path: manifests/dev
 
   destination:
     server: https://kubernetes.default.svc
