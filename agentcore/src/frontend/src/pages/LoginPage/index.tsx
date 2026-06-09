@@ -14,7 +14,7 @@ import { loginRequest, msalConfig } from "@/authConfig";
 import { useTranslation } from "react-i18next";
 import useAuthStore from "@/stores/authStore";
 import useTheme from "@/customization/hooks/use-custom-theme";
-import MothersonLogo from "@/assets/MiCore.svg";
+import MothersonLogo from "@/assets/micore.svg";
 
 /* PwC brand tokens */
 const PwC = {
