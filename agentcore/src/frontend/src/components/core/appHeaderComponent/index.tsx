@@ -18,7 +18,7 @@ import {
 } from "@/controllers/API/queries/approvals";
 import useAlertStore from "@/stores/alertStore";
 import AgentMenu from "./components/AgentMenu";
-import FullLogo from "@/assets/MiCore.svg?react";
+import FullLogo from "@/assets/micore.svg?react";
 import IconLogo from "@/assets/mothersonLogo.svg?react";
 
 export default function AppHeader(): JSX.Element {
