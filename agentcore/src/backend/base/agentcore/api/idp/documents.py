@@ -82,12 +82,14 @@ async def upload_documents(
                     detail=f"File extension '{ext}' is not allowed. Allowed types: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
                 )
 
-            # Check file size safely
+            # Determine size without UploadFile.seek/tell (signatures vary across ASGI
+            # backends). Prefer the Content-Length-derived file.size so an oversized file
+            # is rejected BEFORE buffering it all into memory; only read early if unknown.
             size = file.size
+            file_content = None
             if size is None:
-                await file.seek(0, 2)
-                size = await file.tell()
-                await file.seek(0)
+                file_content = await file.read()
+                size = len(file_content)
 
             if size > max_size_bytes:
                 raise HTTPException(
@@ -95,8 +97,9 @@ async def upload_documents(
                     detail=f"File '{file.filename}' exceeds the maximum allowed size of {max_file_size_upload}MB."
                 )
 
-            # Read content and compute SHA-256 checksum
-            file_content = await file.read()
+            # Read content (if not already) and compute SHA-256 checksum
+            if file_content is None:
+                file_content = await file.read()
             checksum = hashlib.sha256(file_content).hexdigest()
 
             # Generate unique name for disk storage
