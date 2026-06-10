@@ -323,39 +323,45 @@ stages:
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
+          set -euo pipefail
+
           kubectl create namespace idpflow --dry-run=client -o yaml | kubectl apply -f -
 
-          POSTGRES_PWD=$(az keyvault secret show \
-            --vault-name idpflow-kv-dev-001 \
-            --name postgres-password \
-            --query value -o tsv)
+          fetch_kv_secret() {
+            local name="$1"
+            local value
+            value=$(az keyvault secret show \
+              --vault-name idpflow-kv-dev-001 \
+              --name "$name" \
+              --query value -o tsv 2>&1) || {
+              echo "##[error] Failed to fetch KV secret '$name': $value"
+              exit 1
+            }
+            if [ -z "$value" ]; then
+              echo "##[error] KV secret '$name' returned empty value — aborting."
+              exit 1
+            fi
+            echo "$value"
+          }
 
-          REDIS_KEY=$(az keyvault secret show \
-            --vault-name idpflow-kv-dev-001 \
-            --name redis-primary-key \
-            --query value -o tsv)
+          POSTGRES_PWD=$(fetch_kv_secret "postgres-password")
+          REDIS_KEY=$(fetch_kv_secret "redis-primary-key")
+          SMTP_PWD=$(fetch_kv_secret "smtp-password")
+          AZURE_CLIENT_SECRET=$(fetch_kv_secret "agentcore-azure-client-secret")
+          MODEL_ENCRYPTION_KEY=$(fetch_kv_secret "agentcore-model-service-encryption-key")
 
           STORAGE_KEY=$(az storage account keys list \
             --account-name idpflowappstore1 \
             --resource-group idpflow-rg \
-            --query "[0].value" -o tsv)
-
-          SMTP_PWD=$(az keyvault secret show \
-            --vault-name idpflow-kv-dev-001 \
-            --name smtp-password \
-            --query value -o tsv)
-
-          AZURE_CLIENT_SECRET=$(az keyvault secret show \
-            --vault-name idpflow-kv-dev-001 \
-            --name agentcore-azure-client-secret \
-            --query value -o tsv)
-
-          MODEL_ENCRYPTION_KEY=$(az keyvault secret show \
-            --vault-name idpflow-kv-dev-001 \
-            --name agentcore-model-service-encryption-key \
-            --query value -o tsv 2>/dev/null || echo "your-secret-key-here")
+            --query "[0].value" -o tsv) || {
+            echo "##[error] Failed to fetch storage account key"
+            exit 1
+          }
 
           DB_URL="postgresql+psycopg2://pgadmin:${POSTGRES_PWD}@idpflow-postgres.postgres.database.azure.com:5432/idp_agentic?sslmode=require"
+
+          # Delete and recreate to guarantee values are always fresh from KV
+          kubectl delete secret app-secrets --namespace idpflow --ignore-not-found=true
 
           kubectl create secret generic app-secrets \
             --namespace idpflow \
@@ -365,10 +371,9 @@ stages:
             --from-literal=DATABASE_URL="$DB_URL" \
             --from-literal=SMTP_PASSWORD="$SMTP_PWD" \
             --from-literal=AZURE_CLIENT_SECRET="$AZURE_CLIENT_SECRET" \
-            --from-literal=MODEL_SERVICE_ENCRYPTION_KEY="$MODEL_ENCRYPTION_KEY" \
-            --dry-run=client -o yaml | kubectl apply -f -
+            --from-literal=MODEL_SERVICE_ENCRYPTION_KEY="$MODEL_ENCRYPTION_KEY"
 
-          echo "Kubernetes secrets applied."
+          echo "Kubernetes secrets created from Key Vault."
 
     - script: |
         # Register GitHub repo with ArgoCD (skipped if already registered)
