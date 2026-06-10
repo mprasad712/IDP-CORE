@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     """The cache type can be 'async', 'redis' or 'memory'. Default is 'redis' for distributed caching."""
     """The cache type can be 'async' or 'redis'."""
     redis_host: str = os.getenv("REDIS_HOST")
-    redis_port: int =os.getenv("REDIS_PORT")
+    redis_port: int = os.getenv("REDIS_PORT")
     redis_db: int = 0
     redis_entra_scope: str = os.getenv("REDIS_ENTRA_SCOPE", "")
     redis_entra_object_id: str = os.getenv("REDIS_ENTRA_OBJECT_ID", "")
@@ -256,7 +256,7 @@ class Settings(BaseSettings):
     # Telemetry
     do_not_track: bool = True
     """If set to True, Agentcore will not track telemetry."""
-    telemetry_base_url: str = os.getenv("LOCALHOST_TELEMETRY_BASE_URL")  # Disabled endpoint
+    telemetry_base_url: str | None = os.getenv("LOCALHOST_TELEMETRY_BASE_URL")  # Disabled endpoint
     transactions_storage_enabled: bool = True
     """If set to True, Agentcore will track transactions between agents."""
     vertex_builds_storage_enabled: bool = True

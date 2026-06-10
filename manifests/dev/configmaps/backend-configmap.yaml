@@ -5,12 +5,14 @@ metadata:
   namespace: idpflow
 data:
   # ── App ──────────────────────────────────────────────
+  LOCALHOST_HOST: "0.0.0.0"
   BACKEND_PORT: "7860"
   CONFIG_DIR: "./src/backend/knowledge_base_storage"
   DATA_DIR: "./data"
   MANIFEST_FILE_PATH: "../../../manifest.yaml"
   GLOBAL_LOG_LEVEL: "DEBUG"
   AGENTCORE_PLATFORM_ROOT_EMAIL: "manasprasad712@gmail.com"
+  HOST_IP: "0.0.0.0"
 
   # ── Auth / OAuth ──────────────────────────────────────
   ENABLE_SIGNUP: "true"
