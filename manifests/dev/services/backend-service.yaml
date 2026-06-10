@@ -8,6 +8,6 @@ spec:
     app: backend
   ports:
     - protocol: TCP
-      port: 8000
-      targetPort: 8000
+      port: 7860
+      targetPort: 7860
   type: ClusterIP

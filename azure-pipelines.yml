@@ -8,10 +8,15 @@ pool:
   vmImage: ubuntu-latest
 
 variables:
-  acrName: 'idpflowacr1'
-  imageName: 'idpflow-service'
-  dockerfilePath: 'Dockerfile'
-  tag: '$(Build.BuildId)'
+  - group: idp          # Library variable group (GITHUB_USERNAME, GITHUB_PAT)
+  - name: acrName
+    value: 'idpflowacr1'
+  - name: imageName
+    value: 'idpflow-service'
+  - name: dockerfilePath
+    value: 'Dockerfile'
+  - name: tag
+    value: '$(Build.BuildId)'
 
 stages:
 
@@ -252,16 +257,20 @@ stages:
       condition: or(eq(variables['model_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
 # =========================================
-# STAGE 4 - INSTALL ARGOCD (first time only)
+# STAGE 4 - BOOTSTRAP AKS (first time only)
+# =========================================
+# Required Azure DevOps pipeline variables (mark as secret):
+#   GITHUB_USERNAME   - your GitHub username
+#   GITHUB_PAT        - GitHub Personal Access Token (repo read access)
 # =========================================
 - stage: ArgocdBootstrap
-  displayName: "Bootstrap ArgoCD on AKS"
+  displayName: "Bootstrap AKS: nginx + ArgoCD + Secrets"
   dependsOn: BuildAndPush
   condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
 
   jobs:
   - job: Bootstrap
-    displayName: "Install ArgoCD if not present"
+    displayName: "Install nginx, ArgoCD, secrets"
     steps:
 
     - checkout: self
@@ -279,7 +288,22 @@ stages:
             --overwrite-existing
 
     - script: |
-        # Install ArgoCD only if not already present
+        if ! helm repo list | grep -q ingress-nginx; then
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+        fi
+        if ! helm status ingress-nginx -n ingress-nginx &>/dev/null; then
+          helm install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx \
+            --create-namespace \
+            --wait
+          echo "nginx ingress controller installed."
+        else
+          echo "nginx ingress already installed, skipping."
+        fi
+      displayName: "Install nginx Ingress Controller"
+
+    - script: |
         if ! kubectl get namespace argocd &>/dev/null; then
           kubectl create namespace argocd
           kubectl apply -n argocd \
@@ -292,8 +316,69 @@ stages:
         fi
       displayName: "Install ArgoCD"
 
+    - task: AzureCLI@2
+      displayName: "Create Kubernetes secrets from Key Vault"
+      inputs:
+        azureSubscription: 'idp-sc'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          kubectl create namespace idpflow --dry-run=client -o yaml | kubectl apply -f -
+
+          POSTGRES_PWD=$(az keyvault secret show \
+            --vault-name idpflow-kv-dev-001 \
+            --name postgres-password \
+            --query value -o tsv)
+
+          REDIS_KEY=$(az managed-redis list-keys \
+            --name idpflow-redis-dev \
+            --resource-group idpflow-rg \
+            --query primaryKey -o tsv)
+
+          STORAGE_KEY=$(az storage account keys list \
+            --account-name idpflowappstore1 \
+            --resource-group idpflow-rg \
+            --query "[0].value" -o tsv)
+
+          SMTP_PWD=$(az keyvault secret show \
+            --vault-name idpflow-kv-dev-001 \
+            --name smtp-password \
+            --query value -o tsv)
+
+          DB_URL="postgresql+psycopg2://pgadmin:${POSTGRES_PWD}@idpflow-postgres.postgres.database.azure.com:5432/idp_agentic?sslmode=require"
+
+          kubectl create secret generic app-secrets \
+            --namespace idpflow \
+            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PWD" \
+            --from-literal=REDIS_PASSWORD="$REDIS_KEY" \
+            --from-literal=STORAGE_ACCOUNT_KEY="$STORAGE_KEY" \
+            --from-literal=DATABASE_URL="$DB_URL" \
+            --from-literal=SMTP_PASSWORD="$SMTP_PWD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          echo "Kubernetes secrets applied."
+
     - script: |
-        # Apply the ArgoCD Application manifest
+        # Register GitHub repo with ArgoCD (skipped if already registered)
+        REPO_URL="https://github.com/$(GITHUB_USERNAME)/$(Build.Repository.Name).git"
+        if ! kubectl get secret -n argocd -l "argocd.argoproj.io/secret-type=repository" \
+            -o jsonpath='{.items[*].data.url}' | base64 -d 2>/dev/null | grep -q "$REPO_URL"; then
+          kubectl create secret generic argocd-repo-github \
+            --namespace argocd \
+            --from-literal=type=git \
+            --from-literal=url="$REPO_URL" \
+            --from-literal=username="$(GITHUB_USERNAME)" \
+            --from-literal=password="$(GITHUB_PAT)" \
+            --dry-run=client -o yaml \
+          | kubectl label --local -f - "argocd.argoproj.io/secret-type=repository" --dry-run=client -o yaml \
+          | kubectl apply -f -
+          echo "ArgoCD repo credentials registered."
+        else
+          echo "ArgoCD repo already registered, skipping."
+        fi
+      displayName: "Register GitHub repo with ArgoCD"
+
+    - script: |
         kubectl apply -f manifests/argocd/argocd-app.yaml
       displayName: "Apply ArgoCD Application"
 

@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: idpacr1.azurecr.io/frontend:latest
+          image: idpflowacr1.azurecr.io/frontend:latest
           ports:
             - containerPort: 3000
           envFrom:

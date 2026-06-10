@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: model-service
-          image: idpacr1.azurecr.io/model-service:latest
+          image: idpflowacr1.azurecr.io/model-service:latest
           ports:
             - containerPort: 8001
           envFrom:

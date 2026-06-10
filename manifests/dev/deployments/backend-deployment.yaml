@@ -18,9 +18,9 @@ spec:
       containers:
         - name: backend
           # Image tag is updated by CI pipeline after each build
-          image: idpacr1.azurecr.io/backend:latest
+          image: idpflowacr1.azurecr.io/backend:latest
           ports:
-            - containerPort: 8000
+            - containerPort: 7860
           envFrom:
             - configMapRef:
                 name: backend-config
@@ -36,12 +36,12 @@ spec:
           readinessProbe:
             httpGet:
               path: /health
-              port: 8000
+              port: 7860
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
-              port: 8000
+              port: 7860
             initialDelaySeconds: 30
             periodSeconds: 30

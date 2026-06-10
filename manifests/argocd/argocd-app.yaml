@@ -9,14 +9,22 @@ spec:
   project: default
 
   source:
-    # Replace with your actual Azure DevOps repo URL
-    repoURL: https://dev.azure.com/<YOUR_ORG>/<YOUR_PROJECT>/_git/<YOUR_REPO>
+    # Must match the repo registered with ArgoCD in the pipeline bootstrap stage
+    repoURL: https://github.com/mprasad712/IDP-CORE.git
     targetRevision: main
     path: manifests/dev
 
   destination:
     server: https://kubernetes.default.svc
     namespace: idpflow
+
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      name: app-secrets
+      namespace: idpflow
+      jsonPointers:
+        - /data
 
   syncPolicy:
     automated:
