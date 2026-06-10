@@ -633,8 +633,9 @@ async def save_extraction_results(
             session.add(line_rec)
             confidences.append(conf)
 
-    # 4. Calculate overall weighted average confidence
-    overall_conf = sum(confidences) / len(confidences) if confidences else 1.0
+    # 4. Calculate overall weighted average confidence.
+    # No fields extracted => zero confidence (route to human review), NOT 1.0.
+    overall_conf = sum(confidences) / len(confidences) if confidences else 0.0
 
     # 5. Update IdpDocument overall confidence
     doc = await session.get(IdpDocument, document_id)
