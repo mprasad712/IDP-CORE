@@ -44,6 +44,7 @@ data:
   REDIS_CLUSTER_POLICY: "OSSCluster"
   REDIS_CLUSTER_ENABLED: "false"
   AUTH_REDIS_SECURITY_KEYS_ENABLED: "false"
+  REDIS_ENTRA_OBJECT_ID: "570d8258-0340-4b51-a12f-f2f3e09e1565"
 
   # ── Azure Storage ─────────────────────────────────────
   STORAGE_TYPE: "azure"
