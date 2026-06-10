@@ -6,10 +6,13 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, File, Form, UploadFile, status
 from sqlmodel import select, or_
 
+from pydantic import BaseModel
+
 from agentcore.api.utils import CurrentActiveUser, DbSession
 from agentcore.services.database.models.idp.config import IdpAgent
-from agentcore.services.database.models.idp.documents import IdpDocument
+from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
 from agentcore.services.deps import get_storage_service, get_settings_service
+from agentcore.services.idp.pipeline import PipelineError, enqueue_document
 from agentcore.services.storage.service import StorageService
 
 router = APIRouter(prefix="/documents", tags=["IDP Documents"])
@@ -148,3 +151,64 @@ async def upload_documents(
         "document_ids": document_ids,
         "message": f"Successfully uploaded {len(document_ids)} document(s)."
     }
+
+
+class ProcessBulkRequest(BaseModel):
+    document_ids: list[UUID]
+
+
+_PROCESSABLE_STATUSES = {"queued", "extracted", "pending_review", "auto_approved", "reviewed", "failed"}
+
+
+async def _enqueue_one(session, document_id: UUID):
+    """Enqueue a single document; returns (job_id, None) or (None, error_detail)."""
+    doc = (await session.exec(select(IdpDocument).where(IdpDocument.id == document_id))).first()
+    if doc is None:
+        return None, "document not found"
+    if doc.status == "processing":
+        return None, "document is already processing"
+    running = (
+        await session.exec(
+            select(IdpProcessingJob).where(
+                IdpProcessingJob.document_id == document_id,
+                IdpProcessingJob.status.in_(("queued", "running")),
+            )
+        )
+    ).first()
+    if running is not None:
+        return None, "a job for this document is already queued or running"
+    try:
+        job_id = await enqueue_document(session, document_id)
+        return job_id, None
+    except PipelineError as e:
+        return None, str(e)
+
+
+@router.post("/{document_id}/process", status_code=status.HTTP_202_ACCEPTED)
+async def process_document_endpoint(
+    *, session: DbSession, current_user: CurrentActiveUser, document_id: UUID
+):
+    """Enqueue a single uploaded document for background IDP processing."""
+    doc = (await session.exec(select(IdpDocument).where(IdpDocument.id == document_id))).first()
+    if doc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+    job_id, error = await _enqueue_one(session, document_id)
+    if error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error)
+    return {"job_id": job_id, "document_id": document_id, "status": "queued"}
+
+
+@router.post("/process", status_code=status.HTTP_202_ACCEPTED)
+async def process_documents_bulk(
+    *, session: DbSession, current_user: CurrentActiveUser, body: ProcessBulkRequest
+):
+    """Enqueue multiple documents for background IDP processing."""
+    jobs = []
+    skipped = []
+    for document_id in body.document_ids:
+        job_id, error = await _enqueue_one(session, document_id)
+        if error:
+            skipped.append({"document_id": str(document_id), "reason": error})
+        else:
+            jobs.append({"document_id": str(document_id), "job_id": str(job_id)})
+    return {"jobs": jobs, "skipped": skipped}
