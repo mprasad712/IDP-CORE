@@ -1,5 +1,3 @@
-# Requires nginx ingress controller installed on AKS
-# Install: helm install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx --create-namespace
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -9,10 +7,16 @@ metadata:
     nginx.ingress.kubernetes.io/rewrite-target: /
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
 spec:
   ingressClassName: nginx
+  tls:
+    - hosts:
+        - idpflow.4.224.148.136.nip.io
+      secretName: idpflow-tls
   rules:
-    - http:
+    - host: idpflow.4.224.148.136.nip.io
+      http:
         paths:
           - path: /
             pathType: Prefix

@@ -13,5 +13,5 @@ data:
   BACKEND_URL: "http://backend-svc:7860"
 
   # Update these to your actual public domain after ingress IP is known
-  MSAL_REDIRECT_URI: "http://REPLACE_WITH_INGRESS_IP/agents"
-  AGENTCORE_PUBLISH_URL: "http://REPLACE_WITH_INGRESS_IP"
+  MSAL_REDIRECT_URI: "https://idpflow.4.224.148.136.nip.io/agents"
+  AGENTCORE_PUBLISH_URL: "https://idpflow.4.224.148.136.nip.io"
