@@ -7,8 +7,8 @@ data:
   FRONTEND_PORT: "3000"
   NODE_ENV: "production"
 
-  # Backend service URL (K8s internal DNS)
-  VITE_API_URL: "http://backend-svc:7860"
+  # Backend service URL — internal DNS for server-side, public URL for browser
+  VITE_API_URL: "https://idpflow.4.224.148.136.nip.io/api"
   VITE_PROXY_TARGET: "http://backend-svc:7860"
   BACKEND_URL: "http://backend-svc:7860"
 

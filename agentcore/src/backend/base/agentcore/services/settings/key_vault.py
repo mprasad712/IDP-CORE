@@ -31,7 +31,6 @@ class KeyVaultSecretStore:
         from azure.keyvault.secrets import SecretClient
 
         credential = DefaultAzureCredential(
-            exclude_environment_credential=True,
             exclude_interactive_browser_credential=True,
         )
 
