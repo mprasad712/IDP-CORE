@@ -78,21 +78,21 @@ resource "azurerm_postgresql_flexible_server" "postgres" {
 # =========================================
 # AZURE MANAGED REDIS
 # =========================================
-# resource "azurerm_managed_redis" "redis" {
-#   name                = "idpflow-redis-dev"
-#   resource_group_name = azurerm_resource_group.rg.name
-#   location            = azurerm_resource_group.rg.location
-#   sku_name            = "Balanced_B1"
+resource "azurerm_managed_redis" "redis" {
+  name                = "idpflow-redis-dev"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  sku_name            = "Balanced_B1"
 
-#   default_database {
-#     clustering_policy = "OSSCluster"
-#     eviction_policy   = "NoEviction"
-#   }
+  default_database {
+    clustering_policy = "OSSCluster"
+    eviction_policy   = "NoEviction"
+  }
 
-#   tags = {
-#     environment = "dev"
-#   }
-# }
+  tags = {
+    environment = "dev"
+  }
+}
 
 # =========================================
 # AKS CLUSTER
