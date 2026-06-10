@@ -121,6 +121,11 @@ class LineItemReorderItem(BaseModel):
     id: UUID
     display_order: int
 
+class TemplateCloneRequest(BaseModel):
+    name: str = PydanticField(..., description="The name of the cloned configuration")
+    org_id: UUID | None = PydanticField(default=None, description="The target organization UUID")
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────
@@ -493,6 +498,111 @@ async def delete_field_config(
     session.add(config)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/templates/{template_id}/clone", response_model=FieldConfigRead, status_code=status.HTTP_201_CREATED)
+async def clone_template(
+    *,
+    session: DbSession,
+    template_id: UUID,
+    payload: TemplateCloneRequest,
+    current_user: CurrentActiveUser,
+):
+    """Clone a global template into a custom organization-scoped field configuration."""
+    stmt = (
+        select(IdpFieldConfiguration)
+        .options(selectinload(IdpFieldConfiguration.headers), selectinload(IdpFieldConfiguration.line_items))
+        .where(IdpFieldConfiguration.id == template_id, IdpFieldConfiguration.deleted_at.is_(None))
+    )
+    template = (await session.exec(stmt)).first()
+    if not template:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template configuration not found")
+
+    if not template.is_template:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Configuration is not a template")
+
+    org_ids, _ = await _get_scope_memberships(session, current_user.id)
+    user_role = normalize_role(getattr(current_user, "role", None))
+
+    resolved_org_id = payload.org_id
+    if user_role != "root":
+        if resolved_org_id is None:
+            if not org_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No active organization mapping found for user.",
+                )
+            resolved_org_id = sorted(org_ids, key=str)[0]
+        else:
+            if resolved_org_id not in org_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Not authorized to configure for this organization.",
+                )
+    else:
+        if resolved_org_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Must specify a target organization ID for cloning templates.",
+            )
+
+    # Check target name uniqueness in that organization scope
+    stmt_unique = select(IdpFieldConfiguration).where(
+        IdpFieldConfiguration.name == payload.name,
+        IdpFieldConfiguration.org_id == resolved_org_id,
+        IdpFieldConfiguration.deleted_at.is_(None),
+    )
+    existing = (await session.exec(stmt_unique)).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Field configuration name already exists in this organization scope.",
+        )
+
+    new_config = IdpFieldConfiguration(
+        name=payload.name,
+        description=template.description,
+        org_id=resolved_org_id,
+        is_template=False,
+        is_active=True,
+        extra=template.extra,
+        created_by=current_user.id,
+        updated_by=current_user.id,
+    )
+
+    new_config.headers = [
+        IdpFieldConfigHeader(
+            field_name=h.field_name,
+            field_type=h.field_type,
+            is_required=h.is_required,
+            display_order=h.display_order,
+            description=h.description,
+        )
+        for h in template.headers
+    ]
+
+    new_config.line_items = [
+        IdpFieldConfigLineItem(
+            column_name=l.column_name,
+            column_type=l.column_type,
+            is_required=l.is_required,
+            display_order=l.display_order,
+        )
+        for l in template.line_items
+    ]
+
+    session.add(new_config)
+    await session.commit()
+
+    stmt_reload = (
+        select(IdpFieldConfiguration)
+        .options(selectinload(IdpFieldConfiguration.headers), selectinload(IdpFieldConfiguration.line_items))
+        .where(IdpFieldConfiguration.id == new_config.id)
+    )
+    config_db = (await session.exec(stmt_reload)).first()
+    config_db.headers = sorted(config_db.headers, key=lambda h: h.display_order)
+    config_db.line_items = sorted(config_db.line_items, key=lambda l: l.display_order)
+    return config_db
 
 
 # ──────────────────────────────────────────────────────────────────────
