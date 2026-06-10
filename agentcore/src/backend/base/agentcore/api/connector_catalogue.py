@@ -767,10 +767,8 @@ def _test_azure_blob_connection(config: dict) -> dict:
             detail="connection_string is no longer supported for Azure Blob connector. Use account_url + container_name.",
         )
 
-    credential = DefaultAzureCredential(
-        exclude_environment_credential=True,
-        exclude_interactive_browser_credential=True,
-    )
+    from agentcore.utils.azure_credential import get_azure_credential
+    credential = get_azure_credential()
     client = BlobServiceClient(account_url=account_url, credential=credential)
     try:
         container_client = client.get_container_client(container_name)

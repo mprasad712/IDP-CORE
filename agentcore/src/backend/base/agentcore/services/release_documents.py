@@ -59,15 +59,12 @@ async def save_release_document(
     blob_path = build_release_document_path(release_id, file_name)
 
     if storage_type == "azure":
-        from azure.identity.aio import DefaultAzureCredential
         from azure.storage.blob.aio import BlobServiceClient
+        from agentcore.utils.azure_credential import get_azure_credential_async
 
         account_url = _get_storage_account_url()
         container_name = _get_release_documents_container(settings_service)
-        credential = DefaultAzureCredential(
-            exclude_environment_credential=True,
-            exclude_interactive_browser_credential=True,
-        )
+        credential = get_azure_credential_async()
         blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
         container_client = blob_service_client.get_container_client(container_name)
         try:
@@ -100,15 +97,12 @@ async def get_release_document(
     storage_type = str(getattr(settings_service.settings, "storage_type", "local") or "local").strip().lower()
 
     if storage_type == "azure":
-        from azure.identity.aio import DefaultAzureCredential
         from azure.storage.blob.aio import BlobServiceClient
+        from agentcore.utils.azure_credential import get_azure_credential_async
 
         account_url = _get_storage_account_url()
         container_name = _get_release_documents_container(settings_service)
-        credential = DefaultAzureCredential(
-            exclude_environment_credential=True,
-            exclude_interactive_browser_credential=True,
-        )
+        credential = get_azure_credential_async()
         blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
         container_client = blob_service_client.get_container_client(container_name)
         blob_client = container_client.get_blob_client(storage_path)
@@ -146,10 +140,8 @@ async def build_release_document_office_viewer_url(
     from azure.storage.blob.aio import BlobServiceClient
 
     container_name = _get_release_documents_container(settings_service)
-    credential = DefaultAzureCredential(
-        exclude_environment_credential=True,
-        exclude_interactive_browser_credential=True,
-    )
+    from agentcore.utils.azure_credential import get_azure_credential_async
+    credential = get_azure_credential_async()
     blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
     try:
         now = datetime.now(timezone.utc)
