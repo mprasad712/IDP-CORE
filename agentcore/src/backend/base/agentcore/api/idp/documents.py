@@ -3,14 +3,21 @@ from typing import Annotated
 from uuid import UUID, uuid4
 from pathlib import Path
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, File, Form, UploadFile, status
+import mimetypes
+import os
+import re
+from loguru import logger
+from fastapi import APIRouter, Depends, HTTPException, File, Form, Response, UploadFile, status
 from sqlmodel import select, or_
 
 from pydantic import BaseModel
 
 from agentcore.api.utils import CurrentActiveUser, DbSession
+from agentcore.services.auth.permissions import normalize_role
+from agentcore.services.database.models.agent.model import Agent
 from agentcore.services.database.models.idp.config import IdpAgent
 from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
+from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
 from agentcore.services.deps import get_storage_service, get_settings_service
 from agentcore.services.idp.pipeline import PipelineError, enqueue_document
 from agentcore.services.storage.service import StorageService
@@ -212,3 +219,61 @@ async def process_documents_bulk(
         else:
             jobs.append({"document_id": str(document_id), "job_id": str(job_id)})
     return {"jobs": jobs, "skipped": skipped}
+
+
+@router.get("/{document_id}/file")
+async def get_document_file(
+    *,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+    document_id: UUID,
+    storage_service: StorageService = Depends(get_storage_service),
+):
+    """Stream the original uploaded document bytes (for the Processed Docs viewer)."""
+    # Scope: root sees all; everyone else only documents whose agent belongs to one of their orgs.
+    role = normalize_role(getattr(current_user, "role", None))
+    stmt = select(IdpDocument).where(IdpDocument.id == document_id)
+    if role != "root":
+        rows = (
+            await session.exec(
+                select(UserOrganizationMembership.org_id).where(
+                    UserOrganizationMembership.user_id == current_user.id,
+                    UserOrganizationMembership.status.in_(["accepted", "active"]),
+                )
+            )
+        ).all()
+        org_ids = [r if not isinstance(r, tuple) else r[0] for r in rows]
+        stmt = (
+            stmt.join(IdpAgent, IdpDocument.agent_id == IdpAgent.id)
+            .join(Agent, IdpAgent.agent_id == Agent.id)
+            .where(Agent.org_id.in_(org_ids))
+        )
+    doc = (await session.exec(stmt)).first()
+    if doc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    # file_path is stored as "{agent_id}/{storage_filename}"; scope reads by the real agent_id.
+    file_name = doc.file_path.split("/", 1)[1] if "/" in doc.file_path else doc.file_path
+    try:
+        data = await storage_service.get_file(agent_id=str(doc.agent_id), file_name=file_name)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored file not found.") from e
+    except Exception as e:
+        logger.exception(f"[idp] failed to read stored document {document_id}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not read the stored document.",
+        ) from e
+
+    media_type = (
+        doc.mime_type
+        or mimetypes.guess_type(doc.original_filename or file_name)[0]
+        or "application/octet-stream"
+    )
+    # Sanitize the filename before putting it in a response header (strip path + CR/LF/quote/semicolon).
+    safe_name = re.sub(r'[\r\n";]', "_", os.path.basename(doc.original_filename or file_name or "document"))
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f'inline; filename="{safe_name}"'},
+    )

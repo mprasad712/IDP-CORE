@@ -467,6 +467,69 @@ async def test_process_endpoint(monkeypatch):
         await _cleanup(agent_id, doc_id)
 
 
+@pytest.mark.anyio
+async def test_pipeline_persists_flat_line_items(monkeypatch):
+    """Flat LLM line-item shape (no `columns`) must still persist via the normalizer."""
+    from agentcore.services.database.models.idp.documents import IdpProcessingJob, IdpExtractedLineItem
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch, result={
+        "headers": {"invoice_number": {"value": "INV-1", "confidence": 0.9}},
+        "line_items": [
+            {"Item": "Widget A", "Qty": "10", "Amount": "50.00"},
+            {"Item": "Gadget B", "Qty": "3", "Amount": "60.00"},
+        ],
+    })
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf())
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            lines = (await session.exec(select(IdpExtractedLineItem).where(IdpExtractedLineItem.job_id == job.id))).all()
+            assert len(lines) == 6  # 2 rows x 3 columns
+            assert {l.column_name for l in lines} == {"Item", "Qty", "Amount"}
+            assert any(l.column_name == "Item" and l.extracted_value == "Widget A" for l in lines)
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_document_file_endpoint(monkeypatch):
+    """GET /documents/{id}/file streams the stored bytes for the viewer."""
+    from fastapi.testclient import TestClient
+    from agentcore.main import create_app
+    from agentcore.services.auth.utils import get_current_active_user
+    from agentcore.api.idp import idp_rbac
+    from agentcore.services.deps import session_scope, get_storage_service
+
+    def mock_user():
+        from types import SimpleNamespace
+        return SimpleNamespace(id=uuid4(), role="root")  # root bypasses org scoping
+
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=b"%PDF-1.4 hello")
+
+    class FileStore:
+        async def get_file(self, agent_id, file_name):
+            return b"%PDF-1.4 hello"
+
+    app = create_app()
+    app.dependency_overrides[get_current_active_user] = mock_user
+    app.dependency_overrides[idp_rbac] = mock_user
+    app.dependency_overrides[get_storage_service] = lambda: FileStore()
+    client = TestClient(app)
+    try:
+        r = client.get(f"/api/v1/idp/documents/{doc_id}/file")
+        assert r.status_code == 200, r.text
+        assert r.content == b"%PDF-1.4 hello"
+        assert "application/pdf" in r.headers.get("content-type", "")
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup(agent_id, doc_id)
+
+
 @pytest.mark.skipif(
     not __import__("agentcore.services.idp.ocr", fromlist=["_paddle_ocr_available"])._paddle_ocr_available,
     reason="PaddleOCR not installed (runs on M4/NVIDIA/Docker/CI)",
