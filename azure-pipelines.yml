@@ -345,6 +345,11 @@ stages:
             --name smtp-password \
             --query value -o tsv)
 
+          AZURE_CLIENT_SECRET=$(az keyvault secret show \
+            --vault-name idpflow-kv-dev-001 \
+            --name agentcore-azure-client-secret \
+            --query value -o tsv)
+
           DB_URL="postgresql+psycopg2://pgadmin:${POSTGRES_PWD}@idpflow-postgres.postgres.database.azure.com:5432/idp_agentic?sslmode=require"
 
           kubectl create secret generic app-secrets \
@@ -354,6 +359,7 @@ stages:
             --from-literal=STORAGE_ACCOUNT_KEY="$STORAGE_KEY" \
             --from-literal=DATABASE_URL="$DB_URL" \
             --from-literal=SMTP_PASSWORD="$SMTP_PWD" \
+            --from-literal=AZURE_CLIENT_SECRET="$AZURE_CLIENT_SECRET" \
             --dry-run=client -o yaml | kubectl apply -f -
 
           echo "Kubernetes secrets applied."

@@ -13,6 +13,8 @@ spec:
     repoURL: https://github.com/mprasad712/IDP-CORE.git
     targetRevision: main
     path: manifests/dev
+    directory:
+      recurse: true
 
   destination:
     server: https://kubernetes.default.svc
