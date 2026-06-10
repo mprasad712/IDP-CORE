@@ -24,6 +24,7 @@ data:
   # ── Azure AD ──────────────────────────────────────────
   AZURE_TENANT_ID: "d8e35409-2aca-4e69-aa95-7378d4c9012b"
   AZURE_CLIENT_ID: "78b4d76c-d8ac-4778-bacd-6cc4ee9855e9"
+  AZURE_CLIENT_SECRET: "agentcore-azure-client-secret"
   # Update AZURE_REDIRECT_URI to your actual public domain after ingress IP is known
   AZURE_REDIRECT_URI: "https://idpflow.4.224.148.136.nip.io/flows"
 
