@@ -16,6 +16,7 @@ split and classification are later tasks (hooks left below).
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
@@ -110,8 +111,13 @@ async def _build_llm(session, model_id: str):
 
 
 def _selected_pages(total_pages: int, cfg) -> set[int]:
-    """Resolve which page numbers to process from the page-selector config."""
+    """Resolve which page numbers to process from the page-selector config.
+
+    Always returns a NON-EMPTY set: an out-of-range request falls back to all pages
+    rather than silently dropping the whole document.
+    """
     total = max(1, total_pages)
+    all_pages = set(range(1, total + 1))
     mode = (cfg.page_selection_mode or "all").lower()
     n = max(1, cfg.first_n_pages)
     if mode == "first_n":
@@ -119,10 +125,29 @@ def _selected_pages(total_pages: int, cfg) -> set[int]:
     if mode == "last_n":
         return set(range(max(1, total - n + 1), total + 1))
     if mode == "range":
+        # A range entirely past the document -> process all (never drop everything).
+        if cfg.page_range_start > total:
+            return all_pages
         start = max(1, cfg.page_range_start)
         end = min(total, max(start, cfg.page_range_end))
-        return set(range(start, end + 1))
-    return set(range(1, total + 1))
+        return set(range(start, end + 1)) or all_pages
+    return all_pages
+
+
+async def _maybe_preprocess(file_bytes: bytes, file_type: str, cfg, flow: "FlowLog") -> bytes:
+    """Apply deskew/rotation (non-fatal) to bytes destined for OCR; returns the bytes."""
+    if not (cfg.fix_skew or cfg.fix_rotation):
+        return file_bytes
+    try:
+        if cfg.fix_skew:
+            file_bytes, angle = await detect_and_correct_skew(file_bytes, file_type)
+            flow.step("preprocess", "ok", f"deskew angle={angle:.2f}")
+        if cfg.fix_rotation:
+            file_bytes, rot = await detect_and_correct_rotation(file_bytes, file_type)
+            flow.step("preprocess", "ok", f"rotation={rot}")
+    except Exception as e:
+        flow.step("preprocess", "warn", f"skipped ({e})")
+    return file_bytes
 
 
 def _split_storage_path(file_path: str) -> tuple[str, str]:
@@ -216,40 +241,50 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         if cfg.allowed_extensions and file_type not in cfg.allowed_extensions and cfg.skip_unmatched:
             raise PipelineError(f"file type '{file_type}' not allowed by this agent")
 
-        # 2. detect digital/scanned
+        # 2. detect digital/scanned (per page)
+        original_bytes = file_bytes
         overall_kind, page_status = text_layer.classify_document(
-            file_bytes, file_type, min_text_length=cfg.min_text_length
+            original_bytes, file_type, min_text_length=cfg.min_text_length
         )
-        doc.page_count = len(page_status)
         flow.step("detect", "ok", f"{overall_kind} ({len(page_status)} page(s))", page_status=page_status)
 
-        is_scanned = overall_kind in ("scanned", "mixed")
+        digital_pages = {int(p) for p, k in page_status.items() if k == text_layer.DIGITAL}
+        scanned_pages = {int(p) for p, k in page_status.items() if k == text_layer.SCANNED}
 
-        # 3. preprocess (scanned only, non-fatal)
-        if is_scanned and (cfg.fix_skew or cfg.fix_rotation):
-            try:
-                if cfg.fix_skew:
-                    file_bytes, angle = await detect_and_correct_skew(file_bytes, file_type)
-                    flow.step("preprocess", "ok", f"deskew angle={angle:.2f}")
-                if cfg.fix_rotation:
-                    file_bytes, rot = await detect_and_correct_rotation(file_bytes, file_type)
-                    flow.step("preprocess", "ok", f"rotation={rot}")
-            except Exception as e:
-                flow.step("preprocess", "warn", f"skipped ({e})")
-
-        # 4. OCR (scanned) or native text (digital)
-        if is_scanned:
-            tokens = await run_paddle_ocr(file_bytes, file_type, cfg.ocr_lang)
+        # 3+4. Read text by page kind. Native text MUST come from the ORIGINAL bytes
+        # (preprocessing rasterizes a PDF and would destroy a digital page's text layer);
+        # OCR runs only when scanned pages exist and never replaces native digital text.
+        tokens: list[dict] = []
+        if overall_kind == text_layer.DIGITAL:
+            _, tokens = text_layer.extract_native_text(original_bytes, file_type)
+            flow.step("native", "ok", f"native text: {len(tokens)} token(s)")
+        elif overall_kind == text_layer.SCANNED:
+            ocr_bytes = await _maybe_preprocess(original_bytes, file_type, cfg, flow)
+            tokens = await run_paddle_ocr(ocr_bytes, file_type, cfg.ocr_lang)
             flow.step("ocr", "ok", f"PaddleOCR {cfg.ocr_lang}: {len(tokens)} token(s)")
-        else:
-            _, tokens = text_layer.extract_native_text(file_bytes, file_type)
-            flow.step("ocr", "ok", f"native text: {len(tokens)} token(s)")
+        else:  # mixed: native text for digital pages, OCR for scanned pages
+            _, native = text_layer.extract_native_text(original_bytes, file_type)
+            tokens += [t for t in native if int(t.get("page_number", 1) or 1) in digital_pages]
+            ocr_bytes = await _maybe_preprocess(original_bytes, file_type, cfg, flow)
+            ocr = await run_paddle_ocr(ocr_bytes, file_type, cfg.ocr_lang)
+            tokens += [t for t in ocr if int(t.get("page_number", 1) or 1) in scanned_pages]
+            flow.step("ocr", "ok", f"mixed: native {len(digital_pages)} digital + OCR {len(scanned_pages)} scanned page(s)")
 
-        # page selection
-        total_pages = max([int(t.get("page_number", 1) or 1) for t in tokens], default=1)
+        # Authoritative page count = max(classified pages, highest token page) so multi-sheet
+        # office files (one classification entry, many token "pages") are NOT truncated.
+        token_max = max([int(t.get("page_number", 1) or 1) for t in tokens], default=1)
+        total_pages = max(len(page_status), token_max)
+        doc.page_count = total_pages
+
+        # page selection (never empty; uses the authoritative page count)
         selected = _selected_pages(total_pages, cfg)
         tokens = [t for t in tokens if int(t.get("page_number", 1) or 1) in selected]
-        flow.step("pages", "ok", f"selected {sorted(selected)} of {total_pages}")
+        dropped = total_pages - len(selected)
+        status = "warn" if dropped > 0 else "ok"
+        detail = f"selected {sorted(selected)} of {total_pages}"
+        if dropped > 0:
+            detail += f" ({dropped} page(s) skipped by Page Selector)"
+        flow.step("pages", status, detail)
 
         # merged, page-numbered, layout-reconstructed text (citation-friendly)
         merged_text = build_merged_text(tokens)
@@ -278,8 +313,15 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         except Exception as e:
             raise PipelineError(f"extraction failed: {e}") from e
 
+        # Unify failure semantics across extraction modes: extract_dynamic swallows
+        # LLM/transport errors into an {"error": ...} dict instead of raising. If the
+        # extractor reports an error AND produced no fields, treat it as a fatal failure
+        # (same terminal state as a named-config error) rather than a clean pending_review.
         if isinstance(extracted, dict) and extracted.get("error"):
-            flow.step("extract", "warn", f"extractor reported: {extracted.get('error')}")
+            n_fields = len(extracted.get("headers", {})) + len(extracted.get("line_items", []))
+            if n_fields == 0:
+                raise PipelineError(f"extraction failed: {extracted.get('error')}")
+            flow.step("extract", "warn", f"partial extraction: {extracted.get('error')}")
 
         # 6. save. NOTE: save_extraction_results commits internally, so extracted rows
         # persist even if a later step fails — intentional partial-result persistence
@@ -414,6 +456,39 @@ async def enqueue_document(session, document_id: UUID) -> UUID:
     await session.refresh(job)
 
     queue = get_queue_service()
-    queue.create_queue(str(job.id))
-    queue.start_job(str(job.id), process_document(document_id, job.id))
+    job_key = str(job.id)
+    queue.create_queue(job_key)
+    queue.start_job(job_key, process_document(document_id, job.id))
+
+    # Reap the queue entry once the job finishes. JobQueueService only auto-cleans
+    # cancelled/errored tasks; process_document never raises, so without this every
+    # processed document would leak a queue entry forever. The monitor runs as a
+    # separate task so cleanup_job (which cancels) is never called on the live job task.
+    try:
+        _, _, task, _ = queue.get_queue_data(job_key)
+        if task is not None:
+            _spawn_monitor(_reap_when_done(queue, job_key, task))
+    except Exception:  # pragma: no cover - reaping is best-effort
+        logger.warning(f"[pipeline] could not schedule queue reap for {job_key}")
     return job.id
+
+
+# Hold strong references to detached monitor tasks so they are not GC'd mid-run.
+_MONITOR_TASKS: set = set()
+
+
+def _spawn_monitor(coro) -> None:
+    task = asyncio.create_task(coro)
+    _MONITOR_TASKS.add(task)
+    task.add_done_callback(_MONITOR_TASKS.discard)
+
+
+async def _reap_when_done(queue, job_key: str, job_task) -> None:
+    try:
+        await asyncio.wait([job_task])
+    except Exception:  # pragma: no cover
+        pass
+    try:
+        await queue.cleanup_job(job_key)  # job_task is done now -> no self-cancel
+    except Exception:  # pragma: no cover
+        logger.warning(f"[pipeline] queue cleanup failed for {job_key}")

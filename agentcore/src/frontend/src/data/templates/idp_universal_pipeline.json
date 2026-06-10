@@ -126,8 +126,8 @@
               "selection_mode": {
                 "_input_type": "DropdownInput", "advanced": false, "display_name": "Selection Mode", "dynamic": false,
                 "info": "How to select pages: first N pages, last N pages, a custom range, or all pages.",
-                "list": false, "name": "selection_mode", "options": ["first_n","last_n","range","all"],
-                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": "first_n"
+                "list": false, "name": "selection_mode", "options": ["all","first_n","last_n","range"],
+                "placeholder": "", "required": false, "show": true, "title_case": false, "type": "str", "value": "all"
               },
               "first_n_pages": {
                 "_input_type": "IntInput", "advanced": false, "display_name": "Number of Pages", "dynamic": false,

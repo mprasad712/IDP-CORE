@@ -80,7 +80,7 @@ def _digital_pdf() -> bytes:
     return buf.getvalue()
 
 
-async def _setup_document(session, *, graph, file_bytes=None, default_rule_action="pending_review", extra=None):
+async def _setup_document(session, *, graph, file_bytes=None, file_type="pdf", default_rule_action="pending_review", extra=None):
     """Create base Agent (with graph), IdpAgent, and a stored IdpDocument. Returns (agent_id, doc_id)."""
     from agentcore.services.database.models.agent.model import Agent
     from agentcore.services.database.models.idp.config import IdpAgent
@@ -100,14 +100,14 @@ async def _setup_document(session, *, graph, file_bytes=None, default_rule_actio
     session.add(idp_agent)
     await session.flush()
 
-    storage_filename = f"idp_{doc_id}.pdf"
+    storage_filename = f"idp_{doc_id}.{file_type}"
     if file_bytes is not None:
         # pipeline.get_storage_service is monkeypatched to the in-memory mock
         await pipeline.get_storage_service().save_file(agent_id=str(agent_id), file_name=storage_filename, data=file_bytes)
 
     doc = IdpDocument(
-        id=doc_id, agent_id=agent_id, original_filename="test.pdf",
-        file_path=f"{agent_id}/{storage_filename}", file_type="pdf",
+        id=doc_id, agent_id=agent_id, original_filename=f"test.{file_type}",
+        file_path=f"{agent_id}/{storage_filename}", file_type=file_type,
         file_size_bytes=len(file_bytes or b""), source="upload", status="queued",
     )
     session.add(doc)
@@ -177,8 +177,9 @@ async def test_pipeline_digital_happy_path(monkeypatch):
             assert job.extraction_mode_used == "dynamic_prompt"
             assert isinstance(job.log, list) and job.log
             steps = [e["step"] for e in job.log]
-            for s in ("load", "detect", "ocr", "extract", "route", "finalize"):
-                assert s in steps
+            for s in ("load", "detect", "native", "pages", "extract", "route", "finalize"):
+                assert s in steps  # digital doc -> native text (no OCR)
+            assert "ocr" not in steps  # a digital PDF must NOT be re-OCR'd
 
             headers = (await session.exec(select(IdpExtractedHeader).where(IdpExtractedHeader.job_id == job.id))).all()
             assert any(h.field_name == "invoice_number" and h.extracted_value == "INV-001" for h in headers)
@@ -294,6 +295,101 @@ async def test_pipeline_missing_model_in_graph(monkeypatch):
             assert doc.status == "failed"
             job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
             assert "model" in (job.error_message or "").lower()
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+def test_selected_pages_never_empty():
+    """Page selection must never drop the whole document; out-of-range falls back to all."""
+    from types import SimpleNamespace as NS
+
+    def cfg(**k):
+        base = dict(page_selection_mode="all", first_n_pages=3, page_range_start=1, page_range_end=5)
+        base.update(k)
+        return NS(**base)
+
+    sel = pipeline._selected_pages
+    assert sel(5, cfg(page_selection_mode="all")) == {1, 2, 3, 4, 5}
+    assert sel(12, cfg(page_selection_mode="first_n", first_n_pages=3)) == {1, 2, 3}
+    assert sel(8, cfg(page_selection_mode="last_n", first_n_pages=2)) == {7, 8}
+    # range entirely past the doc -> all pages (was: empty set, dropping everything)
+    assert sel(5, cfg(page_selection_mode="range", page_range_start=8, page_range_end=10)) == {1, 2, 3, 4, 5}
+    # normal in-range
+    assert sel(10, cfg(page_selection_mode="range", page_range_start=2, page_range_end=4)) == {2, 3, 4}
+
+
+@pytest.mark.anyio
+async def test_pipeline_extraction_error_is_fatal(monkeypatch):
+    """An extractor error with zero fields is fatal (consistent across modes), not a clean review."""
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    # extract_dynamic swallows LLM errors into {"error":...}; with zero fields -> must fail
+    _patch_extraction(monkeypatch, result={"headers": {}, "line_items": [], "error": "LLM timeout"})
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf())
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            assert doc.status == "failed"
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            assert "LLM timeout" in (job.error_message or "")
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_pipeline_multisheet_xlsx_keeps_all_sheets(monkeypatch, mock_storage):
+    """A multi-sheet workbook must process ALL sheets (regression: total_pages truncated to sheet 1)."""
+    from openpyxl import Workbook
+    from agentcore.services.database.models.idp.documents import IdpDocument
+    from agentcore.services.deps import session_scope
+
+    wb = Workbook()
+    wb.active["A1"] = "alpha sheet one"
+    s2 = wb.create_sheet("Second")
+    s2["A1"] = "beta sheet two"
+    buf = io.BytesIO()
+    wb.save(buf)
+    xlsx = buf.getvalue()
+
+    _patch_extraction(monkeypatch)
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(
+            session, graph=_graph(str(uuid4())), file_bytes=xlsx, file_type="xlsx"
+        )
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            assert doc.page_count == 2  # both sheets counted (was 1 -> sheet 2 dropped)
+        saved = [v for (a, f), v in mock_storage.store.items() if f.endswith("ocr_text.txt")]
+        assert saved and b"beta sheet two" in saved[0]  # sheet 2 content survived
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_enqueue_reaps_queue(monkeypatch):
+    """enqueue_document must clean up its JobQueueService entry once the job finishes (no leak)."""
+    import asyncio as _asyncio
+    from agentcore.services.deps import session_scope, get_queue_service
+
+    _patch_extraction(monkeypatch)
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf())
+    try:
+        async with session_scope() as session:
+            job_id = await pipeline.enqueue_document(session, doc_id)
+        qs = get_queue_service()
+        assert str(job_id) in qs._queues  # registered while running
+        for _ in range(80):  # wait for job task + monitor to reap
+            if str(job_id) not in qs._queues:
+                break
+            await _asyncio.sleep(0.1)
+        assert str(job_id) not in qs._queues, "queue entry leaked after job completion"
     finally:
         await _cleanup(agent_id, doc_id)
 
