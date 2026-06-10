@@ -26,12 +26,12 @@ data:
   AZURE_CLIENT_ID: "78b4d76c-d8ac-4778-bacd-6cc4ee9855e9"
   AZURE_CLIENT_SECRET: "agentcore-azure-client-secret"
   # Update AZURE_REDIRECT_URI to your actual public domain after ingress IP is known
-  AZURE_REDIRECT_URI: "https://idpflow.4.224.148.136.nip.io/flows"
+  AZURE_REDIRECT_URI: "https://idpflow.135.235.254.153.nip.io/flows"
 
   # ── Service URLs (K8s internal DNS) ──────────────────
   MODEL_SERVICE_URL: "http://model-service-svc:8001"
   FRONTEND_URL: "http://frontend-svc"
-  CORS_ALLOW_ORIGIN: "http://frontend-svc;http://backend-svc:7860;https://idpflow.4.224.148.136.nip.io"
+  CORS_ALLOW_ORIGIN: "http://frontend-svc;http://backend-svc:7860;https://idpflow.135.235.254.153.nip.io"
   AGENTCORE_PUBLISH_URL: "http://backend-svc:5839"
 
   # ── Redis ─────────────────────────────────────────────

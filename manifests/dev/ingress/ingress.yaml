@@ -11,10 +11,10 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - idpflow.4.224.148.136.nip.io
+        - idpflow.135.235.254.153.nip.io
       secretName: idpflow-tls
   rules:
-    - host: idpflow.4.224.148.136.nip.io
+    - host: idpflow.135.235.254.153.nip.io
       http:
         paths:
           - path: /
