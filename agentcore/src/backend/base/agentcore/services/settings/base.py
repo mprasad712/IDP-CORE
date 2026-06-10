@@ -121,6 +121,7 @@ class Settings(BaseSettings):
     redis_host: str = os.getenv("REDIS_HOST")
     redis_port: int = os.getenv("REDIS_PORT")
     redis_db: int = 0
+    redis_password: str = os.getenv("REDIS_PASSWORD", "")
     redis_entra_scope: str = os.getenv("REDIS_ENTRA_SCOPE", "")
     redis_entra_object_id: str = os.getenv("REDIS_ENTRA_OBJECT_ID", "")
     redis_entra_refresh_margin_seconds: int = int(

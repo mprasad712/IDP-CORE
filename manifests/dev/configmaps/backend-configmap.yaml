@@ -40,11 +40,9 @@ data:
   REDIS_SSL: "True"
   REDIS_CACHE_EXPIRE: "3600"
   REDIS_SOCKET_CONNECTION_TIMEOUT: "5"
-  REDIS_ENTRA_SCOPE: "https://redis.azure.com/.default"
   REDIS_CLUSTER_POLICY: "OSSCluster"
   REDIS_CLUSTER_ENABLED: "false"
   AUTH_REDIS_SECURITY_KEYS_ENABLED: "false"
-  REDIS_ENTRA_OBJECT_ID: "570d8258-0340-4b51-a12f-f2f3e09e1565"
 
   # ── Azure Storage ─────────────────────────────────────
   STORAGE_TYPE: "azure"
@@ -60,6 +58,7 @@ data:
   AGENTCORE_KEY_VAULT_AZURE_CLIENT_SECRET_SECRET_NAME: "agentcore-azure-client-secret"
   AGENTCORE_KEY_VAULT_AZURE_STORAGE_CONNECTION_STRING_SECRET_NAME: "agentcore-azure-storage-connection-string"
   AGENTCORE_KEY_VAULT_MODEL_SERVICE_API_KEY_SECRET_NAME: "agentcore-model-service-api-key"
+  AGENTCORE_KEY_VAULT_REDIS_PASSWORD_SECRET_NAME: "agentcore-redis-password"
   # AGENTCORE_KEY_VAULT_RABBITMQ_URL_SECRET_NAME: "agentcore-rabbitmq-url"
   AGENTCORE_KEY_VAULT_INTERNAL_SECRET_SECRET_NAME: "agentcore-internal-secret"
 

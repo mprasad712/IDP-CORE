@@ -109,6 +109,7 @@ def resolve_backend_secrets_from_key_vault() -> None:
     # These don't break startup if missing (e.g. BACKEND_SERVICE_API_KEY is only needed
     # on deployments that accept cross-region gateway calls).
     optional_mappings = {
+        "REDIS_PASSWORD": "AGENTCORE_KEY_VAULT_REDIS_PASSWORD_SECRET_NAME",
         "BACKEND_SERVICE_API_KEY": "AGENTCORE_KEY_VAULT_BACKEND_SERVICE_API_KEY_SECRET_NAME",
         "AZURE_AI_SEARCH_ENDPOINT": "AGENTCORE_KEY_VAULT_AZURE_AI_SEARCH_ENDPOINT_SECRET_NAME",
         "AZURE_AI_SEARCH_API_KEY": "AGENTCORE_KEY_VAULT_AZURE_AI_SEARCH_API_KEY_SECRET_NAME",
