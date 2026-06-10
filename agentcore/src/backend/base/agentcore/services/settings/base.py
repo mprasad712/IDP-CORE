@@ -461,13 +461,9 @@ class Settings(BaseSettings):
     github_repo_url: str = ""
     """GitHub repo URL — required when git_provider is 'github' or 'both'.
     Example: https://github.com/owner/repo"""
-    github_token: str = ""
-    """PAT token with Contents read/write access for the GitHub repo."""
     ado_repo_url: str = ""
     """Azure DevOps repo URL — required when git_provider is 'ado' or 'both'.
     Example: https://dev.azure.com/org/project/_git/repo"""
-    ado_token: str = ""
-    """PAT token with repo write access for the Azure DevOps repo."""
     git_branch: str = "main"
     """Branch to commit the manifest file to (applies to both providers)."""
     git_manifest_file: str = "agents.yaml"
