@@ -605,10 +605,10 @@ export default function ProcessedDocsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filterDocType, setFilterDocType] = useState("all");
 
-  // Live data from the IDP backend (replaces the old hardcoded SEED_DOCS).
+  // Live data from the IDP backend, plus Manas's demo docs (SEED_DOCS) kept as samples.
   const { data: docsPage } = useGetProcessedDocs({ size: 100 });
   const docs: ProcessedDoc[] = useMemo(
-    () => (docsPage?.items ?? []).map(listDocToPage),
+    () => [...(docsPage?.items ?? []).map(listDocToPage), ...SEED_DOCS],
     [docsPage],
   );
   // Extracted fields/line-items come from the detail endpoint, fetched on select.
