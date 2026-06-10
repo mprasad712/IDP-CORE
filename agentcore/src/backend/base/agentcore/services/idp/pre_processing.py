@@ -96,8 +96,9 @@ async def detect_and_correct_skew(file_bytes: bytes, file_type: str) -> tuple[by
             doc = fitz.open(stream=file_bytes, filetype="pdf")
             doc_out = fitz.open()
             avg_angle = 0.0
+            page_count = len(doc)
 
-            for page_num in range(len(doc)):
+            for page_num in range(page_count):
                 page = doc[page_num]
                 pix = page.get_pixmap(dpi=150)
                 page_img_bytes = pix.tobytes("png")
@@ -124,7 +125,7 @@ async def detect_and_correct_skew(file_bytes: bytes, file_type: str) -> tuple[by
             out_bytes = doc_out.tobytes()
             doc.close()
             doc_out.close()
-            return out_bytes, avg_angle / len(doc) if len(doc) > 0 else 0.0
+            return out_bytes, (avg_angle / page_count if page_count > 0 else 0.0)
 
         except Exception as e:
             logger.error(f"[Pre-Processing] PDF deskew failed: {e}")

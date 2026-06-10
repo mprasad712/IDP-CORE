@@ -36,6 +36,60 @@ def get_ocr_instance(lang: str):
 
     return _ocr_instances[ocr_lang]
 
+def _extract_spreadsheet_text(file_bytes: bytes) -> list[dict]:
+    """Extract cell text from an Excel workbook as OCR-style tokens (one per non-empty cell).
+
+    Office formats are not images; OCR would yield nothing. Each worksheet maps to a page_number.
+    """
+    import io
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    except Exception as e:
+        logger.error(f"[OCR] Failed to read spreadsheet: {e}")
+        return []
+
+    results = []
+    try:
+        for sheet_index, ws in enumerate(wb.worksheets, start=1):
+            for row in ws.iter_rows():
+                for cell in row:
+                    val = cell.value
+                    if val is None or str(val).strip() == "":
+                        continue
+                    results.append({
+                        "text": str(val).strip(),
+                        "bounding_box": None,
+                        "confidence": 1.0,
+                        "page_number": sheet_index,
+                    })
+    finally:
+        wb.close()
+    return results
+
+def _extract_docx_text(file_bytes: bytes) -> list[dict]:
+    """Extract paragraph and table text from a Word document as OCR-style tokens."""
+    import io
+    try:
+        import docx
+        document = docx.Document(io.BytesIO(file_bytes))
+    except Exception as e:
+        logger.error(f"[OCR] Failed to read docx: {e}")
+        return []
+
+    results = []
+    for para in document.paragraphs:
+        text = (para.text or "").strip()
+        if text:
+            results.append({"text": text, "bounding_box": None, "confidence": 1.0, "page_number": 1})
+    for table in document.tables:
+        for table_row in table.rows:
+            for cell in table_row.cells:
+                text = (cell.text or "").strip()
+                if text:
+                    results.append({"text": text, "bounding_box": None, "confidence": 1.0, "page_number": 1})
+    return results
+
 async def run_paddle_ocr(file_bytes: bytes, file_type: str, lang: str = "en") -> list[dict]:
     """Run PaddleOCR on the given file bytes.
 
@@ -45,6 +99,12 @@ async def run_paddle_ocr(file_bytes: bytes, file_type: str, lang: str = "en") ->
     """
     file_type = file_type.lower().strip(".")
     is_pdf = (file_type == "pdf")
+
+    # Office formats are not images — extract their native text instead of OCR.
+    if file_type in ("xlsx", "xls"):
+        return _extract_spreadsheet_text(file_bytes)
+    if file_type == "docx":
+        return _extract_docx_text(file_bytes)
 
     # Attempt to load and run PaddleOCR
     ocr_model = get_ocr_instance(lang)
