@@ -56,14 +56,6 @@ resource "azurerm_key_vault" "kv" {
   soft_delete_retention_days = 7
 }
 
-# Grant pipeline service principal read access to Key Vault secrets
-resource "azurerm_key_vault_access_policy" "pipeline_sp" {
-  key_vault_id = azurerm_key_vault.kv.id
-  tenant_id    = data.azurerm_client_config.current.tenant_id
-  object_id    = "3d2780f7-b7f9-40c7-bf11-e53c940064bc"
-
-  secret_permissions = ["Get", "List"]
-}
 
 # =========================================
 # POSTGRESQL FLEXIBLE SERVER
