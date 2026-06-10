@@ -327,19 +327,22 @@ stages:
 
           kubectl create namespace idpflow --dry-run=client -o yaml | kubectl apply -f -
 
+          # Fetch a secret from Key Vault — errors go to stderr so they are visible in pipeline logs
           fetch_kv_secret() {
             local name="$1"
             local value
             value=$(az keyvault secret show \
               --vault-name idpflow-kv-dev-001 \
               --name "$name" \
-              --query value -o tsv 2>&1) || {
-              echo "##[error] Failed to fetch KV secret '$name': $value"
-              exit 1
-            }
+              --query value -o tsv 2>&1)
+            local rc=$?
+            if [ $rc -ne 0 ]; then
+              echo "##[error]Failed to fetch KV secret '$name' (exit $rc): $value" >&2
+              return 1
+            fi
             if [ -z "$value" ]; then
-              echo "##[error] KV secret '$name' returned empty value — aborting."
-              exit 1
+              echo "##[error]KV secret '$name' returned empty value — secret may not exist in Key Vault" >&2
+              return 1
             fi
             echo "$value"
           }
@@ -353,10 +356,11 @@ stages:
           STORAGE_KEY=$(az storage account keys list \
             --account-name idpflowappstore1 \
             --resource-group idpflow-rg \
-            --query "[0].value" -o tsv) || {
-            echo "##[error] Failed to fetch storage account key"
+            --query "[0].value" -o tsv)
+          if [ -z "$STORAGE_KEY" ]; then
+            echo "##[error]Failed to fetch storage account key" >&2
             exit 1
-          }
+          fi
 
           DB_URL="postgresql+psycopg2://pgadmin:${POSTGRES_PWD}@idpflow-postgres.postgres.database.azure.com:5432/idp_agentic?sslmode=require"
 
