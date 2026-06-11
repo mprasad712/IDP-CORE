@@ -113,9 +113,23 @@ resource "azurerm_kubernetes_cluster" "aks" {
     type = "SystemAssigned"
   }
 
+  oidc_issuer_enabled       = true
+  workload_identity_enabled = true
+
   tags = {
     environment = "dev"
   }
+}
+
+# =========================================
+# REDIS ENTRA ACCESS POLICY
+# =========================================
+# Grant the backend workload identity (UAMI) Data Owner access on Redis.
+# The object_id must match the Object ID of the UAMI whose client-id is
+# annotated on the backend-sa service account (d82aece2-f81b-42fc-a53e-15d6cba3b613).
+resource "azurerm_managed_redis_access_policy_assignment" "redis_backend" {
+  managed_redis_id = azurerm_managed_redis.redis.id
+  object_id        = "3d2780f7-b7f9-40c7-bf11-e53c940064bc"
 }
 
 # Allow AKS to pull images from ACR

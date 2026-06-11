@@ -4,4 +4,4 @@ metadata:
   name: backend-sa
   namespace: idpflow
   annotations:
-    azure.workload.identity/client-id: "d82aece2-f81b-42fc-a53e-15d6cba3b613"
+    azure.workload.identity/client-id: "d82aece2-f81b-42fc-a53e-15d6cba3b613"  # Replace with idpflow-mi's Client ID from Azure portal
