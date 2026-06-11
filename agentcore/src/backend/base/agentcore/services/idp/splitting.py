@@ -145,6 +145,7 @@ async def materialize_children(
     # Open PDF
     pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
     child_ids: list[UUID] = []
+    saved_files: list[str] = []  # track stored child files to clean up if the commit fails
 
     for start, end in boundaries:
         # Extract pages
@@ -161,6 +162,7 @@ async def materialize_children(
             file_name=child_file_name,
             data=child_bytes,
         )
+        saved_files.append(child_file_name)
 
         # Config override to prevent infinite recursion
         child_extra = (parent_doc.extra or {}).copy()
@@ -194,7 +196,18 @@ async def materialize_children(
         child_ids.append(child_id)
 
     pdf_doc.close()
-    await session.commit()
+    try:
+        await session.commit()
+    except Exception:
+        # The child rows failed to commit — delete the child files we already wrote so storage
+        # isn't left with orphans the DB doesn't reference. Best-effort; re-raise the original.
+        await session.rollback()
+        for fn in saved_files:
+            try:
+                await storage.delete_file(agent_id=agent_part, file_name=fn)
+            except Exception:  # pragma: no cover - cleanup is best-effort
+                logger.warning(f"[Multi-Doc Split] could not clean up orphaned split file {fn}")
+        raise
 
     logger.info(f"[Multi-Doc Split] Created {len(child_ids)} child documents from parent {parent_doc.id}.")
     return child_ids

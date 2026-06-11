@@ -246,6 +246,11 @@ async def _hook_split(session, storage, doc, tokens, page_status, cfg, flow: "Fl
     """
     if not cfg.multi_doc_split:
         return None
+    # A document that is itself a split child must never be split again (it shares the
+    # parent's agent, so cfg.multi_doc_split is still True). This is the real recursion guard.
+    if getattr(doc, "parent_document_id", None) is not None:
+        flow.step("split", "ok", "child document — split skipped (already split from a parent)")
+        return None
     try:
         from agentcore.services.idp.splitting import detect_document_boundaries, materialize_children
     except ImportError:
@@ -256,7 +261,11 @@ async def _hook_split(session, storage, doc, tokens, page_status, cfg, flow: "Fl
         if not boundaries or len(boundaries) < 2:
             flow.step("split", "ok", "single document (no split)")
             return None
-        child_ids = await materialize_children(session, storage, doc, boundaries)
+        # Run on an ISOLATED session: materialize_children commits internally, so a failure
+        # there must not poison the main pipeline session (children are committed + visible to
+        # the caller's enqueue either way).
+        async with session_scope() as hook_session:
+            child_ids = await materialize_children(hook_session, storage, doc, boundaries)
         flow.step("split", "ok", f"split into {len(child_ids)} child document(s)")
         return child_ids or None
     except Exception as e:
@@ -269,13 +278,26 @@ async def _hook_detect(session, document_id: UUID, file_bytes: bytes, file_type:
     if not cfg.detect_enabled:
         return
     try:
-        from agentcore.services.idp.visual_detection import detect_and_persist
+        from agentcore.services.idp.visual_detection import detect_and_persist, OPENCV_AVAILABLE, PYZBAR_AVAILABLE
     except ImportError:
         flow.step("detect_elements", "warn", "visual detection persistence not available yet")
         return
+    # Don't report a silent "0 detected" when NO backend can run — that reads as
+    # "ran, found nothing" when really nothing executed. (opencv does signatures/checkboxes;
+    # pyzbar does QR/barcode — either alone is still a working backend.)
+    if not OPENCV_AVAILABLE and not PYZBAR_AVAILABLE:
+        flow.step("detect_elements", "warn", "detection backend unavailable (opencv + pyzbar missing) — skipped")
+        return
     try:
-        ids = await detect_and_persist(session, document_id, file_bytes, file_type, cfg.detect_enabled_types)
-        flow.step("detect_elements", "ok", f"{len(ids)} element(s) detected")
+        # Isolated session: detect_and_persist commits internally; a failure must not poison main.
+        async with session_scope() as hook_session:
+            ids = await detect_and_persist(hook_session, document_id, file_bytes, file_type, cfg.detect_enabled_types)
+        detail = f"{len(ids)} element(s) detected"
+        if not OPENCV_AVAILABLE:
+            detail += " (signature/checkbox skipped — opencv not installed)"
+        if not PYZBAR_AVAILABLE:
+            detail += " (QR/barcode skipped — pyzbar not installed)"
+        flow.step("detect_elements", "ok", detail)
     except Exception as e:
         flow.step("detect_elements", "warn", f"skipped ({e})")
 
@@ -294,10 +316,13 @@ async def _hook_classify(session, document_id: UUID, base_agent, merged_text: st
         return
     try:
         org_id = getattr(base_agent, "org_id", None)
-        result = await classify_and_persist(
-            session, document_id, merged_text, org_id,
-            auto_select=cfg.classify_auto_select, threshold=cfg.classify_threshold,
-        )
+        # Isolated session: classify_and_persist commits internally; a failure must not poison
+        # the main pipeline session (it would otherwise crash extraction/finalize).
+        async with session_scope() as hook_session:
+            result = await classify_and_persist(
+                hook_session, document_id, merged_text, org_id,
+                auto_select=cfg.classify_auto_select, threshold=cfg.classify_threshold,
+            )
         result = result if isinstance(result, dict) else {}
         sel = result.get("selected_config_id")
         if sel and cfg.classify_auto_select:
@@ -455,11 +480,21 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         # the children are normal standalone docs that process independently.
         child_ids = await _hook_split(session, storage, doc, tokens, page_status, cfg, flow)
         if child_ids:
+            enqueued_ok = 0
             for cid in child_ids:
                 try:
                     await enqueue_document(session, cid)
-                except Exception as e:  # pragma: no cover - one bad child must not abort the rest
+                    enqueued_ok += 1
+                except Exception as e:  # one bad child must not abort the rest
                     flow.step("split", "warn", f"could not enqueue child {cid}: {e}")
+            # Don't mark the parent 'split' (a successful terminal state) if NOTHING was
+            # enqueued — that would silently drop the document. Fail it so it's visible/retryable.
+            if enqueued_ok == 0:
+                raise PipelineError(
+                    f"multi-doc split produced {len(child_ids)} child document(s) but none could be enqueued"
+                )
+            if enqueued_ok < len(child_ids):
+                flow.step("split", "warn", f"only {enqueued_ok}/{len(child_ids)} child document(s) enqueued")
             doc = await session.get(IdpDocument, document_id)
             doc.status = "split"
             doc.processing_completed_at = _utcnow()
@@ -528,13 +563,26 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                 )
                 flow.step("long_doc", "ok", f"{len(sections)} section(s) -> {len(chunk_texts)} chunk(s)")
                 results: list[dict] = []
+                last_err: str | None = None
                 for i, ct in enumerate(chunk_texts):
                     try:
-                        results.append(await _extract_text(session, cfg, llm, ct))
+                        res = await _extract_text(session, cfg, llm, ct)
+                        # extract_dynamic swallows LLM/transport errors into {"error":...} rather
+                        # than raising; surface that per chunk so a failed chunk isn't silent.
+                        if isinstance(res, dict) and res.get("error"):
+                            last_err = str(res.get("error"))
+                            flow.step("long_doc", "warn", f"chunk {i + 1}/{len(chunk_texts)} error: {last_err}")
+                        results.append(res)
                     except PipelineError:
                         raise
                     except Exception as e:
+                        last_err = str(e)
                         flow.step("long_doc", "warn", f"chunk {i + 1}/{len(chunk_texts)} failed ({e})")
+                # If chunking produced chunks but EVERY one failed, treat it as a fatal
+                # extraction failure (consistent with the single-pass path), not a silent
+                # zero-field pending_review.
+                if chunk_texts and not results:
+                    raise PipelineError(f"extraction failed: all {len(chunk_texts)} chunk(s) failed ({last_err})")
                 extracted = long_doc.merge_chunk_extractions(results) if results else {"headers": {}, "line_items": []}
             else:
                 extracted = await _extract_text(session, cfg, llm, merged_text)
@@ -697,8 +745,24 @@ async def enqueue_document(session, document_id: UUID) -> UUID:
 
     queue = get_queue_service()
     job_key = str(job.id)
-    queue.create_queue(job_key)
-    queue.start_job(job_key, process_document(document_id, job.id))
+    coro = process_document(document_id, job.id)
+    try:
+        queue.create_queue(job_key)
+        queue.start_job(job_key, coro)
+    except Exception as e:
+        coro.close()  # the task was never scheduled — close it so it isn't "never awaited"
+        # The job row was already committed; if it can't actually be started, mark it failed
+        # so it doesn't sit 'queued' forever with no running task (a phantom job).
+        logger.exception(f"[pipeline] could not start job {job_key}; marking it failed")
+        try:
+            job.status = "failed"
+            job.error_message = f"could not start background job: {e}"[:2000]
+            job.completed_at = _utcnow()
+            session.add(job)
+            await session.commit()
+        except Exception:  # pragma: no cover - best-effort
+            await session.rollback()
+        raise PipelineError(f"could not start background job for document {document_id}") from e
 
     # Reap the queue entry once the job finishes. JobQueueService only auto-cleans
     # cancelled/errored tasks; process_document never raises, so without this every

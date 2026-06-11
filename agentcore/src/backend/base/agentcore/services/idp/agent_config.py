@@ -134,6 +134,24 @@ def _to_float(v, default: float) -> float:
         return default
 
 
+def _as_bool(v, default: bool) -> bool:
+    """Coerce a config value to bool. Strings are interpreted ('false'/'0'/'no' -> False)
+    rather than using truthiness (which would make the string 'false' True)."""
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "1", "yes", "y", "on"):
+            return True
+        if s in ("false", "0", "no", "n", "off", ""):
+            return False
+    return default
+
+
 def _parse_angles(v) -> list[int]:
     if isinstance(v, str):
         out = []
@@ -224,15 +242,15 @@ async def resolve_pipeline_config(
         confidence_threshold=confidence_threshold,
         multi_doc_split=bool(idp_agent.multi_doc_split),
         ocr_lang=ocr_lang,
-        classify_enabled=bool(extra.get("classify_enabled", False)),
-        classify_auto_select=bool(extra.get("classify_auto_select", True)),
+        classify_enabled=_as_bool(extra.get("classify_enabled"), False),
+        classify_auto_select=_as_bool(extra.get("classify_auto_select"), True),
         classify_threshold=_to_float(extra.get("classify_threshold"), 0.7),
-        detect_enabled=bool(extra.get("detect_enabled", False)),
+        detect_enabled=_as_bool(extra.get("detect_enabled"), False),
         detect_enabled_types=detect_enabled_types,
-        math_reconcile_enabled=bool(extra.get("math_reconcile_enabled", False)),
+        math_reconcile_enabled=_as_bool(extra.get("math_reconcile_enabled"), False),
         math_reconcile_max_attempts=_to_int(extra.get("math_reconcile_max_attempts"), 2),
-        long_doc_enabled=bool(extra.get("long_doc_enabled", True)),
+        long_doc_enabled=_as_bool(extra.get("long_doc_enabled"), True),
         long_doc_max_pages=_to_int(extra.get("long_doc_max_pages"), 8),
         long_doc_max_tokens=_to_int(extra.get("long_doc_max_tokens"), 12000),
-        entity_linking_enabled=bool(extra.get("entity_linking_enabled", True)),
+        entity_linking_enabled=_as_bool(extra.get("entity_linking_enabled"), True),
     )

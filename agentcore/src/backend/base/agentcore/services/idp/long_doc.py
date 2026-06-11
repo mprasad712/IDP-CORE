@@ -117,11 +117,47 @@ async def persist_sections(session, document_id: UUID, sections: list[dict]) -> 
     await session.commit()
 
 
+def _split_text_by_tokens(text: str, limit: int) -> list[str]:
+    """Fixed-size split of one text block into ~``limit``-token pieces (token ~ 4 chars).
+
+    Breaks at the nearest newline/space before the cut so lines aren't sliced mid-word. If the
+    block opens with a ``===== PAGE N =====`` citation header, that header is repeated at the
+    top of every piece so each sub-chunk stays attributable to its page.
+    """
+    max_chars = max(4000, limit * 4)
+    if len(text) <= max_chars:
+        return [text] if text.strip() else []
+
+    # Preserve the page-citation header across sub-chunks.
+    header = ""
+    first_line = text.split("\n", 1)[0].strip()
+    if _PAGE_HEADER_RE.match(first_line):
+        header = first_line + "\n"
+
+    parts: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        end = min(n, i + max_chars)
+        if end < n:
+            brk = text.rfind("\n", i, end)
+            if brk <= i:
+                brk = text.rfind(" ", i, end)
+            if brk > i:
+                end = brk
+        piece = text[i:end]
+        if piece.strip():
+            # Re-attach the header to continuation pieces (the first piece already has it).
+            parts.append(piece if (not parts or not header) else header + piece)
+        i = end + 1 if end <= i else end
+    return parts
+
+
 def chunks_for_extraction(tokens: list[dict], sections: list[dict], *, max_tokens: int = 12000) -> list[str]:
     """Group tokens into page-numbered chunk texts, each roughly ``<= max_tokens``.
 
-    Packs whole sections together while they fit; a single oversized section is split by page.
-    Always returns at least one non-empty chunk (falls back to the whole document).
+    Packs whole sections together while they fit; a single oversized section is split by page,
+    and a single page that ALONE exceeds the limit is further fixed-token-split so no chunk
+    blows the model context. Always returns at least one non-empty chunk.
     """
     limit = max(1000, max_tokens)
     chunks: list[str] = []
@@ -148,6 +184,12 @@ def chunks_for_extraction(tokens: list[dict], sections: list[dict], *, max_token
         for page in range(int(s["page_start"]), int(s["page_end"]) + 1):
             page_text = build_merged_text(_tokens_for_pages(tokens, page, page))
             page_tokens = _est_tokens(page_text)
+            # A single page bigger than the whole limit can't be packed — flush what we
+            # have and emit it as its own fixed-token-split sub-chunks.
+            if page_tokens > limit:
+                _flush()
+                chunks.extend(_split_text_by_tokens(page_text, limit))
+                continue
             if cur_pages and cur_tokens + page_tokens > limit:
                 _flush()
             cur_pages.append(page)
