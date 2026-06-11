@@ -1,0 +1,37 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: idpflow-dev
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    # Must match the repo registered with ArgoCD in the pipeline bootstrap stage
+    repoURL: https://github.com/mprasad712/IDP-CORE.git
+    targetRevision: main
+    path: manifests/dev
+    directory:
+      recurse: true
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: idpflow
+
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      name: app-secrets
+      namespace: idpflow
+      jsonPointers:
+        - /data
+
+  syncPolicy:
+    automated:
+      prune: true       # Remove resources deleted from git
+      selfHeal: true    # Revert manual changes in cluster
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true

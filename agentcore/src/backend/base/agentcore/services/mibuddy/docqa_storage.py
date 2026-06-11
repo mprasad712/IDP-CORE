@@ -62,12 +62,9 @@ async def _get_container():
 
     try:
         from azure.storage.blob.aio import BlobServiceClient
-        from azure.identity.aio import DefaultAzureCredential
+        from agentcore.utils.azure_credential import get_azure_credential_async
 
-        credential = DefaultAzureCredential(
-            exclude_environment_credential=True,
-            exclude_interactive_browser_credential=True,
-        )
+        credential = get_azure_credential_async()
         blob_service = BlobServiceClient(account_url=account_url, credential=credential)
         container = blob_service.get_container_client(container_name)
 

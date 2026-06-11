@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-service-config
+  namespace: idpflow
+data:
+  # ── Service ───────────────────────────────────────────
+  MODEL_SERVICE_HOST: "0.0.0.0"
+  MODEL_SERVICE_PORT: "8001"
+  MODEL_SERVICE_LOG_LEVEL: "info"
+  MODEL_SERVICE_CORS_ORIGINS: "*"
+  MODEL_SERVICE_DEFAULT_TIMEOUT: "300"
+  MODEL_SERVICE_MAX_RETRIES: "1"
+
+  # ── Azure Key Vault ───────────────────────────────────
+  MODEL_SERVICE_KEY_VAULT_URL: "https://idpflow-kv-dev-001.vault.azure.net/"
+  MODEL_SERVICE_KEY_VAULT_SECRET_PREFIX: "agentcore-model"
+  MODEL_SERVICE_KEY_VAULT_API_KEY_SECRET_NAME: "agentcore-model-service-api-key"
+  MODEL_SERVICE_KEY_VAULT_DATABASE_URL_SECRET_NAME: "agentcore-shared-postgres-url"
+
+  # ── PostgreSQL ────────────────────────────────────────
+  POSTGRES_HOST: "idpflow-postgres.postgres.database.azure.com"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "idpagentic"
+  POSTGRES_USER: "pgadmin"
+
+  # ── Redis ─────────────────────────────────────────────
+  REDIS_HOST: "idpflow-redis-dev.centralindia.redis.azure.net"
+  REDIS_PORT: "10000"
+  REDIS_SSL: "True"

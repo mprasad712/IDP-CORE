@@ -8,10 +8,15 @@ pool:
   vmImage: ubuntu-latest
 
 variables:
-  acrName: 'agentflowacr1'
-  imageName: 'agentflow-service'
-  dockerfilePath: 'Dockerfile'
-  tag: '$(Build.BuildId)'
+  - group: idp          # Library variable group (GITHUB_USERNAME, GITHUB_PAT)
+  - name: acrName
+    value: 'idpflowacr1'
+  - name: imageName
+    value: 'idpflow-service'
+  - name: dockerfilePath
+    value: 'Dockerfile'
+  - name: tag
+    value: '$(Build.BuildId)'
 
 stages:
 
@@ -61,12 +66,7 @@ stages:
 
         flag "agentcore/src/backend"                     "backend_changed"
         flag "agentcore/src/frontend"                    "frontend_changed"
-        flag "agentcore/src/services/graph-rag-service"  "graph_rag_changed"
-        flag "agentcore/src/services/guardrails-service" "guardrails_changed"
-        flag "agentcore/src/services/mcp-service"        "mcp_changed"
         flag "agentcore/src/services/model-service"      "model_changed"
-        flag "agentcore/src/services/pinecone-service"   "pinecone_changed"
-        flag "agentcore/src/services/region-gateway"     "region_changed"
 
         # full_pipeline=true when CHANGED is empty OR no service directory was touched
         SVC_HIT=$(echo "$CHANGED" | grep -E "^agentcore/src/(backend|frontend|services)/" || true)
@@ -101,7 +101,7 @@ stages:
     - task: AzureCLI@2
       displayName: "Terraform Init"
       inputs:
-        azureSubscription: 'agentflow-sc'
+        azureSubscription: 'idp-sc'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
@@ -116,7 +116,7 @@ stages:
     - task: AzureCLI@2
       displayName: "Terraform Validate"
       inputs:
-        azureSubscription: 'agentflow-sc'
+        azureSubscription: 'idp-sc'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
@@ -126,7 +126,7 @@ stages:
     - task: AzureCLI@2
       displayName: "Terraform Plan"
       inputs:
-        azureSubscription: 'agentflow-sc'
+        azureSubscription: 'idp-sc'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
@@ -156,7 +156,7 @@ stages:
     - task: AzureCLI@2
       displayName: "Terraform Init"
       inputs:
-        azureSubscription: 'agentflow-sc'
+        azureSubscription: 'idp-sc'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
@@ -166,7 +166,7 @@ stages:
     - task: AzureCLI@2
       displayName: "Terraform Apply"
       inputs:
-        azureSubscription: 'agentflow-sc'
+        azureSubscription: 'idp-sc'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
@@ -190,12 +190,7 @@ stages:
     full_pipeline:      $[ stageDependencies.DetectChanges.Detect.outputs['detect.full_pipeline'] ]
     backend_changed:    $[ stageDependencies.DetectChanges.Detect.outputs['detect.backend_changed'] ]
     frontend_changed:   $[ stageDependencies.DetectChanges.Detect.outputs['detect.frontend_changed'] ]
-    graph_rag_changed:  $[ stageDependencies.DetectChanges.Detect.outputs['detect.graph_rag_changed'] ]
-    guardrails_changed: $[ stageDependencies.DetectChanges.Detect.outputs['detect.guardrails_changed'] ]
-    mcp_changed:        $[ stageDependencies.DetectChanges.Detect.outputs['detect.mcp_changed'] ]
     model_changed:      $[ stageDependencies.DetectChanges.Detect.outputs['detect.model_changed'] ]
-    pinecone_changed:   $[ stageDependencies.DetectChanges.Detect.outputs['detect.pinecone_changed'] ]
-    region_changed:     $[ stageDependencies.DetectChanges.Detect.outputs['detect.region_changed'] ]
 
   jobs:
   - job: DockerBuildPush
@@ -207,11 +202,11 @@ stages:
     - task: AzureCLI@2
       displayName: "ACR Login"
       inputs:
-        azureSubscription: 'agentflow-sc'
+        azureSubscription: 'idp-sc'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          az acr login --name agentflowacr1
+          az acr login --name idpflowacr1
 
     # =====================================
     # BACKEND SERVICE
@@ -219,13 +214,13 @@ stages:
     - script: |
         docker build \
         -f agentcore/src/backend/Dockerfile \
-        -t agentflowacr1.azurecr.io/backend:$(Build.BuildId) \
+        -t idpflowacr1.azurecr.io/backend:$(Build.BuildId) \
         agentcore/src/backend
       displayName: "Build Backend"
       condition: or(eq(variables['backend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
     - script: |
-        docker push agentflowacr1.azurecr.io/backend:$(Build.BuildId)
+        docker push idpflowacr1.azurecr.io/backend:$(Build.BuildId)
       displayName: "Push Backend"
       condition: or(eq(variables['backend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
@@ -235,63 +230,15 @@ stages:
     - script: |
         docker build \
         -f agentcore/src/frontend/Dockerfile \
-        -t agentflowacr1.azurecr.io/frontend:$(Build.BuildId) \
+        -t idpflowacr1.azurecr.io/frontend:$(Build.BuildId) \
         agentcore/src/frontend
       displayName: "Build Frontend"
       condition: or(eq(variables['frontend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
     - script: |
-        docker push agentflowacr1.azurecr.io/frontend:$(Build.BuildId)
+        docker push idpflowacr1.azurecr.io/frontend:$(Build.BuildId)
       displayName: "Push Frontend"
       condition: or(eq(variables['frontend_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
-
-    # =====================================
-    # GRAPH RAG SERVICE
-    # =====================================
-    - script: |
-        docker build \
-        -f agentcore/src/services/graph-rag-service/Dockerfile \
-        -t agentflowacr1.azurecr.io/graph-rag-service:$(Build.BuildId) \
-        agentcore/src/services/graph-rag-service
-      displayName: "Build Graph RAG Service"
-      condition: or(eq(variables['graph_rag_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
-
-    - script: |
-        docker push agentflowacr1.azurecr.io/graph-rag-service:$(Build.BuildId)
-      displayName: "Push Graph RAG Service"
-      condition: or(eq(variables['graph_rag_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
-
-    # =====================================
-    # GUARDRAILS SERVICE
-    # =====================================
-    - script: |
-        docker build \
-        -f agentcore/src/services/guardrails-service/Dockerfile \
-        -t agentflowacr1.azurecr.io/guardrails-service:$(Build.BuildId) \
-        agentcore/src/services/guardrails-service
-      displayName: "Build Guardrails Service"
-      condition: or(eq(variables['guardrails_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
-
-    - script: |
-        docker push agentflowacr1.azurecr.io/guardrails-service:$(Build.BuildId)
-      displayName: "Push Guardrails Service"
-      condition: or(eq(variables['guardrails_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
-
-    # =====================================
-    # MCP SERVICE
-    # =====================================
-    - script: |
-        docker build \
-        -f agentcore/src/services/mcp-service/Dockerfile \
-        -t agentflowacr1.azurecr.io/mcp-service:$(Build.BuildId) \
-        agentcore/src/services/mcp-service
-      displayName: "Build MCP Service"
-      condition: or(eq(variables['mcp_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
-
-    - script: |
-        docker push agentflowacr1.azurecr.io/mcp-service:$(Build.BuildId)
-      displayName: "Push MCP Service"
-      condition: or(eq(variables['mcp_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
     # =====================================
     # MODEL SERVICE
@@ -299,44 +246,222 @@ stages:
     - script: |
         docker build \
         -f agentcore/src/services/model-service/Dockerfile \
-        -t agentflowacr1.azurecr.io/model-service:$(Build.BuildId) \
+        -t idpflowacr1.azurecr.io/model-service:$(Build.BuildId) \
         agentcore/src/services/model-service
       displayName: "Build Model Service"
       condition: or(eq(variables['model_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
     - script: |
-        docker push agentflowacr1.azurecr.io/model-service:$(Build.BuildId)
+        docker push idpflowacr1.azurecr.io/model-service:$(Build.BuildId)
       displayName: "Push Model Service"
       condition: or(eq(variables['model_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
 
-    # =====================================
-    # PINECONE SERVICE
-    # =====================================
-    - script: |
-        docker build \
-        -f agentcore/src/services/pinecone-service/Dockerfile \
-        -t agentflowacr1.azurecr.io/pinecone-service:$(Build.BuildId) \
-        agentcore/src/services/pinecone-service
-      displayName: "Build Pinecone Service"
-      condition: or(eq(variables['pinecone_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+# =========================================
+# STAGE 4 - BOOTSTRAP AKS (first time only)
+# =========================================
+# Required Azure DevOps pipeline variables (mark as secret):
+#   GITHUB_USERNAME   - your GitHub username
+#   GITHUB_PAT        - GitHub Personal Access Token (repo read access)
+# =========================================
+- stage: ArgocdBootstrap
+  displayName: "Bootstrap AKS: nginx + ArgoCD + Secrets"
+  dependsOn: BuildAndPush
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+
+  jobs:
+  - job: Bootstrap
+    displayName: "Install nginx, ArgoCD, secrets"
+    steps:
+
+    - checkout: self
+
+    - task: AzureCLI@2
+      displayName: "Get AKS credentials"
+      inputs:
+        azureSubscription: 'idp-sc'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az aks get-credentials \
+            --resource-group idpflow-rg \
+            --name idpflow-aks \
+            --overwrite-existing
 
     - script: |
-        docker push agentflowacr1.azurecr.io/pinecone-service:$(Build.BuildId)
-      displayName: "Push Pinecone Service"
-      condition: or(eq(variables['pinecone_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+        if ! helm repo list | grep -q ingress-nginx; then
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+        fi
+        if ! helm status ingress-nginx -n ingress-nginx &>/dev/null; then
+          helm install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx \
+            --create-namespace \
+            --wait
+          echo "nginx ingress controller installed."
+        else
+          echo "nginx ingress already installed, skipping."
+        fi
+      displayName: "Install nginx Ingress Controller"
 
-    # =====================================
-    # REGION GATEWAY
-    # =====================================
     - script: |
-        docker build \
-        -f agentcore/src/services/region-gateway/Dockerfile \
-        -t agentflowacr1.azurecr.io/region-gateway:$(Build.BuildId) \
-        agentcore/src/services/region-gateway
-      displayName: "Build Region Gateway"
-      condition: or(eq(variables['region_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+        if ! kubectl get namespace argocd &>/dev/null; then
+          kubectl create namespace argocd
+          kubectl apply -n argocd \
+            -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+          echo "ArgoCD installed — waiting for pods to be ready..."
+          kubectl wait --for=condition=available deployment/argocd-server \
+            -n argocd --timeout=180s
+        else
+          echo "ArgoCD already installed, skipping."
+        fi
+      displayName: "Install ArgoCD"
+
+    - task: AzureCLI@2
+      displayName: "Create Kubernetes secrets from Key Vault"
+      inputs:
+        azureSubscription: 'idp-sc'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -euo pipefail
+
+          kubectl create namespace idpflow --dry-run=client -o yaml | kubectl apply -f -
+
+          # Fetch a secret from Key Vault — errors go to stderr so they are visible in pipeline logs
+          fetch_kv_secret() {
+            local name="$1"
+            local value
+            value=$(az keyvault secret show \
+              --vault-name idpflow-kv-dev-001 \
+              --name "$name" \
+              --query value -o tsv 2>&1)
+            local rc=$?
+            if [ $rc -ne 0 ]; then
+              echo "##[error]Failed to fetch KV secret '$name' (exit $rc): $value" >&2
+              return 1
+            fi
+            if [ -z "$value" ]; then
+              echo "##[error]KV secret '$name' returned empty value — secret may not exist in Key Vault" >&2
+              return 1
+            fi
+            echo "$value"
+          }
+
+          POSTGRES_PWD=$(fetch_kv_secret "postgres-password")
+          REDIS_KEY=$(fetch_kv_secret "redis-primary-key")
+          SMTP_PWD=$(fetch_kv_secret "smtp-password")
+          AZURE_CLIENT_SECRET=$(fetch_kv_secret "agentcore-azure-client-secret")
+          MODEL_ENCRYPTION_KEY=$(fetch_kv_secret "agentcore-model-service-encryption-key")
+
+          STORAGE_KEY=$(az storage account keys list \
+            --account-name idpflowappstore1 \
+            --resource-group idpflow-rg \
+            --query "[0].value" -o tsv)
+          if [ -z "$STORAGE_KEY" ]; then
+            echo "##[error]Failed to fetch storage account key" >&2
+            exit 1
+          fi
+
+          DB_URL="postgresql+psycopg2://pgadmin:${POSTGRES_PWD}@idpflow-postgres.postgres.database.azure.com:5432/idp_agentic?sslmode=require"
+
+          # Delete and recreate to guarantee values are always fresh from KV
+          kubectl delete secret app-secrets --namespace idpflow --ignore-not-found=true
+
+          kubectl create secret generic app-secrets \
+            --namespace idpflow \
+            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PWD" \
+            --from-literal=REDIS_PASSWORD="$REDIS_KEY" \
+            --from-literal=STORAGE_ACCOUNT_KEY="$STORAGE_KEY" \
+            --from-literal=DATABASE_URL="$DB_URL" \
+            --from-literal=SMTP_PASSWORD="$SMTP_PWD" \
+            --from-literal=AZURE_CLIENT_SECRET="$AZURE_CLIENT_SECRET" \
+            --from-literal=MODEL_SERVICE_ENCRYPTION_KEY="$MODEL_ENCRYPTION_KEY"
+
+          echo "Kubernetes secrets created from Key Vault."
 
     - script: |
-        docker push agentflowacr1.azurecr.io/region-gateway:$(Build.BuildId)
-      displayName: "Push Region Gateway"
-      condition: or(eq(variables['region_changed'], 'true'), eq(variables['full_pipeline'], 'true'))
+        # Register GitHub repo with ArgoCD (skipped if already registered)
+        REPO_URL="https://github.com/$(GITHUB_USERNAME)/$(Build.Repository.Name).git"
+        if ! kubectl get secret -n argocd -l "argocd.argoproj.io/secret-type=repository" \
+            -o jsonpath='{.items[*].data.url}' | base64 -d 2>/dev/null | grep -q "$REPO_URL"; then
+          kubectl create secret generic argocd-repo-github \
+            --namespace argocd \
+            --from-literal=type=git \
+            --from-literal=url="$REPO_URL" \
+            --from-literal=username="$(GITHUB_USERNAME)" \
+            --from-literal=password="$(GITHUB_PAT)" \
+            --dry-run=client -o yaml \
+          | kubectl label --local -f - "argocd.argoproj.io/secret-type=repository" --dry-run=client -o yaml \
+          | kubectl apply -f -
+          echo "ArgoCD repo credentials registered."
+        else
+          echo "ArgoCD repo already registered, skipping."
+        fi
+      displayName: "Register GitHub repo with ArgoCD"
+
+    - script: |
+        kubectl apply -f manifests/argocd/argocd-app.yaml
+      displayName: "Apply ArgoCD Application"
+
+# =========================================
+# STAGE 5 - UPDATE IMAGE TAGS IN MANIFESTS
+# =========================================
+- stage: UpdateManifests
+  displayName: "Update Image Tags & Trigger ArgoCD Sync"
+  dependsOn:
+  - BuildAndPush
+  - DetectChanges
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+
+  variables:
+    full_pipeline:   $[ stageDependencies.DetectChanges.Detect.outputs['detect.full_pipeline'] ]
+    backend_changed: $[ stageDependencies.DetectChanges.Detect.outputs['detect.backend_changed'] ]
+    frontend_changed: $[ stageDependencies.DetectChanges.Detect.outputs['detect.frontend_changed'] ]
+    model_changed:   $[ stageDependencies.DetectChanges.Detect.outputs['detect.model_changed'] ]
+
+  jobs:
+  - job: PatchManifests
+    displayName: "Patch deployment image tags"
+    steps:
+
+    - checkout: self
+      persistCredentials: true
+
+    - script: |
+        git config user.email "ado-pipeline@idpflow.dev"
+        git config user.name "ADO Pipeline"
+      displayName: "Configure git"
+
+    - script: |
+        TAG=$(Build.BuildId)
+
+        patch_image() {
+          local file="$1" image="$2"
+          sed -i "s|image: ${image}:.*|image: ${image}:${TAG}|g" "$file"
+        }
+
+        if [ "$(backend_changed)" = "true" ] || [ "$(full_pipeline)" = "true" ]; then
+          patch_image manifests/dev/deployments/backend-deployment.yaml \
+            idpflowacr1.azurecr.io/backend
+          echo "Patched backend → :${TAG}"
+        fi
+
+        if [ "$(frontend_changed)" = "true" ] || [ "$(full_pipeline)" = "true" ]; then
+          patch_image manifests/dev/deployments/frontend-deployment.yaml \
+            idpflowacr1.azurecr.io/frontend
+          echo "Patched frontend → :${TAG}"
+        fi
+
+        if [ "$(model_changed)" = "true" ] || [ "$(full_pipeline)" = "true" ]; then
+          patch_image manifests/dev/deployments/model-service-deployment.yaml \
+            idpflowacr1.azurecr.io/model-service
+          echo "Patched model-service → :${TAG}"
+        fi
+      displayName: "Patch image tags in manifests"
+
+    - script: |
+        git add manifests/dev/deployments/
+        git diff --cached --quiet && echo "No manifest changes, skipping commit." && exit 0
+        git commit -m "ci: update image tags to build $(Build.BuildId) [skip ci]"
+        git push origin HEAD:main
+      displayName: "Commit and push manifest changes"

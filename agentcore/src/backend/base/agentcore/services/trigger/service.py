@@ -533,10 +533,8 @@ class TriggerService(Service):
         seen = self._seen_files.get(task_id, OrderedDict())
         new_files = []
 
-        credential = DefaultAzureCredential(
-            exclude_environment_credential=True,
-            exclude_interactive_browser_credential=True,
-        )
+        from agentcore.utils.azure_credential import get_azure_credential_async
+        credential = get_azure_credential_async()
         try:
             async with BlobServiceClient(account_url=account_url, credential=credential) as client:
                 container = client.get_container_client(container_name)

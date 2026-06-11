@@ -119,8 +119,9 @@ class Settings(BaseSettings):
     """The cache type can be 'async', 'redis' or 'memory'. Default is 'redis' for distributed caching."""
     """The cache type can be 'async' or 'redis'."""
     redis_host: str = os.getenv("REDIS_HOST")
-    redis_port: int =os.getenv("REDIS_PORT")
+    redis_port: int = os.getenv("REDIS_PORT")
     redis_db: int = 0
+    redis_password: str = os.getenv("REDIS_PASSWORD", "")
     redis_entra_scope: str = os.getenv("REDIS_ENTRA_SCOPE", "")
     redis_entra_object_id: str = os.getenv("REDIS_ENTRA_OBJECT_ID", "")
     redis_entra_refresh_margin_seconds: int = int(
@@ -256,7 +257,7 @@ class Settings(BaseSettings):
     # Telemetry
     do_not_track: bool = True
     """If set to True, Agentcore will not track telemetry."""
-    telemetry_base_url: str = os.getenv("LOCALHOST_TELEMETRY_BASE_URL")  # Disabled endpoint
+    telemetry_base_url: str | None = os.getenv("LOCALHOST_TELEMETRY_BASE_URL")  # Disabled endpoint
     transactions_storage_enabled: bool = True
     """If set to True, Agentcore will track transactions between agents."""
     vertex_builds_storage_enabled: bool = True
@@ -461,13 +462,9 @@ class Settings(BaseSettings):
     github_repo_url: str = ""
     """GitHub repo URL — required when git_provider is 'github' or 'both'.
     Example: https://github.com/owner/repo"""
-    github_token: str = ""
-    """PAT token with Contents read/write access for the GitHub repo."""
     ado_repo_url: str = ""
     """Azure DevOps repo URL — required when git_provider is 'ado' or 'both'.
     Example: https://dev.azure.com/org/project/_git/repo"""
-    ado_token: str = ""
-    """PAT token with repo write access for the Azure DevOps repo."""
     git_branch: str = "main"
     """Branch to commit the manifest file to (applies to both providers)."""
     git_manifest_file: str = "agents.yaml"

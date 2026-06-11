@@ -6,9 +6,9 @@ import threading
 import time
 from typing import Any
 
-from azure.identity import DefaultAzureCredential
 from redis.auth.token import JWToken, SimpleToken, TokenInterface
 from redis.credentials import StreamingCredentialProvider
+from agentcore.utils.azure_credential import get_azure_credential
 
 
 class AzureEntraRedisCredentialProvider(StreamingCredentialProvider):
@@ -25,10 +25,7 @@ class AzureEntraRedisCredentialProvider(StreamingCredentialProvider):
         self._object_id = (object_id or "").strip() or None
         self._refresh_margin_seconds = max(int(refresh_margin_seconds or 180), 30)
 
-        self._credential = DefaultAzureCredential(
-            exclude_environment_credential=True,
-            exclude_interactive_browser_credential=True,
-        )
+        self._credential = get_azure_credential()
         self._token_lock = threading.Lock()
         self._current_token: TokenInterface | None = None
 

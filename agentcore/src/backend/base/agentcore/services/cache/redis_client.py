@@ -64,11 +64,11 @@ def _get_redis_ssl(settings_service: SettingsService) -> bool:
     return str(raw_ssl or "").strip().lower() in {"1", "true", "yes", "on"}
 
 def _get_redis_entra_scope(settings_service: SettingsService) -> str:
-    redis_entra_scope = (settings_service.settings.redis_entra_scope or "").strip()
-    if not redis_entra_scope:
-        msg = "REDIS_ENTRA_SCOPE must be set."
-        raise ValueError(msg)
-    return redis_entra_scope
+    return (settings_service.settings.redis_entra_scope or "").strip()
+
+
+def _get_redis_password(settings_service: SettingsService) -> str:
+    return (getattr(settings_service.settings, "redis_password", "") or "").strip()
 
 
 def get_redis_credential_provider(settings_service: SettingsService) -> CredentialProvider:
@@ -164,23 +164,24 @@ def get_redis_client(settings_service: SettingsService):
     cluster_enabled = _redis_cluster_enabled(settings_service)
     redis_host, redis_port = _get_redis_host_port(settings_service)
     redis_ssl = _get_redis_ssl(settings_service)
+    redis_entra_scope = _get_redis_entra_scope(settings_service)
+    redis_password = _get_redis_password(settings_service)
     signature = (
         redis_host,
         redis_port,
         settings_service.settings.redis_db,
         redis_ssl,
         cluster_enabled,
-        _get_redis_entra_scope(settings_service),
+        redis_entra_scope,
         (settings_service.settings.redis_entra_object_id or "").strip(),
         settings_service.settings.redis_entra_refresh_margin_seconds,
+        redis_password,
     )
     if _redis_client is None or _redis_signature != signature:
-        redis_credential_provider = get_redis_credential_provider(settings_service)
         common_kwargs = {
             "host": redis_host,
             "port": redis_port,
             "ssl": redis_ssl,
-            "credential_provider": redis_credential_provider,
             "decode_responses": True,
             "socket_connect_timeout": 5,
             "socket_timeout": 5,
@@ -190,6 +191,11 @@ def get_redis_client(settings_service: SettingsService):
             "retry": Retry(ExponentialBackoff(cap=2, base=0.1), retries=3),
             "retry_on_error": [ConnectionError, TimeoutError, OSError],
         }
+        if redis_entra_scope:
+            redis_credential_provider = get_redis_credential_provider(settings_service)
+            common_kwargs["credential_provider"] = redis_credential_provider
+        elif redis_password:
+            common_kwargs["password"] = redis_password
         if cluster_enabled:
             cluster_kwargs = _build_cluster_kwargs(common_kwargs)
             if (

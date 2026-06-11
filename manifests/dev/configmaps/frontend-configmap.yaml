@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-config
+  namespace: idpflow
+data:
+  FRONTEND_PORT: "3000"
+  NODE_ENV: "production"
+
+  # Backend service URL — internal DNS for server-side, public URL for browser
+  VITE_API_URL: "https://idpflow.135.235.254.153.nip.io/api"
+  VITE_PROXY_TARGET: "http://backend-svc:7860"
+  BACKEND_URL: "http://backend-svc:7860"
+
+  # Update these to your actual public domain after ingress IP is known
+  MSAL_REDIRECT_URI: "https://idpflow.135.235.254.153.nip.io/agents"
+  AGENTCORE_PUBLISH_URL: "https://idpflow.135.235.254.153.nip.io"

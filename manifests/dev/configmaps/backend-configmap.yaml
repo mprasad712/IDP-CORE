@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: idpflow
+data:
+  # ── App ──────────────────────────────────────────────
+  LOCALHOST_HOST: "0.0.0.0"
+  BACKEND_PORT: "7860"
+  CONFIG_DIR: "./src/backend/knowledge_base_storage"
+  DATA_DIR: "./data"
+  MANIFEST_FILE_PATH: "../../../manifest.yaml"
+  GLOBAL_LOG_LEVEL: "DEBUG"
+  AGENTCORE_PLATFORM_ROOT_EMAIL: "manasprasad712@gmail.com"
+  HOST_IP: "0.0.0.0"
+
+  # ── Auth / OAuth ──────────────────────────────────────
+  ENABLE_SIGNUP: "true"
+  ENABLE_LOGIN_FORM: "true"
+  ENABLE_API_KEY: "true"
+  AUTO_LOGIN: "false"
+  FORWARDED_ALLOW_IPS: "*"
+
+  # ── Azure AD ──────────────────────────────────────────
+  AZURE_TENANT_ID: "d8e35409-2aca-4e69-aa95-7378d4c9012b"
+  AZURE_CLIENT_ID: "78b4d76c-d8ac-4778-bacd-6cc4ee9855e9"
+  AZURE_CLIENT_SECRET: "agentcore-azure-client-secret"
+  # Update AZURE_REDIRECT_URI to your actual public domain after ingress IP is known
+  AZURE_REDIRECT_URI: "https://idpflow.135.235.254.153.nip.io/flows"
+
+  # ── Service URLs (K8s internal DNS) ──────────────────
+  MODEL_SERVICE_URL: "http://model-service-svc:8001"
+  FRONTEND_URL: "http://frontend-svc"
+  CORS_ALLOW_ORIGIN: "http://frontend-svc;http://backend-svc:7860;https://idpflow.135.235.254.153.nip.io"
+  AGENTCORE_PUBLISH_URL: "http://backend-svc:5839"
+
+  # ── Redis ─────────────────────────────────────────────
+  REDIS_HOST: "idpflow-redis-dev.centralindia.redis.azure.net"
+  REDIS_PORT: "10000"
+  REDIS_SSL: "True"
+  REDIS_CACHE_EXPIRE: "3600"
+  REDIS_SOCKET_CONNECTION_TIMEOUT: "5"
+  REDIS_ENTRA_SCOPE: "https://redis.azure.com/.default"
+  REDIS_ENTRA_OBJECT_ID: "570d8258-0340-4b51-a12f-f2f3e09e1565"
+  REDIS_CLUSTER_POLICY: "OSSCluster"
+
+
+  AUTH_REDIS_SECURITY_KEYS_ENABLED: "false"
+
+  # ── Azure Storage ─────────────────────────────────────
+  STORAGE_TYPE: "azure"
+  AZURE_STORAGE_ACCOUNT_URL: "https://idpflowappstore1.blob.core.windows.net/"
+  AZURE_STORAGE_CONTAINER_NAME: "app-storage-container"
+
+  # ── Azure Key Vault ───────────────────────────────────
+  USE_KEY_VAULT: "true"
+  AGENTCORE_KEY_VAULT_URL: "https://idpflow-kv-dev-001.vault.azure.net/"
+  AGENTCORE_KEY_VAULT_SECRET_PREFIX: "agentcore"
+  AGENTCORE_KEY_VAULT_DATABASE_URL_SECRET_NAME: "agentcore-shared-postgres-url"
+  AGENTCORE_KEY_VAULT_SECRET_KEY_SECRET_NAME: "agentcore-backend-secret-key"
+  AGENTCORE_KEY_VAULT_AZURE_CLIENT_SECRET_SECRET_NAME: "agentcore-azure-client-secret"
+  AGENTCORE_KEY_VAULT_AZURE_STORAGE_CONNECTION_STRING_SECRET_NAME: "agentcore-azure-storage-connection-string"
+  AGENTCORE_KEY_VAULT_MODEL_SERVICE_API_KEY_SECRET_NAME: "agentcore-model-service-api-key"
+  AGENTCORE_KEY_VAULT_REDIS_PASSWORD_SECRET_NAME: "agentcore-redis-password"
+  # AGENTCORE_KEY_VAULT_RABBITMQ_URL_SECRET_NAME: "agentcore-rabbitmq-url"
+  AGENTCORE_KEY_VAULT_INTERNAL_SECRET_SECRET_NAME: "agentcore-internal-secret"
+
+  # ── RabbitMQ ──────────────────────────────────────────
+  # RABBITMQ_ENABLED: "false"
+  # RABBITMQ_PREFETCH_COUNT: "5"
+  # RABBITMQ_BUILD_QUEUE: "agentcore.build"
+  # RABBITMQ_RUN_QUEUE: "agentcore.run"
+  # RABBITMQ_SCHEDULE_QUEUE: "agentcore.schedule"
+  # RABBITMQ_TRIGGER_QUEUE: "agentcore.trigger"
+  # RABBITMQ_ORCHESTRATOR_QUEUE: "agentcore.orchestrator"
+
+  # ── Tracing / Telemetry ───────────────────────────────
+  LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
+  LANGFUSE_HOST: "https://cloud.langfuse.com"
+  DEACTIVATE_TRACING: "false"
+  PROMETHEUS_URL: "http://localhost:9090"
+  AGENTCORE_METRICS_ENABLED: "true"
+  OTEL_SERVICE_NAME: "agentcore"
+  SCARF_NO_ANALYTICS: "true"
+  DO_NOT_TRACK: "true"
+  ANONYMIZED_TELEMETRY: "false"
+
+  # ── SMTP ──────────────────────────────────────────────
+  SMTP_HOST: "smtp.gmail.com"
+  SMTP_PORT: "587"
+  SMTP_USERNAME: "manasprasad712@gmail.com"
+  SMTP_FROM_EMAIL: "manasprasad712@gmail.com"
+  SMTP_USE_TLS: "true"
+  SMTP_USE_SSL: "false"

@@ -30,13 +30,9 @@ class AzureBlobStorageService(StorageService):
             )
 
         self._credential = None
-        from azure.identity.aio import DefaultAzureCredential
+        from agentcore.utils.azure_credential import get_azure_credential_async
 
-        # Use the same managed identity chain used by Redis and Key Vault.
-        self._credential = DefaultAzureCredential(
-            exclude_environment_credential=True,
-            exclude_interactive_browser_credential=True,
-        )
+        self._credential = get_azure_credential_async()
         self._blob_service_client = BlobServiceClient(
             account_url=account_url,
             credential=self._credential,

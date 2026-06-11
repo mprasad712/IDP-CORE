@@ -566,13 +566,8 @@ class BaseFileNode(Node, ABC):
 
         from azure.storage.blob import BlobServiceClient
 
-        credential = None
-        from azure.identity import DefaultAzureCredential
-
-        credential = DefaultAzureCredential(
-            exclude_environment_credential=True,
-            exclude_interactive_browser_credential=True,
-        )
+        from agentcore.utils.azure_credential import get_azure_credential
+        credential = get_azure_credential()
         sync_client = BlobServiceClient(account_url=account_url, credential=credential)
         try:
             blob_client = sync_client.get_container_client(container_name).get_blob_client(blob_path)

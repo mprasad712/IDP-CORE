@@ -310,10 +310,8 @@ class FileTrigger(Node):
             batch_size = self.batch_size
 
             logger.info(f"FileTrigger: connecting to container={container_name}, prefix={prefix!r}")
-            credential = DefaultAzureCredential(
-                exclude_environment_credential=True,
-                exclude_interactive_browser_credential=True,
-            )
+            from agentcore.utils.azure_credential import get_azure_credential
+            credential = get_azure_credential()
             blob_service = BlobServiceClient(account_url=account_url, credential=credential)
             container_client = blob_service.get_container_client(container_name)
             blobs = list(container_client.list_blobs(name_starts_with=prefix if prefix else None))
@@ -577,10 +575,8 @@ class FileTrigger(Node):
                                 path_parts = path_without_scheme.split("/", 1)
                                 blob_name = path_parts[1] if len(path_parts) == 2 else ""
 
-                            credential = DefaultAzureCredential(
-                                exclude_environment_credential=True,
-                                exclude_interactive_browser_credential=True,
-                            )
+                            from agentcore.utils.azure_credential import get_azure_credential
+                            credential = get_azure_credential()
                             blob_service = BlobServiceClient(account_url=account_url, credential=credential)
                             try:
                                 container_client = blob_service.get_container_client(container)

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backend-sa
+  namespace: idpflow
+  annotations:
+    azure.workload.identity/client-id: "d82aece2-f81b-42fc-a53e-15d6cba3b613"

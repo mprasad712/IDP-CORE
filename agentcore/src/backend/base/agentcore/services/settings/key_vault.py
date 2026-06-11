@@ -27,13 +27,14 @@ class KeyVaultSecretStore:
         if not config.vault_url:
             return None
 
-        from azure.identity import DefaultAzureCredential
         from azure.keyvault.secrets import SecretClient
 
-        credential = DefaultAzureCredential(
-            exclude_environment_credential=True,
-            exclude_interactive_browser_credential=True,
-        )
+        if os.getenv("AZURE_FEDERATED_TOKEN_FILE"):
+            from azure.identity import WorkloadIdentityCredential
+            credential = WorkloadIdentityCredential()
+        else:
+            from azure.identity import DefaultAzureCredential
+            credential = DefaultAzureCredential(exclude_interactive_browser_credential=True)
 
         client = SecretClient(
             vault_url=config.vault_url,
@@ -91,8 +92,6 @@ def resolve_backend_secrets_from_key_vault() -> None:
         "AGENTCORE_SECRET_KEY": "AGENTCORE_KEY_VAULT_SECRET_KEY_SECRET_NAME",
         "AZURE_CLIENT_SECRET": "AGENTCORE_KEY_VAULT_AZURE_CLIENT_SECRET_SECRET_NAME",
         "MODEL_SERVICE_API_KEY": "AGENTCORE_KEY_VAULT_MODEL_SERVICE_API_KEY_SECRET_NAME",
-        "GITHUB_TOKEN": "AGENTCORE_KEY_VAULT_GITHUB_TOKEN_SECRET_NAME",
-        "ADO_TOKEN": "AGENTCORE_KEY_VAULT_ADO_TOKEN_SECRET_NAME",
     }
 
     for env_name, secret_name_env in mappings.items():
@@ -110,6 +109,7 @@ def resolve_backend_secrets_from_key_vault() -> None:
     # These don't break startup if missing (e.g. BACKEND_SERVICE_API_KEY is only needed
     # on deployments that accept cross-region gateway calls).
     optional_mappings = {
+        "REDIS_PASSWORD": "AGENTCORE_KEY_VAULT_REDIS_PASSWORD_SECRET_NAME",
         "BACKEND_SERVICE_API_KEY": "AGENTCORE_KEY_VAULT_BACKEND_SERVICE_API_KEY_SECRET_NAME",
         "AZURE_AI_SEARCH_ENDPOINT": "AGENTCORE_KEY_VAULT_AZURE_AI_SEARCH_ENDPOINT_SECRET_NAME",
         "AZURE_AI_SEARCH_API_KEY": "AGENTCORE_KEY_VAULT_AZURE_AI_SEARCH_API_KEY_SECRET_NAME",

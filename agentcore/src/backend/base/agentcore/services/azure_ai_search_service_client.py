@@ -46,16 +46,12 @@ def _get_settings() -> str:
 
 
 def _credential() -> TokenCredential:
-    from azure.identity import DefaultAzureCredential
+    from agentcore.utils.azure_credential import get_azure_credential
     logger.info(
-        "[AzureAISearch] Using DefaultAzureCredential — "
-        "locally this resolves via 'az login', in production via Managed Identity."
+        "[AzureAISearch] Using WorkloadIdentityCredential on AKS, DefaultAzureCredential locally."
     )
     try:
-        credential = DefaultAzureCredential(
-            exclude_environment_credential=True,
-            exclude_interactive_browser_credential=True,
-        )
+        credential = get_azure_credential()
         return credential
     except Exception as exc:
         logger.error(

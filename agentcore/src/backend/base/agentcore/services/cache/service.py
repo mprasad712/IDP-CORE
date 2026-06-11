@@ -207,6 +207,7 @@ class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
         port=6379,
         db=0,
         credential_provider=None,
+        password=None,
         cluster_enabled=True,
         ssl=False,
         expiration_time=60 * 60,
@@ -217,7 +218,8 @@ class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
             host (str, optional): Redis host.
             port (int, optional): Redis port.
             db (int, optional): Redis DB.
-            credential_provider (CredentialProvider): Redis credential provider.
+            credential_provider (CredentialProvider): Redis Entra credential provider (mutually exclusive with password).
+            password (str, optional): Redis access key for password auth (mutually exclusive with credential_provider).
             ssl (bool, optional): Use SSL connection.
             expiration_time (int, optional): Time in seconds after which a
                 cached item expires. Default is 1 hour.
@@ -226,6 +228,7 @@ class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
         self._port = port
         self._db = db
         self._credential_provider = credential_provider
+        self._password = password or None
         self._cluster_enabled = cluster_enabled
         self._ssl = ssl
 
@@ -239,20 +242,23 @@ class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
         # goes stale, the client automatically drops the dead socket and
         # retries with a fresh connection — no server restart needed.
         _retry = Retry(ExponentialBackoff(), retries=3)
-        if self._credential_provider is None:
-            msg = "RedisCache requires an Entra ID credential provider."
+        if self._credential_provider is None and not self._password:
+            msg = "RedisCache requires either a credential_provider (Entra) or a password (access key)."
             raise ValueError(msg)
 
         common_kwargs = {
             "host": self._host,
             "port": self._port,
             "ssl": self._ssl,
-            "credential_provider": self._credential_provider,
             "socket_connect_timeout": 5,
             "socket_timeout": 5,
             "retry": _retry,
             "health_check_interval": 30,
         }
+        if self._credential_provider is not None:
+            common_kwargs["credential_provider"] = self._credential_provider
+        elif self._password:
+            common_kwargs["password"] = self._password
         if self._cluster_enabled:
             self._client = RedisCluster(**self._build_cluster_kwargs(common_kwargs))
         else:
