@@ -18,12 +18,17 @@ async def lifespan(app: FastAPI):
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
     logger = logging.getLogger(__name__)
     logger.info("Model Service starting on %s:%s", settings.host, settings.port)
-    if not settings.key_vault_url:
+    # Key Vault is the production path. For local dev, allow boot when a
+    # MODEL_SERVICE_DATABASE_URL is supplied directly via .env instead.
+    if not settings.key_vault_url and not settings.database_url:
         msg = (
-            "Model Service requires Azure Key Vault. "
-            "Set MODEL_SERVICE_KEY_VAULT_URL."
+            "Model Service requires either Azure Key Vault "
+            "(set MODEL_SERVICE_KEY_VAULT_URL) or a local database "
+            "(set MODEL_SERVICE_DATABASE_URL)."
         )
         raise RuntimeError(msg)
+    if not settings.key_vault_url:
+        logger.info("Key Vault not configured — running in LOCAL mode from MODEL_SERVICE_* env values")
 
     # Import providers to trigger registration
     import app.providers  # noqa: F401

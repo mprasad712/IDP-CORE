@@ -49,6 +49,8 @@ export const URLs = {
   TEAMS: `teams`,
   HITL: `v1/hitl`,
   IDP_FIELD_CONFIGS: `v1/idp/field-configs`,
+  IDP_PROCESSED_DOCS: `v1/idp/processed-docs`,
+  IDP_DOCUMENTS: `v1/idp/documents`,
   TAGS: `tags`,
   COST_LIMITS: `cost-limits`,
   SEMANTIC_SEARCH: `semantic-search/search`,

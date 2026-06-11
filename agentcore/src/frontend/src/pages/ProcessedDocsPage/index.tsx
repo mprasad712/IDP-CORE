@@ -44,6 +44,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/utils/utils";
+import {
+  useGetProcessedDocs,
+  useGetProcessedDoc,
+  type ProcessedDoc as ApiProcessedDoc,
+  type ProcessedDocDetail,
+} from "@/controllers/API/queries/idp";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -74,6 +80,49 @@ interface ProcessedDoc {
   lineItemColumns: string[];
   reviewer?: string;
   reviewedAt?: string;
+}
+
+// ─── API → page adapters ──────────────────────────────────────────────────────
+
+function mapApiStatus(s: string): DocStatus {
+  if (s === "auto_approved") return "auto_approved";
+  if (s === "reviewed") return "reviewed";
+  return "pending"; // pending_review, extracted, queued, processing, failed
+}
+
+function listDocToPage(d: ApiProcessedDoc): ProcessedDoc {
+  return {
+    id: d.id,
+    name: d.original_filename,
+    sourceAgent: d.agent_id.slice(0, 8),
+    dateProcessed: (d.processing_completed_at ?? d.created_at ?? "").slice(0, 10),
+    documentType: d.predicted_type ?? d.file_type ?? "—",
+    overallConfidence: Math.round((d.overall_confidence ?? 0) * 100),
+    status: mapApiStatus(d.status),
+    headerFields: [],
+    lineItems: [],
+    lineItemColumns: [],
+  };
+}
+
+function enrichWithDetail(
+  base: ProcessedDoc | undefined,
+  detail?: ProcessedDocDetail,
+): ProcessedDoc | null {
+  if (!base) return null;
+  if (!detail) return base;
+  const headerFields: ExtractedField[] = detail.headers.map((h) => ({
+    key: h.field_name,
+    value: h.reviewed_value ?? h.extracted_value ?? "",
+    confidence: Math.round((h.confidence_score ?? 0) * 100),
+  }));
+  const cols = Array.from(new Set(detail.line_items.map((li) => li.column_name)));
+  const rows: Record<number, LineItem> = {};
+  detail.line_items.forEach((li) => {
+    rows[li.row_index] = rows[li.row_index] ?? ({ id: String(li.row_index) } as LineItem);
+    rows[li.row_index][li.column_name] = li.reviewed_value ?? li.extracted_value ?? "";
+  });
+  return { ...base, headerFields, lineItems: Object.values(rows), lineItemColumns: cols };
 }
 
 // ─── Seed data ────────────────────────────────────────────────────────────────
@@ -551,11 +600,23 @@ function DocTable({
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function ProcessedDocsPage() {
-  const [docs, setDocs]             = useState<ProcessedDoc[]>(SEED_DOCS);
   const [search, setSearch]         = useState("");
   const [activeTab, setActiveTab]   = useState<DocStatus>("pending");
-  const [selectedDoc, setSelectedDoc] = useState<ProcessedDoc | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filterDocType, setFilterDocType] = useState("all");
+
+  // Live data from the IDP backend, plus Manas's demo docs (SEED_DOCS) kept as samples.
+  const { data: docsPage } = useGetProcessedDocs({ size: 100 });
+  const docs: ProcessedDoc[] = useMemo(
+    () => [...(docsPage?.items ?? []).map(listDocToPage), ...SEED_DOCS],
+    [docsPage],
+  );
+  // Extracted fields/line-items come from the detail endpoint, fetched on select.
+  const { data: detail } = useGetProcessedDoc({ id: selectedId ?? "" });
+  const selectedDoc = useMemo(
+    () => (selectedId ? enrichWithDetail(docs.find((d) => d.id === selectedId), detail) : null),
+    [selectedId, docs, detail],
+  );
 
   const docTypes = useMemo(() => {
     const types = Array.from(new Set(docs.map((d) => d.documentType)));
@@ -580,9 +641,10 @@ export default function ProcessedDocsPage() {
     reviewed:      docs.filter((d) => d.status === "reviewed").length,
   }), [docs]);
 
-  const handleSave = (updated: ProcessedDoc) => {
-    setDocs((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
-    setSelectedDoc(updated);
+  // NOTE: persisting edits (PATCH /fields) + review/approve mutations are wired
+  // in a follow-up; for now the detail view edits stay local until navigation.
+  const handleSave = (_updated: ProcessedDoc) => {
+    setSelectedId(null);
   };
 
   // ── Split-view (detail) ──
@@ -592,7 +654,7 @@ export default function ProcessedDocsPage() {
         {/* back bar */}
         <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b bg-muted/5">
           <button
-            onClick={() => setSelectedDoc(null)}
+            onClick={() => setSelectedId(null)}
             className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
           >
             <ChevronLeft className="h-4 w-4" />
@@ -602,7 +664,7 @@ export default function ProcessedDocsPage() {
         <div className="flex-1 overflow-hidden">
           <DocDetailView
             doc={selectedDoc}
-            onClose={() => setSelectedDoc(null)}
+            onClose={() => setSelectedId(null)}
             onSave={handleSave}
           />
         </div>
@@ -707,7 +769,7 @@ export default function ProcessedDocsPage() {
                 )}
               </div>
 
-              <DocTable docs={getFiltered(tab)} onView={setSelectedDoc} />
+              <DocTable docs={getFiltered(tab)} onView={(d) => setSelectedId(d.id)} />
             </div>
           </TabsContent>
         ))}

@@ -97,6 +97,7 @@ class IdpProcessingJob(SQLModel, table=True):  # type: ignore[call-arg]
     )
     status: str = Field(default="queued", sa_column=Column(String(20), nullable=False, default="queued", index=True))
     steps_completed: list | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    log: list | None = Field(default=None, sa_column=Column(JSONB, nullable=True))  # ordered per-step flow-log events
     extraction_mode_used: str | None = Field(default=None, sa_column=Column(String(30), nullable=True))
     math_reconcile_attempts: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
     error_message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))

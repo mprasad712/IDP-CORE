@@ -530,6 +530,44 @@ async def extract_multimodal(
     return raw_result
 
 
+def _normalize_line_items(rows: Any) -> List[Dict[str, Any]]:
+    """Normalize line items into the canonical ``{row_index, columns:[{column_name, value, ...}]}``.
+
+    LLMs (esp. smaller/open models) sometimes return a FLAT row shape
+    (``{"Item": "Widget", "Qty": "10"}``) instead of the nested ``columns`` shape.
+    Both are accepted here so line items persist regardless of the model's output style.
+    """
+    normalized: List[Dict[str, Any]] = []
+    if not isinstance(rows, list):
+        return normalized
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        row_idx = row.get("row_index", i)
+        cols = row.get("columns")
+        if isinstance(cols, list):
+            # already canonical
+            normalized.append({"row_index": row_idx, "columns": cols})
+            continue
+        # flat row -> wrap each key/value pair as a column
+        flat_cols: List[Dict[str, Any]] = []
+        for key, val in row.items():
+            if key in ("row_index", "columns"):
+                continue
+            if isinstance(val, dict):
+                flat_cols.append({
+                    "column_name": key,
+                    "value": val.get("value"),
+                    "confidence": val.get("confidence", 0.0),
+                    "reasoning": val.get("reasoning"),
+                })
+            else:
+                flat_cols.append({"column_name": key, "value": val, "confidence": 0.0})
+        if flat_cols:
+            normalized.append({"row_index": row_idx, "columns": flat_cols})
+    return normalized
+
+
 async def save_extraction_results(
     session: AsyncSession,
     document_id: UUID,
@@ -592,8 +630,8 @@ async def save_extraction_results(
         session.add(header_rec)
         confidences.append(conf)
 
-    # 3. Save line items
-    line_items_list = extraction_result.get("line_items", [])
+    # 3. Save line items (normalized so flat/nested LLM shapes both persist)
+    line_items_list = _normalize_line_items(extraction_result.get("line_items", []))
     for row in line_items_list:
         row_idx = row.get("row_index", 0)
         cols = row.get("columns", [])

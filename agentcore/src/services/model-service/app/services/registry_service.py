@@ -59,13 +59,33 @@ def _require_key_vault_store() -> KeyVaultSecretStore:
     return key_vault
 
 
+def _is_local_mode() -> bool:
+    """No Key Vault configured -> store/read provider keys encrypted in the DB instead."""
+    return not get_settings().key_vault_url
+
+
+def _local_fernet():
+    from cryptography.fernet import Fernet
+
+    key = get_settings().encryption_key
+    return Fernet(key.encode() if isinstance(key, str) else key)
+
+
+def _encrypt_local(plain: str) -> str:
+    return _local_fernet().encrypt(plain.encode()).decode()
+
+
+def _decrypt_local(token: str) -> str:
+    return _local_fernet().decrypt(token.encode()).decode()
+
+
 async def create_model(
     session: AsyncSession,
     data: ModelRegistryCreate,
 ) -> ModelRegistryRead:
     """Insert a new model into the registry."""
     settings = get_settings()
-    key_vault = _require_key_vault_store()
+    key_vault = None if _is_local_mode() else _require_key_vault_store()
     provider = (data.provider or "").strip().lower()
 
     if provider in API_KEY_REQUIRED_PROVIDERS and not data.api_key:
@@ -102,23 +122,31 @@ async def create_model(
 
     if data.api_key:
         await session.flush()
-        secret_name = model_api_key_secret_name(
-            settings.key_vault_secret_prefix,
-            row.id,
-            model_type=data.model_type,
-            provider=data.provider,
-        )
-        await asyncio.to_thread(
-            key_vault.set_secret,
-            secret_name,
-            data.api_key,
-            tags={"service": "model-service", "type": "provider-api-key"},
-        )
-        row.provider_config = {
-            **provider_config,
-            "api_key_source": "azure_key_vault",
-        }
-        row.api_key_secret_ref = secret_name
+        if key_vault is None:
+            # Local mode: encrypt the provider key into the DB (no Key Vault).
+            row.provider_config = {
+                **provider_config,
+                "api_key_source": "local_encrypted",
+                "api_key_encrypted": _encrypt_local(data.api_key),
+            }
+        else:
+            secret_name = model_api_key_secret_name(
+                settings.key_vault_secret_prefix,
+                row.id,
+                model_type=data.model_type,
+                provider=data.provider,
+            )
+            await asyncio.to_thread(
+                key_vault.set_secret,
+                secret_name,
+                data.api_key,
+                tags={"service": "model-service", "type": "provider-api-key"},
+            )
+            row.provider_config = {
+                **provider_config,
+                "api_key_source": "azure_key_vault",
+            }
+            row.api_key_secret_ref = secret_name
 
     await session.commit()
     await session.refresh(row)
@@ -165,7 +193,7 @@ async def update_model(
 ) -> ModelRegistryRead | None:
     """Update an existing registry entry."""
     settings = get_settings()
-    key_vault = _require_key_vault_store()
+    key_vault = None if _is_local_mode() else _require_key_vault_store()
 
     row = await session.get(ModelRegistry, model_id)
     if row is None:
@@ -180,21 +208,27 @@ async def update_model(
             raise HTTPException(status_code=400, detail="API key is required for this provider.")
     if plain_key:
         provider_config = dict(row.provider_config or {})
-        secret_name = row.api_key_secret_ref or model_api_key_secret_name(
-            settings.key_vault_secret_prefix,
-            row.id,
-            model_type=row.model_type,
-            provider=row.provider,
-        )
-        await asyncio.to_thread(
-            key_vault.set_secret,
-            secret_name,
-            plain_key,
-            tags={"service": "model-service", "type": "provider-api-key"},
-        )
-        provider_config["api_key_source"] = "azure_key_vault"
-        row.provider_config = provider_config
-        row.api_key_secret_ref = secret_name
+        if key_vault is None:
+            # Local mode: encrypt the provider key into the DB (no Key Vault).
+            provider_config["api_key_source"] = "local_encrypted"
+            provider_config["api_key_encrypted"] = _encrypt_local(plain_key)
+            row.provider_config = provider_config
+        else:
+            secret_name = row.api_key_secret_ref or model_api_key_secret_name(
+                settings.key_vault_secret_prefix,
+                row.id,
+                model_type=row.model_type,
+                provider=row.provider,
+            )
+            await asyncio.to_thread(
+                key_vault.set_secret,
+                secret_name,
+                plain_key,
+                tags={"service": "model-service", "type": "provider-api-key"},
+            )
+            provider_config["api_key_source"] = "azure_key_vault"
+            row.provider_config = provider_config
+            row.api_key_secret_ref = secret_name
 
     for field, value in update_fields.items():
         setattr(row, field, value)
@@ -208,7 +242,7 @@ async def update_model(
 
 async def delete_model(session: AsyncSession, model_id: UUID) -> bool:
     """Hard-delete a registry entry. Returns True if the row existed."""
-    key_vault = _require_key_vault_store()
+    key_vault = None if _is_local_mode() else _require_key_vault_store()
     row = await session.get(ModelRegistry, model_id)
     if row is None:
         return False
@@ -228,7 +262,7 @@ async def get_decrypted_config(
     model_id: UUID,
 ) -> dict | None:
     """Return the full config with decrypted API key.  Internal use only (chat completions)."""
-    key_vault = _require_key_vault_store()
+    key_vault = None if _is_local_mode() else _require_key_vault_store()
     row = await session.get(ModelRegistry, model_id)
     if row is None:
         return None
@@ -244,15 +278,19 @@ async def get_decrypted_config(
         "default_params": row.default_params or {},
     }
 
-    secret_name = row.api_key_secret_ref
-
-    if secret_name:
-        secret_value = await asyncio.to_thread(key_vault.get_secret, secret_name)
-        if not secret_value:
-            msg = f"API key secret '{secret_name}' not found in Azure Key Vault for model {model_id}."
-            raise RuntimeError(msg)
-        config["api_key"] = secret_value
+    if key_vault is None:
+        # Local mode: decrypt the provider key straight from the DB.
+        enc = (row.provider_config or {}).get("api_key_encrypted")
+        config["api_key"] = _decrypt_local(enc) if enc else ""
     else:
-        config["api_key"] = ""
+        secret_name = row.api_key_secret_ref
+        if secret_name:
+            secret_value = await asyncio.to_thread(key_vault.get_secret, secret_name)
+            if not secret_value:
+                msg = f"API key secret '{secret_name}' not found in Azure Key Vault for model {model_id}."
+                raise RuntimeError(msg)
+            config["api_key"] = secret_value
+        else:
+            config["api_key"] = ""
 
     return config
