@@ -19,7 +19,10 @@ export const useGetBasicExamplesQuery: useQueryFunctionType<
 
   const responseFn = async () => {
     const { data } = await getBasicExamplesFn();
-    const examples = data?.length ? data : PREBUILT_TEMPLATES;
+    const apiExamples = data?.length ? data : [];
+    const prebuiltIds = new Set(PREBUILT_TEMPLATES.map((t) => t.id));
+    const deduped = apiExamples.filter((t) => !prebuiltIds.has(t.id));
+    const examples = [...PREBUILT_TEMPLATES, ...deduped];
     setExamples(examples);
     return examples;
   };

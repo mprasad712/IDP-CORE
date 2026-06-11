@@ -25,7 +25,6 @@ const HomePage = ({ type }: { type: "agents" | "components" | "mcp" }) => {
     const savedView = localStorage.getItem("view");
     return savedView === "grid" || savedView === "list" ? savedView : "list";
   });
-  const [newProjectModal, setNewProjectModal] = useState(false);
   const { folderId } = useParams();
   const [pageIndex, setPageIndex] = useState(1);
   const [pageSize, setPageSize] = useState(12);
@@ -36,6 +35,7 @@ const HomePage = ({ type }: { type: "agents" | "components" | "mcp" }) => {
   const { permissions, role } = useContext(AuthContext);
   const can = (permissionKey: string) => permissions?.includes(permissionKey);
 
+  const [newProjectModal, setNewProjectModal] = useState(false);
   const [agentType, setAgentType] = useState<"agents" | "components" | "mcp">(
     type,
   );
