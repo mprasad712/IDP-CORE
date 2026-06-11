@@ -76,7 +76,7 @@ class IdpDocument(SQLModel, table=True):  # type: ignore[call-arg]
     __table_args__ = (
         CheckConstraint("source IN ('upload','mail_connector','sharepoint','other')", name="ck_idp_documents_source"),
         CheckConstraint(
-            "status IN ('queued','processing','extracted','pending_review','auto_approved','reviewed','failed')",
+            "status IN ('queued','processing','extracted','pending_review','auto_approved','reviewed','failed','split')",
             name="ck_idp_documents_status",
         ),
         CheckConstraint("overall_confidence IS NULL OR (overall_confidence >= 0 AND overall_confidence <= 1)", name="ck_idp_documents_conf"),

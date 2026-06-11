@@ -246,6 +246,11 @@ async def _hook_split(session, storage, doc, tokens, page_status, cfg, flow: "Fl
     """
     if not cfg.multi_doc_split:
         return None
+    # A document that is itself a split child must never be split again (it shares the
+    # parent's agent, so cfg.multi_doc_split is still True). This is the real recursion guard.
+    if getattr(doc, "parent_document_id", None) is not None:
+        flow.step("split", "ok", "child document — split skipped (already split from a parent)")
+        return None
     try:
         from agentcore.services.idp.splitting import detect_document_boundaries, materialize_children
     except ImportError:
@@ -528,13 +533,20 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                 )
                 flow.step("long_doc", "ok", f"{len(sections)} section(s) -> {len(chunk_texts)} chunk(s)")
                 results: list[dict] = []
+                last_err: str | None = None
                 for i, ct in enumerate(chunk_texts):
                     try:
                         results.append(await _extract_text(session, cfg, llm, ct))
                     except PipelineError:
                         raise
                     except Exception as e:
+                        last_err = str(e)
                         flow.step("long_doc", "warn", f"chunk {i + 1}/{len(chunk_texts)} failed ({e})")
+                # If chunking produced chunks but EVERY one failed, treat it as a fatal
+                # extraction failure (consistent with the single-pass path), not a silent
+                # zero-field pending_review.
+                if chunk_texts and not results:
+                    raise PipelineError(f"extraction failed: all {len(chunk_texts)} chunk(s) failed ({last_err})")
                 extracted = long_doc.merge_chunk_extractions(results) if results else {"headers": {}, "line_items": []}
             else:
                 extracted = await _extract_text(session, cfg, llm, merged_text)

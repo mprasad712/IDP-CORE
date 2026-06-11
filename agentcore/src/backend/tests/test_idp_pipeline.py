@@ -754,6 +754,86 @@ async def test_pipeline_writes_entity_links(monkeypatch):
         await _cleanup(agent_id, doc_id)
 
 
+# ───────────────────── Codex-review fixes (2026-06-11) ─────────────────────
+def test_as_bool_coercion():
+    """agent_config._as_bool must interpret string toggles, not use truthiness."""
+    from agentcore.services.idp.agent_config import _as_bool
+
+    assert _as_bool("false", True) is False  # the bug: bool("false") was True
+    assert _as_bool("true", False) is True
+    assert _as_bool("0", True) is False and _as_bool("1", False) is True
+    assert _as_bool(True, False) is True and _as_bool(False, True) is False
+    assert _as_bool(None, True) is True  # missing -> default
+    assert _as_bool(0, True) is False and _as_bool(2, False) is True
+
+
+def test_chunks_for_extraction_subsplits_huge_page():
+    """A single page larger than max_tokens must be fixed-token-split, not sent whole."""
+    from agentcore.services.idp import long_doc
+
+    tokens = [{"text": "word " * 2000, "page_number": 1}]  # ~10k chars on ONE page
+    sections = [{"title": "Document", "page_start": 1, "page_end": 1, "order_index": 0, "parent_idx": None}]
+    chunks = long_doc.chunks_for_extraction(tokens, sections, max_tokens=1000)  # limit ~4000 chars
+    assert len(chunks) > 1  # the oversized page was split into multiple chunks
+    assert all(c.strip() for c in chunks)
+
+
+@pytest.mark.anyio
+async def test_hook_split_skips_child_document():
+    """A split-child (parent_document_id set) must never be split again."""
+    from types import SimpleNamespace
+    from agentcore.services.idp.pipeline import _hook_split, FlowLog
+
+    cfg = SimpleNamespace(multi_doc_split=True)
+    child = SimpleNamespace(parent_document_id=uuid4())
+    flow = FlowLog(uuid4(), "child.pdf")
+    result = await _hook_split(None, None, child, [], {}, cfg, flow)
+    assert result is None
+    assert any("child document" in e["detail"] for e in flow.events)
+
+
+@pytest.mark.anyio
+async def test_pipeline_long_doc_total_failure_is_fatal(monkeypatch):
+    """If every long-doc chunk extraction fails, the document must end 'failed', not review."""
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch, raises=True)  # LLM raises for every chunk
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf_pages(10))
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            assert doc.status == "failed"
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            assert job.status == "failed" and "chunk" in (job.error_message or "").lower()
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_idp_documents_allows_split_status():
+    """The idp_b22 migration must allow status='split' (split-parent container)."""
+    from agentcore.services.database.models.idp.documents import IdpDocument
+    from agentcore.services.deps import session_scope
+
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=b"%PDF-1.4 x")
+    try:
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            doc.status = "split"
+            session.add(doc)
+            await session.commit()  # must NOT violate ck_idp_documents_status
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            assert doc.status == "split"
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
 @pytest.mark.skipif(
     not __import__("agentcore.services.idp.ocr", fromlist=["_paddle_ocr_available"])._paddle_ocr_available,
     reason="PaddleOCR not installed (runs on M4/NVIDIA/Docker/CI)",
