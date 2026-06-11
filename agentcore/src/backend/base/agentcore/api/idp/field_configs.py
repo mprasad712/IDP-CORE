@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
+from loguru import logger
 from fastapi import APIRouter, Depends, HTTPException, status, Response
 from fastapi_pagination import Params, Page
 from fastapi_pagination.ext.sqlmodel import apaginate
@@ -31,6 +32,7 @@ class HeaderCreate(BaseModel):
     is_required: bool = PydanticField(default=False, description="Is this field required")
     display_order: int = PydanticField(..., description="The order index for display")
     description: str | None = PydanticField(default=None, description="Optional description")
+    prompt: str | None = PydanticField(default=None, description="Extraction prompt / instruction for this field")
 
 class HeaderUpdate(BaseModel):
     field_name: str | None = None
@@ -38,6 +40,7 @@ class HeaderUpdate(BaseModel):
     is_required: bool | None = None
     display_order: int | None = None
     description: str | None = None
+    prompt: str | None = None
 
 class HeaderRead(BaseModel):
     id: UUID
@@ -47,6 +50,7 @@ class HeaderRead(BaseModel):
     is_required: bool
     display_order: int
     description: str | None
+    prompt: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -58,12 +62,14 @@ class LineItemCreate(BaseModel):
     column_type: str = PydanticField(..., description="Type: text, number, or date")
     is_required: bool = PydanticField(default=False, description="Is this column required")
     display_order: int = PydanticField(..., description="The order index for display")
+    prompt: str | None = PydanticField(default=None, description="Extraction prompt / instruction for this column")
 
 class LineItemUpdate(BaseModel):
     column_name: str | None = None
     column_type: str | None = None
     is_required: bool | None = None
     display_order: int | None = None
+    prompt: str | None = None
 
 class LineItemRead(BaseModel):
     id: UUID
@@ -72,6 +78,7 @@ class LineItemRead(BaseModel):
     column_type: str
     is_required: bool
     display_order: int
+    prompt: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -84,6 +91,7 @@ class FieldConfigCreate(BaseModel):
     org_id: UUID | None = PydanticField(default=None, description="Organization ID scoping this configuration")
     is_template: bool = PydanticField(default=False, description="Is this configuration a template")
     is_active: bool = PydanticField(default=True, description="Is this configuration active")
+    visibility: str = PydanticField(default="org", description="Visibility scope: private | org | dept")
     extra: dict | None = PydanticField(default=None, description="JSON metadata escape-hatch")
     headers: list[HeaderCreate] | None = PydanticField(default=None, description="Nested headers list")
 
@@ -92,6 +100,7 @@ class FieldConfigUpdate(BaseModel):
     description: str | None = None
     is_template: bool | None = None
     is_active: bool | None = None
+    visibility: str | None = None
     extra: dict | None = None
 
 class FieldConfigRead(BaseModel):
@@ -101,6 +110,7 @@ class FieldConfigRead(BaseModel):
     org_id: UUID | None
     is_template: bool
     is_active: bool
+    visibility: str
     deleted_at: datetime | None
     extra: dict | None
     created_by: UUID | None
@@ -135,7 +145,7 @@ async def _get_scope_memberships(session: DbSession, user_id: UUID) -> tuple[set
         await session.exec(
             select(UserOrganizationMembership.org_id).where(
                 UserOrganizationMembership.user_id == user_id,
-                UserOrganizationMembership.status.in_(["accepted", "active"]),
+                UserOrganizationMembership.status.in_(["accepted", "active", "invited"]),
             )
         )
     ).all()
@@ -241,12 +251,19 @@ async def create_field_config(
                     detail=f"Invalid field type '{h.field_type}'. Must be text, number, date, or boolean.",
                 )
 
+    if payload.visibility not in ("private", "org", "dept"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid visibility value. Must be 'private', 'org', or 'dept'.",
+        )
+
     new_config = IdpFieldConfiguration(
         name=payload.name,
         description=payload.description,
         org_id=resolved_org_id,
         is_template=payload.is_template,
         is_active=payload.is_active,
+        visibility=payload.visibility,
         extra=payload.extra,
         created_by=current_user.id,
         updated_by=current_user.id,
@@ -259,6 +276,7 @@ async def create_field_config(
                 is_required=h.is_required,
                 display_order=h.display_order,
                 description=h.description,
+                prompt=h.prompt,
             )
             for h in payload.headers
         ]
@@ -329,9 +347,10 @@ async def list_field_configs(
         selectinload(IdpFieldConfiguration.headers),
         selectinload(IdpFieldConfiguration.line_items)
     ).where(IdpFieldConfiguration.deleted_at.is_(None))
-    
+
     org_ids, _ = await _get_scope_memberships(session, current_user.id)
     role = normalize_role(getattr(current_user, "role", None))
+    logger.info(f"[list_field_configs] user={current_user.id} role={role} org_ids={org_ids} is_template={is_template}")
 
     if role != "root":
         if org_id:
@@ -342,14 +361,20 @@ async def list_field_configs(
                 )
             stmt = stmt.where(
                 or_(
+                    IdpFieldConfiguration.created_by == current_user.id,
                     IdpFieldConfiguration.org_id == org_id,
                     and_(IdpFieldConfiguration.org_id.is_(None), IdpFieldConfiguration.is_template == True),
                 )
             )
         else:
+            # Build org condition only when the user has org memberships
+            org_conditions = (
+                [IdpFieldConfiguration.org_id.in_(list(org_ids))] if org_ids else []
+            )
             stmt = stmt.where(
                 or_(
-                    IdpFieldConfiguration.org_id.in_(list(org_ids)),
+                    IdpFieldConfiguration.created_by == current_user.id,
+                    *org_conditions,
                     and_(IdpFieldConfiguration.org_id.is_(None), IdpFieldConfiguration.is_template == True),
                 )
             )
@@ -565,6 +590,7 @@ async def clone_template(
         org_id=resolved_org_id,
         is_template=False,
         is_active=True,
+        visibility="org",
         extra=template.extra,
         created_by=current_user.id,
         updated_by=current_user.id,
@@ -577,6 +603,7 @@ async def clone_template(
             is_required=h.is_required,
             display_order=h.display_order,
             description=h.description,
+            prompt=h.prompt,
         )
         for h in template.headers
     ]
@@ -587,6 +614,7 @@ async def clone_template(
             column_type=l.column_type,
             is_required=l.is_required,
             display_order=l.display_order,
+            prompt=l.prompt,
         )
         for l in template.line_items
     ]
@@ -658,6 +686,7 @@ async def create_header(
         is_required=payload.is_required,
         display_order=payload.display_order,
         description=payload.description,
+        prompt=payload.prompt,
     )
     session.add(new_header)
 
@@ -884,6 +913,7 @@ async def create_line_item(
         column_type=payload.column_type,
         is_required=payload.is_required,
         display_order=payload.display_order,
+        prompt=payload.prompt,
     )
     session.add(new_line_item)
 

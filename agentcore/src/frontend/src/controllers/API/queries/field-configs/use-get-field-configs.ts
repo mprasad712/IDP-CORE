@@ -12,6 +12,7 @@ export interface FieldConfigHeader {
   is_required: boolean;
   display_order: number;
   description: string | null;
+  prompt: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -23,6 +24,7 @@ export interface FieldConfigLineItem {
   column_type: "text" | "number" | "date";
   is_required: boolean;
   display_order: number;
+  prompt: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -34,6 +36,7 @@ export interface FieldConfig {
   org_id: string | null;
   is_template: boolean;
   is_active: boolean;
+  visibility: "private" | "org" | "dept";
   deleted_at: string | null;
   extra: Record<string, unknown> | null;
   created_by: string | null;

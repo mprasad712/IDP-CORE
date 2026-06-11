@@ -8,6 +8,7 @@ export interface LineItemCreatePayload {
   column_type: "text" | "number" | "date";
   is_required?: boolean;
   display_order: number;
+  prompt?: string | null;
 }
 
 export const usePostFieldConfigLineItem = () => {

@@ -8,6 +8,7 @@ export interface FieldConfigUpdatePayload {
   description?: string | null;
   is_template?: boolean;
   is_active?: boolean;
+  visibility?: "private" | "org" | "dept";
   extra?: Record<string, unknown> | null;
 }
 

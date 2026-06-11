@@ -9,6 +9,7 @@ export interface HeaderCreatePayload {
   is_required?: boolean;
   display_order: number;
   description?: string | null;
+  prompt?: string | null;
 }
 
 export interface FieldConfigCreatePayload {
@@ -17,6 +18,7 @@ export interface FieldConfigCreatePayload {
   org_id?: string | null;
   is_template?: boolean;
   is_active?: boolean;
+  visibility?: "private" | "org" | "dept";
   extra?: Record<string, unknown> | null;
   headers?: HeaderCreatePayload[];
 }

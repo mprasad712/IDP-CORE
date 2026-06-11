@@ -40,6 +40,8 @@ class IdpFieldConfiguration(SQLModel, table=True):  # type: ignore[call-arg]
     )
     is_template: bool = Field(default=False, sa_column=Column(Boolean, nullable=False, default=False))
     is_active: bool = Field(default=True, sa_column=Column(Boolean, nullable=False, default=True))
+    # visibility: private = only the creator | org = all org members | dept = all dept members
+    visibility: str = Field(default="org", sa_column=Column(String(10), nullable=False, server_default="org"))
     deleted_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     extra: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
     created_by: UUID | None = Field(default=None, sa_column=Column(Uuid, ForeignKey("user.id", ondelete="SET NULL"), nullable=True, index=True))
@@ -58,6 +60,7 @@ class IdpFieldConfiguration(SQLModel, table=True):  # type: ignore[call-arg]
 
     __table_args__ = (
         UniqueConstraint("org_id", "name", name="uq_idp_field_config_org_name"),
+        CheckConstraint("visibility IN ('private','org','dept')", name="ck_idp_field_config_visibility"),
     )
 
 
@@ -74,6 +77,7 @@ class IdpFieldConfigHeader(SQLModel, table=True):  # type: ignore[call-arg]
     is_required: bool = Field(default=False, sa_column=Column(Boolean, nullable=False, default=False))
     display_order: int = Field(sa_column=Column(Integer, nullable=False))
     description: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    prompt: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
     updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
 
@@ -97,6 +101,7 @@ class IdpFieldConfigLineItem(SQLModel, table=True):  # type: ignore[call-arg]
     column_type: str = Field(sa_column=Column(String(20), nullable=False))  # text|number|date
     is_required: bool = Field(default=False, sa_column=Column(Boolean, nullable=False, default=False))
     display_order: int = Field(sa_column=Column(Integer, nullable=False))
+    prompt: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
     updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
 
