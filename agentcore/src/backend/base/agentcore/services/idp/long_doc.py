@@ -120,11 +120,20 @@ async def persist_sections(session, document_id: UUID, sections: list[dict]) -> 
 def _split_text_by_tokens(text: str, limit: int) -> list[str]:
     """Fixed-size split of one text block into ~``limit``-token pieces (token ~ 4 chars).
 
-    Breaks at the nearest newline/space before the cut so lines aren't sliced mid-word.
+    Breaks at the nearest newline/space before the cut so lines aren't sliced mid-word. If the
+    block opens with a ``===== PAGE N =====`` citation header, that header is repeated at the
+    top of every piece so each sub-chunk stays attributable to its page.
     """
     max_chars = max(4000, limit * 4)
     if len(text) <= max_chars:
         return [text] if text.strip() else []
+
+    # Preserve the page-citation header across sub-chunks.
+    header = ""
+    first_line = text.split("\n", 1)[0].strip()
+    if _PAGE_HEADER_RE.match(first_line):
+        header = first_line + "\n"
+
     parts: list[str] = []
     i, n = 0, len(text)
     while i < n:
@@ -137,7 +146,8 @@ def _split_text_by_tokens(text: str, limit: int) -> list[str]:
                 end = brk
         piece = text[i:end]
         if piece.strip():
-            parts.append(piece)
+            # Re-attach the header to continuation pieces (the first piece already has it).
+            parts.append(piece if (not parts or not header) else header + piece)
         i = end + 1 if end <= i else end
     return parts
 

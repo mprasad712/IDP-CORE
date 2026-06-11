@@ -536,7 +536,13 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                 last_err: str | None = None
                 for i, ct in enumerate(chunk_texts):
                     try:
-                        results.append(await _extract_text(session, cfg, llm, ct))
+                        res = await _extract_text(session, cfg, llm, ct)
+                        # extract_dynamic swallows LLM/transport errors into {"error":...} rather
+                        # than raising; surface that per chunk so a failed chunk isn't silent.
+                        if isinstance(res, dict) and res.get("error"):
+                            last_err = str(res.get("error"))
+                            flow.step("long_doc", "warn", f"chunk {i + 1}/{len(chunk_texts)} error: {last_err}")
+                        results.append(res)
                     except PipelineError:
                         raise
                     except Exception as e:

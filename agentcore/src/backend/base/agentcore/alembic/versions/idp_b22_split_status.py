@@ -37,11 +37,10 @@ _NAMES = ("ck_idp_documents_ck_idp_documents_status", "ck_idp_documents_status")
 
 
 def _drop_existing() -> None:
+    # Use DROP ... IF EXISTS (raw SQL): op.drop_constraint on a missing name raises, which
+    # aborts the whole migration transaction in Postgres and would then fail the recreate.
     for name in _NAMES:
-        try:
-            op.drop_constraint(name, _TABLE, type_="check")
-        except Exception:
-            pass
+        op.execute(f'ALTER TABLE {_TABLE} DROP CONSTRAINT IF EXISTS {name}')
 
 
 def upgrade() -> None:
