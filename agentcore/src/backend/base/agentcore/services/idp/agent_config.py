@@ -56,6 +56,21 @@ class ResolvedPipelineConfig:
     confidence_threshold: float = 0.8
     multi_doc_split: bool = False
     ocr_lang: str = "en"
+    # differentiators. The three node-features default OFF (only run when explicitly
+    # enabled via idp_agent.extra, since their canvas nodes are not built yet); the two
+    # automatic backend features default ON but only do work when the document warrants
+    # it (long docs / cross-page repeats), so short docs are unaffected.
+    classify_enabled: bool = False
+    classify_auto_select: bool = True
+    classify_threshold: float = 0.7
+    detect_enabled: bool = False
+    detect_enabled_types: set[str] | None = None
+    math_reconcile_enabled: bool = False
+    math_reconcile_max_attempts: int = 2
+    long_doc_enabled: bool = True
+    long_doc_max_pages: int = 8
+    long_doc_max_tokens: int = 12000
+    entity_linking_enabled: bool = True
 
 
 # ───────────────────────── graph helpers ─────────────────────────
@@ -179,6 +194,14 @@ async def resolve_pipeline_config(
     confidence_threshold = _to_float(extra.get("confidence_threshold"), 0.8)
     ocr_lang = str(extra.get("ocr_language") or _field(extractor, "language") or "en")
 
+    # differentiator toggles (config-driven via idp_agent.extra until canvas nodes exist)
+    det_types = extra.get("detect_enabled_types")
+    detect_enabled_types = (
+        {str(x).strip().lower() for x in det_types if str(x).strip()}
+        if isinstance(det_types, list) and det_types
+        else None
+    )
+
     return ResolvedPipelineConfig(
         model_id=model_id,
         extraction_mode=mode,
@@ -201,4 +224,15 @@ async def resolve_pipeline_config(
         confidence_threshold=confidence_threshold,
         multi_doc_split=bool(idp_agent.multi_doc_split),
         ocr_lang=ocr_lang,
+        classify_enabled=bool(extra.get("classify_enabled", False)),
+        classify_auto_select=bool(extra.get("classify_auto_select", True)),
+        classify_threshold=_to_float(extra.get("classify_threshold"), 0.7),
+        detect_enabled=bool(extra.get("detect_enabled", False)),
+        detect_enabled_types=detect_enabled_types,
+        math_reconcile_enabled=bool(extra.get("math_reconcile_enabled", False)),
+        math_reconcile_max_attempts=_to_int(extra.get("math_reconcile_max_attempts"), 2),
+        long_doc_enabled=bool(extra.get("long_doc_enabled", True)),
+        long_doc_max_pages=_to_int(extra.get("long_doc_max_pages"), 8),
+        long_doc_max_tokens=_to_int(extra.get("long_doc_max_tokens"), 12000),
+        entity_linking_enabled=bool(extra.get("entity_linking_enabled", True)),
     )

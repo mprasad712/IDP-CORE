@@ -25,9 +25,12 @@ from loguru import logger
 from sqlmodel import select
 
 from agentcore.services.database.models.agent.model import Agent
-from agentcore.services.database.models.idp.config import IdpAgent
+from agentcore.services.database.models.idp.config import IdpAgent, IdpAgentRule
 from agentcore.services.database.models.idp.documents import (
+    IdpDetectedElement,
     IdpDocument,
+    IdpExtractedHeader,
+    IdpExtractedLineItem,
     IdpProcessingJob,
 )
 from agentcore.services.deps import (
@@ -36,7 +39,7 @@ from agentcore.services.deps import (
     get_storage_service,
     session_scope,
 )
-from agentcore.services.idp import text_layer
+from agentcore.services.idp import long_doc, text_layer
 from agentcore.services.idp.agent_config import MODE_NAMED, resolve_pipeline_config
 from agentcore.services.idp.extraction import (
     extract_dynamic,
@@ -49,6 +52,7 @@ from agentcore.services.idp.pre_processing import (
     detect_and_correct_skew,
 )
 from agentcore.services.idp.restruct import build_merged_text
+from agentcore.services.idp.rules_engine import evaluate_rules
 
 
 def _utcnow() -> datetime:
@@ -165,6 +169,182 @@ async def _save_artifact(storage, agent_id: str, rel_path: str, data: bytes) -> 
         logger.warning(f"[pipeline] could not store artifact {rel_path}: {e}")
 
 
+async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, overall_conf: float, cfg, flow: "FlowLog") -> str:
+    """Decide auto_approved vs pending_review.
+
+    If the agent has rules (``idp_agent_rules``), run the real rules engine (B17) — it can
+    reference per-field values, confidence, regex, field comparisons and visual elements.
+    With no rules, fall back to the B19 default-action + confidence-threshold behaviour.
+    A zero-confidence (no fields) extraction always routes to review, whatever the rules say.
+    """
+    rules = (
+        await session.exec(
+            select(IdpAgentRule)
+            .where(IdpAgentRule.idp_agent_id == idp_agent_id)
+            .order_by(IdpAgentRule.rule_group, IdpAgentRule.display_order)
+        )
+    ).all()
+
+    if not rules:
+        if overall_conf <= 0.0:
+            new_status = "pending_review"
+        elif cfg.default_rule_action == "auto_approve" and overall_conf >= cfg.confidence_threshold:
+            new_status = "auto_approved"
+        else:
+            new_status = "pending_review"
+        flow.step("route", "ok", f"{new_status} (no rules; threshold={cfg.confidence_threshold})")
+        return new_status
+
+    # Re-query the just-saved fields + any detected visual elements for the rule conditions.
+    headers = (
+        await session.exec(select(IdpExtractedHeader).where(IdpExtractedHeader.job_id == job_id))
+    ).all()
+    line_items = (
+        await session.exec(select(IdpExtractedLineItem).where(IdpExtractedLineItem.job_id == job_id))
+    ).all()
+    detected = (
+        await session.exec(select(IdpDetectedElement).where(IdpDetectedElement.document_id == document_id))
+    ).all()
+
+    try:
+        decision = evaluate_rules(
+            overall_confidence=overall_conf,
+            headers=headers,
+            line_items=line_items,
+            detected_elements=detected,
+            rules=rules,
+            default_action=cfg.default_rule_action,
+        )
+        action = decision.get("action", cfg.default_rule_action)
+        matched = decision.get("matched_group")
+        failed = len(decision.get("failed_conditions", []))
+    except Exception as e:  # pragma: no cover - rules must never crash the pipeline
+        flow.step("route", "warn", f"rules engine error ({e}); falling back to review")
+        return "pending_review"
+
+    new_status = "auto_approved" if action == "auto_approve" else "pending_review"
+    if overall_conf <= 0.0:
+        new_status = "pending_review"
+    flow.step(
+        "route", "ok",
+        f"{new_status} via rules (matched_group={matched}, failed={failed}, "
+        f"{len(rules)} rule(s))",
+    )
+    return new_status
+
+
+# ─────────────────────────── differentiator hooks ───────────────────────────
+# Each hook is OPTIONAL, NON-FATAL and import-guarded: it is a no-op until both (a) the
+# owning service module exists (Ather's modules land via branch merge) and (b) the feature
+# is enabled on the agent. A differentiator raising must never fail the document.
+
+async def _hook_split(session, storage, doc, tokens, page_status, cfg, flow: "FlowLog") -> list[UUID] | None:
+    """B32 multi-doc split. Returns child document ids to enqueue (caller early-returns), else None.
+
+    Shared seam: Ather owns detect_document_boundaries + materialize_children; the pipeline
+    (Basu) owns the enqueue + early-return wiring.
+    """
+    if not cfg.multi_doc_split:
+        return None
+    try:
+        from agentcore.services.idp.splitting import detect_document_boundaries, materialize_children
+    except ImportError:
+        flow.step("split", "warn", "multi-doc split not available yet")
+        return None
+    try:
+        boundaries = detect_document_boundaries(tokens, page_status)
+        if not boundaries or len(boundaries) < 2:
+            flow.step("split", "ok", "single document (no split)")
+            return None
+        child_ids = await materialize_children(session, storage, doc, boundaries)
+        flow.step("split", "ok", f"split into {len(child_ids)} child document(s)")
+        return child_ids or None
+    except Exception as e:
+        flow.step("split", "warn", f"skipped ({e})")
+        return None
+
+
+async def _hook_detect(session, document_id: UUID, file_bytes: bytes, file_type: str, cfg, flow: "FlowLog") -> None:
+    """B30 visual element detection -> idp_detected_elements (used later by the rules engine)."""
+    if not cfg.detect_enabled:
+        return
+    try:
+        from agentcore.services.idp.visual_detection import detect_and_persist
+    except ImportError:
+        flow.step("detect_elements", "warn", "visual detection persistence not available yet")
+        return
+    try:
+        ids = await detect_and_persist(session, document_id, file_bytes, file_type, cfg.detect_enabled_types)
+        flow.step("detect_elements", "ok", f"{len(ids)} element(s) detected")
+    except Exception as e:
+        flow.step("detect_elements", "warn", f"skipped ({e})")
+
+
+async def _hook_classify(session, document_id: UUID, base_agent, merged_text: str, cfg, flow: "FlowLog") -> None:
+    """B29 document classification -> idp_document_classifications; may auto-select a Named Config.
+
+    Mutates ``cfg`` in place (field_config_id + extraction_mode) when auto-select fires.
+    """
+    if not cfg.classify_enabled:
+        return
+    try:
+        from agentcore.services.idp.classification import classify_and_persist
+    except ImportError:
+        flow.step("classify", "warn", "classification not available yet")
+        return
+    try:
+        org_id = getattr(base_agent, "org_id", None)
+        result = await classify_and_persist(
+            session, document_id, merged_text, org_id,
+            auto_select=cfg.classify_auto_select, threshold=cfg.classify_threshold,
+        )
+        result = result if isinstance(result, dict) else {}
+        sel = result.get("selected_config_id")
+        if sel and cfg.classify_auto_select:
+            cfg.field_config_id = sel if isinstance(sel, UUID) else UUID(str(sel))
+            cfg.extraction_mode = MODE_NAMED
+            flow.step("classify", "ok",
+                      f"type={result.get('predicted_type')} conf={result.get('confidence')} -> auto-selected config")
+        else:
+            flow.step("classify", "ok",
+                      f"type={result.get('predicted_type')} conf={result.get('confidence')}")
+    except Exception as e:
+        flow.step("classify", "warn", f"skipped ({e})")
+
+
+async def _hook_math_reconcile(extracted, llm, job, cfg, flow: "FlowLog"):
+    """B31 math reconcile: fix arithmetic BEFORE save. Returns the (possibly corrected) extraction."""
+    if not cfg.math_reconcile_enabled or not isinstance(extracted, dict):
+        return extracted
+    try:
+        from agentcore.services.idp.math_reconcile import reconcile_math
+    except ImportError:
+        flow.step("math_reconcile", "warn", "math reconcile not available yet")
+        return extracted
+    try:
+        res = await reconcile_math(extracted, llm, max_attempts=cfg.math_reconcile_max_attempts)
+        res = res if isinstance(res, dict) else {}
+        job.math_reconcile_attempts = int(res.get("attempts", 0) or 0)
+        flow.step("math_reconcile", "ok",
+                  f"balanced={res.get('balanced')} attempts={res.get('attempts')}")
+        return res.get("extracted") or extracted
+    except Exception as e:
+        flow.step("math_reconcile", "warn", f"skipped ({e})")
+        return extracted
+
+
+async def _extract_text(session, cfg, llm, text: str) -> dict:
+    """Run the configured text-mode extractor on one block of text (used per-chunk too)."""
+    if cfg.extraction_mode == MODE_NAMED:
+        if not cfg.field_config_id:
+            raise PipelineError("named-config extraction selected but no field configuration resolved")
+        return await extract_named_config(
+            session=session, ocr_text=text, field_config_id=cfg.field_config_id, llm_model=llm
+        )
+    prompt = cfg.prompt or "Extract all key fields from this document. Return structured JSON."
+    return await extract_dynamic(ocr_text=text, prompt=prompt, llm_model=llm)
+
+
 # ─────────────────────────────── orchestrator ───────────────────────────────
 async def process_document(document_id: UUID, job_id: UUID | None = None) -> None:
     """Background entrypoint: process one document end-to-end. Never raises."""
@@ -270,6 +450,34 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             tokens += [t for t in ocr if int(t.get("page_number", 1) or 1) in scanned_pages]
             flow.step("ocr", "ok", f"mixed: native {len(digital_pages)} digital + OCR {len(scanned_pages)} scanned page(s)")
 
+        # HOOK: B32 multi-doc split — operate on the WHOLE document (before page selection).
+        # If the file holds several documents, materialise a child doc+job each and stop here;
+        # the children are normal standalone docs that process independently.
+        child_ids = await _hook_split(session, storage, doc, tokens, page_status, cfg, flow)
+        if child_ids:
+            for cid in child_ids:
+                try:
+                    await enqueue_document(session, cid)
+                except Exception as e:  # pragma: no cover - one bad child must not abort the rest
+                    flow.step("split", "warn", f"could not enqueue child {cid}: {e}")
+            doc = await session.get(IdpDocument, document_id)
+            doc.status = "split"
+            doc.processing_completed_at = _utcnow()
+            job.status = "completed"
+            job.completed_at = _utcnow()
+            job.steps_completed = flow.steps_ok
+            job.log = flow.events
+            session.add(doc)
+            session.add(job)
+            await session.commit()
+            await _save_artifact(
+                storage, agent_scope, f"flow_logs/{document_id}/flow.log", flow.render().encode("utf-8")
+            )
+            return
+
+        # HOOK: B30 visual element detection — uses the original bytes (rasterised internally).
+        await _hook_detect(session, document_id, original_bytes, file_type, cfg, flow)
+
         # Authoritative page count = max(classified pages, highest token page) so multi-sheet
         # office files (one classification entry, many token "pages") are NOT truncated.
         token_max = max([int(t.get("page_number", 1) or 1) for t in tokens], default=1)
@@ -294,20 +502,42 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         if not merged_text.strip():
             flow.step("text", "warn", "no text extracted")
 
+        # HOOK: B29 classification — may set cfg.predicted_type + auto-select a Named Config
+        # (mutates cfg.field_config_id / cfg.extraction_mode) before extraction runs.
+        await _hook_classify(session, document_id, base_agent, merged_text, cfg, flow)
+
         # 5. extract (text modes; multimodal parked)
         if cfg.multimodal_requested:
             flow.step("extract", "warn", "multimodal parked -> using text extraction")  # MULTIMODAL HOOK (PARKED)
         llm = await _build_llm(session, cfg.model_id)
+
+        # HOOK: B35 long-document handling — long docs are split into section/page chunks,
+        # extracted per chunk and merged; short docs take the single-pass path unchanged.
+        use_long_doc = bool(cfg.long_doc_enabled) and long_doc.should_chunk(
+            tokens, max_pages=cfg.long_doc_max_pages, max_tokens=cfg.long_doc_max_tokens
+        )
         try:
-            if cfg.extraction_mode == MODE_NAMED:
-                if not cfg.field_config_id:
-                    raise PipelineError("named-config extraction selected but no field configuration resolved")
-                extracted = await extract_named_config(
-                    session=session, ocr_text=merged_text, field_config_id=cfg.field_config_id, llm_model=llm
+            if use_long_doc:
+                sections = long_doc.build_sections(tokens)
+                try:
+                    await long_doc.persist_sections(session, document_id, sections)
+                except Exception as e:  # pragma: no cover - section persistence is best-effort
+                    flow.step("long_doc", "warn", f"could not persist sections ({e})")
+                chunk_texts = long_doc.chunks_for_extraction(
+                    tokens, sections, max_tokens=cfg.long_doc_max_tokens
                 )
+                flow.step("long_doc", "ok", f"{len(sections)} section(s) -> {len(chunk_texts)} chunk(s)")
+                results: list[dict] = []
+                for i, ct in enumerate(chunk_texts):
+                    try:
+                        results.append(await _extract_text(session, cfg, llm, ct))
+                    except PipelineError:
+                        raise
+                    except Exception as e:
+                        flow.step("long_doc", "warn", f"chunk {i + 1}/{len(chunk_texts)} failed ({e})")
+                extracted = long_doc.merge_chunk_extractions(results) if results else {"headers": {}, "line_items": []}
             else:
-                prompt = cfg.prompt or "Extract all key fields from this document. Return structured JSON."
-                extracted = await extract_dynamic(ocr_text=merged_text, prompt=prompt, llm_model=llm)
+                extracted = await _extract_text(session, cfg, llm, merged_text)
         except PipelineError:
             raise
         except Exception as e:
@@ -322,6 +552,9 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             if n_fields == 0:
                 raise PipelineError(f"extraction failed: {extracted.get('error')}")
             flow.step("extract", "warn", f"partial extraction: {extracted.get('error')}")
+
+        # HOOK: B31 math reconcile — re-prompt the LLM to fix arithmetic BEFORE saving.
+        extracted = await _hook_math_reconcile(extracted, llm, job, cfg, flow)
 
         # 6. save. NOTE: save_extraction_results commits internally, so extracted rows
         # persist even if a later step fails — intentional partial-result persistence
@@ -338,14 +571,21 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         job.extraction_mode_used = cfg.extraction_mode
         flow.step("extract", "ok", f"mode={cfg.extraction_mode} headers={n_head} lines={n_line} conf={overall_conf:.2f}")
 
-        # 7. route (rules engine = later task; use default_rule_action + threshold)  # RULES ENGINE HOOK
-        if overall_conf <= 0.0:
-            new_status = "pending_review"
-        elif cfg.default_rule_action == "auto_approve" and overall_conf >= cfg.confidence_threshold:
-            new_status = "auto_approved"
-        else:
-            new_status = "pending_review"
-        flow.step("route", "ok", f"{new_status} (threshold={cfg.confidence_threshold})")
+        # HOOK: B36 cross-page entity linking — record entities seen on multiple pages.
+        if cfg.entity_linking_enabled:
+            try:
+                from agentcore.services.idp.entity_linking import link_entities
+
+                n_links = await link_entities(
+                    session, document_id, extracted if isinstance(extracted, dict) else {}, tokens
+                )
+                if n_links:
+                    flow.step("entity_link", "ok", f"{n_links} cross-page entity link(s)")
+            except Exception as e:  # pragma: no cover - linking must never fail the doc
+                flow.step("entity_link", "warn", f"skipped ({e})")
+
+        # 7. route — the rules engine (B17) decides auto_approve vs pending_review.
+        new_status = await _route(session, document_id, job.id, idp_agent.id, overall_conf, cfg, flow)
 
         # 8. finalize
         doc = await session.get(IdpDocument, document_id)  # refresh (save committed)

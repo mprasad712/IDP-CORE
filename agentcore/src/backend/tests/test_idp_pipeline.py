@@ -229,6 +229,80 @@ async def test_pipeline_routing_empty_goes_to_review(monkeypatch):
         await _cleanup(agent_id, doc_id)
 
 
+async def _add_rule(session, idp_agent_id, **kw):
+    from agentcore.services.database.models.idp.config import IdpAgentRule
+
+    defaults = dict(
+        idp_agent_id=idp_agent_id, rule_group=1, condition_type="confidence_overall",
+        field_name=None, operator=">=", value="0.8", action="auto_approve", display_order=0,
+    )
+    defaults.update(kw)
+    rule = IdpAgentRule(**defaults)
+    session.add(rule)
+    await session.commit()
+    return rule.id
+
+
+async def _delete_rules(idp_agent_id):
+    from agentcore.services.database.models.idp.config import IdpAgentRule
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    async with session_scope() as session:
+        for r in (await session.exec(select(IdpAgentRule).where(IdpAgentRule.idp_agent_id == idp_agent_id))).all():
+            await session.delete(r)
+        await session.commit()
+
+
+@pytest.mark.anyio
+async def test_pipeline_rules_passing_rule_auto_approves(monkeypatch):
+    """A passing rule (action=auto_approve) overrides a pending_review default."""
+    from agentcore.services.database.models.idp.documents import IdpDocument
+    from agentcore.services.deps import session_scope
+
+    _patch_extraction(monkeypatch, result={"headers": {"total": {"value": "100", "confidence": 0.99}}, "line_items": []})
+    async with session_scope() as session:
+        # default is pending_review -> only the RULE can flip it to auto_approved
+        agent_id, doc_id = await _setup_document(
+            session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf(), default_rule_action="pending_review"
+        )
+        await _add_rule(session, agent_id, condition_type="confidence_overall", operator=">=", value="0.8", action="auto_approve")
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            assert doc.status == "auto_approved"  # rule passed -> auto-approved despite default
+    finally:
+        await _delete_rules(agent_id)
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_pipeline_rules_failing_rule_goes_to_review(monkeypatch):
+    """A failing auto-approve rule leaves the doc in pending_review (no group matched -> default)."""
+    from agentcore.services.database.models.idp.documents import IdpDocument
+    from agentcore.services.deps import session_scope
+
+    _patch_extraction(monkeypatch, result={"headers": {"total": {"value": "100", "confidence": 0.99}}, "line_items": []})
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(
+            session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf(), default_rule_action="pending_review"
+        )
+        # total=100 is NOT > 1000 -> rule fails -> falls back to default (pending_review)
+        await _add_rule(
+            session, agent_id, condition_type="field_value_numeric",
+            field_name="total", operator=">", value="1000", action="auto_approve",
+        )
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            assert doc.status == "pending_review"
+    finally:
+        await _delete_rules(agent_id)
+        await _cleanup(agent_id, doc_id)
+
+
 @pytest.mark.anyio
 async def test_pipeline_failure_path(monkeypatch):
     from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
@@ -527,6 +601,156 @@ async def test_document_file_endpoint(monkeypatch):
         assert "application/pdf" in r.headers.get("content-type", "")
     finally:
         app.dependency_overrides.clear()
+        await _cleanup(agent_id, doc_id)
+
+
+def _digital_pdf_pages(n: int) -> bytes:
+    """An n-page born-digital PDF (each page word-dense so it classifies digital)."""
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf)
+    for p in range(n):
+        c.drawString(50, 770, f"Invoice Number INV-{p:03d} Total Amount {100 + p}")
+        y = 748
+        for r in range(6):
+            c.drawString(50, y, " ".join(f"word{p}{r}{i}" for i in range(8)))
+            y -= 18
+        c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+def test_long_doc_build_sections_splits_on_headings():
+    from agentcore.services.idp import long_doc
+
+    tokens = [
+        {"text": "introduction paragraph one", "page_number": 1},
+        {"text": "SUMMARY", "page_number": 2},
+        {"text": "more body text on page three", "page_number": 3},
+    ]
+    sections = long_doc.build_sections(tokens)
+    # page 1 -> "Document"; page 2 opens with heading SUMMARY -> new section (extends to p3)
+    assert len(sections) == 2
+    assert sections[0]["page_start"] == 1 and sections[0]["page_end"] == 1
+    assert sections[1]["title"] == "SUMMARY" and sections[1]["page_start"] == 2 and sections[1]["page_end"] == 3
+
+
+def test_long_doc_merge_chunk_extractions():
+    from agentcore.services.idp import long_doc
+
+    results = [
+        {"headers": {"a": {"value": "1", "confidence": 0.5}},
+         "line_items": [{"row_index": 0, "columns": [{"column_name": "c", "value": "x"}]}]},
+        {"headers": {"a": {"value": "2", "confidence": 0.9}, "b": {"value": "3", "confidence": 0.7}},
+         "line_items": [{"row_index": 0, "columns": [{"column_name": "c", "value": "y"}]}]},
+    ]
+    merged = long_doc.merge_chunk_extractions(results)
+    assert merged["headers"]["a"]["value"] == "2"  # higher-confidence value wins
+    assert merged["headers"]["b"]["value"] == "3"
+    assert [r["row_index"] for r in merged["line_items"]] == [0, 1]  # continuous re-index
+
+
+@pytest.mark.anyio
+async def test_pipeline_long_doc_chunks_and_persists_sections(monkeypatch):
+    """A many-page digital doc triggers chunking + writes idp_document_sections."""
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob, IdpDocumentSection
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch)  # mock LLM returns the same header for every chunk
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(
+            session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf_pages(10)  # >8 pages -> long
+        )
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            assert doc.status in ("auto_approved", "pending_review")
+            assert doc.page_count == 10
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            assert "long_doc" in [e["step"] for e in job.log]
+            sections = (await session.exec(select(IdpDocumentSection).where(IdpDocumentSection.document_id == doc_id))).all()
+            assert len(sections) >= 1  # at least one section persisted
+    finally:
+        async with session_scope() as session:
+            for s in (await session.exec(select(IdpDocumentSection).where(IdpDocumentSection.document_id == doc_id))).all():
+                await session.delete(s)
+            await session.commit()
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_entity_linking_links_cross_page_value():
+    """A header value present on >= 2 pages becomes one idp_entity_link; single-page values don't."""
+    from agentcore.services.idp.entity_linking import link_entities
+
+    class FakeSession:
+        def __init__(self):
+            self.added = []
+
+        def add(self, obj):
+            self.added.append(obj)
+
+        async def commit(self):
+            pass
+
+    tokens = [
+        {"text": "Vendor", "page_number": 1}, {"text": "ACME", "page_number": 1}, {"text": "CORP", "page_number": 1},
+        {"text": "continued", "page_number": 2}, {"text": "ACME", "page_number": 2}, {"text": "CORP", "page_number": 2},
+        {"text": "unique", "page_number": 2},
+    ]
+    extracted = {
+        "headers": {
+            "vendor": {"value": "ACME CORP", "confidence": 0.9},
+            "page2only": {"value": "unique", "confidence": 0.8},
+        },
+        "line_items": [],
+    }
+    sess = FakeSession()
+    n = await link_entities(sess, uuid4(), extracted, tokens)
+    assert n == 1  # only the cross-page vendor; "unique" is page-2-only
+    link = sess.added[0]
+    assert link.entity_type == "vendor" and link.occurrences["pages"] == [1, 2]
+
+
+def _two_page_pdf_with_repeat() -> bytes:
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf)
+    for p in range(2):
+        c.drawString(50, 770, "Vendor ACME CORP Invoice")
+        y = 748
+        for r in range(6):
+            c.drawString(50, y, " ".join(f"w{p}{r}{i}" for i in range(8)))
+            y -= 18
+        c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+@pytest.mark.anyio
+async def test_pipeline_writes_entity_links(monkeypatch):
+    """End-to-end: a repeated header value across 2 pages writes idp_entity_links."""
+    from agentcore.services.database.models.idp.documents import IdpEntityLink
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch, result={"headers": {"vendor": {"value": "ACME CORP", "confidence": 0.9}}, "line_items": []})
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_two_page_pdf_with_repeat())
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            links = (await session.exec(select(IdpEntityLink).where(IdpEntityLink.document_id == doc_id))).all()
+            assert any(l.entity_type == "vendor" and l.occurrences.get("pages") == [1, 2] for l in links)
+    finally:
+        async with session_scope() as session:
+            for l in (await session.exec(select(IdpEntityLink).where(IdpEntityLink.document_id == doc_id))).all():
+                await session.delete(l)
+            await session.commit()
         await _cleanup(agent_id, doc_id)
 
 
