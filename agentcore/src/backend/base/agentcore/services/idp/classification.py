@@ -137,6 +137,14 @@ async def classify_and_persist(
                 candidates={}
             )
 
+    # Clamp the LLM confidence to [0, 1] BEFORE any DB use — the DB has a
+    # ck_idp_classification_conf CHECK(0..1), so an out-of-range value would raise on commit
+    # and (caught non-fatally) poison the shared pipeline session.
+    try:
+        conf = max(0.0, min(1.0, float(result.confidence)))
+    except (TypeError, ValueError):
+        conf = 0.0
+
     # Normalize prediction to match catalog template casing
     predicted_type = result.predicted_type
     matched_template = None
@@ -149,23 +157,25 @@ async def classify_and_persist(
     selected_config_id = None
 
     # 5. Resolve config or Clone global template if auto_select is enabled
-    if auto_select and result.confidence >= threshold and matched_template:
-        # Check for existing config for this org
+    if auto_select and conf >= threshold and matched_template:
+        # Check for existing config for this org (must be active)
         stmt = select(IdpFieldConfiguration).where(
             IdpFieldConfiguration.name == predicted_type,
             IdpFieldConfiguration.org_id == org_id,
             IdpFieldConfiguration.is_template == False,
+            IdpFieldConfiguration.is_active == True,
             IdpFieldConfiguration.deleted_at.is_(None)
         )
         config = (await session.exec(stmt)).first()
         if config:
             selected_config_id = config.id
         else:
-            # Look up the global template config
+            # Look up the global template config (must be active)
             stmt_template = select(IdpFieldConfiguration).where(
                 IdpFieldConfiguration.name == predicted_type,
                 IdpFieldConfiguration.org_id.is_(None),
                 IdpFieldConfiguration.is_template == True,
+                IdpFieldConfiguration.is_active == True,
                 IdpFieldConfiguration.deleted_at.is_(None)
             )
             global_template = (await session.exec(stmt_template)).first()
@@ -221,7 +231,7 @@ async def classify_and_persist(
         id=uuid4(),
         document_id=document_id,
         predicted_type=predicted_type,
-        confidence=result.confidence,
+        confidence=conf,
         candidates=result.candidates,
         selected_config_id=selected_config_id,
         is_selected=bool(selected_config_id)
@@ -234,7 +244,7 @@ async def classify_and_persist(
 
     return {
         "predicted_type": predicted_type,
-        "confidence": result.confidence,
+        "confidence": conf,
         "candidates": result.candidates,
         "selected_config_id": selected_config_id
     }

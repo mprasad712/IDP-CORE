@@ -834,6 +834,237 @@ async def test_idp_documents_allows_split_status():
         await _cleanup(agent_id, doc_id)
 
 
+# ───────── differentiator HOOK WIRING (pipeline fires them + persists) ─────────
+@pytest.mark.anyio
+async def test_pipeline_fires_classification_hook(monkeypatch):
+    """With classify_enabled, the pipeline calls classification and an idp_document_classifications row lands."""
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpDocumentClassification
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch)
+
+    async def fake_classify(session, document_id, merged_text, org_id, *, auto_select, threshold):
+        session.add(IdpDocumentClassification(
+            document_id=document_id, predicted_type="Invoice", confidence=0.95, is_selected=False,
+        ))
+        await session.commit()
+        return {"predicted_type": "Invoice", "confidence": 0.95, "candidates": None, "selected_config_id": None}
+
+    monkeypatch.setattr("agentcore.services.idp.classification.classify_and_persist", fake_classify)
+
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(
+            session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf(),
+            extra={"classify_enabled": True, "classify_auto_select": False},
+        )
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            rows = (await session.exec(select(IdpDocumentClassification).where(IdpDocumentClassification.document_id == doc_id))).all()
+            assert len(rows) == 1 and rows[0].predicted_type == "Invoice"
+            doc = await session.get(IdpDocument, doc_id)
+            assert doc.status in ("auto_approved", "pending_review")  # pipeline still completes
+    finally:
+        async with session_scope() as session:
+            for r in (await session.exec(select(IdpDocumentClassification).where(IdpDocumentClassification.document_id == doc_id))).all():
+                await session.delete(r)
+            await session.commit()
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_pipeline_fires_detection_hook(monkeypatch):
+    """With detect_enabled, the pipeline calls detection and an idp_detected_elements row lands."""
+    from agentcore.services.database.models.idp.documents import IdpDetectedElement
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch)
+
+    async def fake_detect(session, document_id, file_bytes, file_type, enabled_types):
+        session.add(IdpDetectedElement(
+            document_id=document_id, element_type="signature", page_number=1,
+            bounding_box={"x_min": 0.0, "y_min": 0.0, "x_max": 1.0, "y_max": 1.0}, confidence=0.9,
+        ))
+        await session.commit()
+        return ["ok"]
+
+    monkeypatch.setattr("agentcore.services.idp.visual_detection.detect_and_persist", fake_detect)
+
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(
+            session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf(), extra={"detect_enabled": True},
+        )
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            rows = (await session.exec(select(IdpDetectedElement).where(IdpDetectedElement.document_id == doc_id))).all()
+            assert len(rows) == 1 and rows[0].element_type == "signature"
+    finally:
+        async with session_scope() as session:
+            for r in (await session.exec(select(IdpDetectedElement).where(IdpDetectedElement.document_id == doc_id))).all():
+                await session.delete(r)
+            await session.commit()
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_pipeline_split_early_returns_and_enqueues_children(monkeypatch):
+    """With multi_doc_split + >=2 boundaries, parent becomes 'split', children are enqueued, no extraction."""
+    from agentcore.services.database.models.idp.config import IdpAgent
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpExtractedHeader, IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch)
+    enqueued: list = []
+
+    def fake_boundaries(tokens, page_status):
+        return [(0, 0), (1, 1)]
+
+    async def fake_materialize(session, storage, parent_doc, boundaries):
+        ids = []
+        for i, _ in enumerate(boundaries):
+            child = IdpDocument(
+                agent_id=parent_doc.agent_id, parent_document_id=parent_doc.id,
+                original_filename=f"child{i}.pdf", file_path=f"{parent_doc.agent_id}/child{i}.pdf",
+                file_type="pdf", file_size_bytes=10, source="upload", status="queued",
+                extra={"multi_doc_split": False},
+            )
+            session.add(child)
+            await session.flush()
+            ids.append(child.id)
+        await session.commit()
+        return ids
+
+    async def fake_enqueue(session, document_id):
+        enqueued.append(document_id)
+        return uuid4()
+
+    monkeypatch.setattr("agentcore.services.idp.splitting.detect_document_boundaries", fake_boundaries)
+    monkeypatch.setattr("agentcore.services.idp.splitting.materialize_children", fake_materialize)
+    monkeypatch.setattr(pipeline, "enqueue_document", fake_enqueue)
+
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf())
+        idp = await session.get(IdpAgent, agent_id)
+        idp.multi_doc_split = True  # split is read from the idp_agent column
+        session.add(idp)
+        await session.commit()
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            parent = await session.get(IdpDocument, doc_id)
+            assert parent.status == "split"  # fix #1: 'split' is an allowed status
+            children = (await session.exec(select(IdpDocument).where(IdpDocument.parent_document_id == doc_id))).all()
+            assert len(children) == 2
+            assert len(enqueued) == 2  # both children enqueued
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            assert "split" in [e["step"] for e in job.log]
+            # no extraction happened on the parent (it's a container)
+            heads = (await session.exec(select(IdpExtractedHeader).where(IdpExtractedHeader.job_id == job.id))).all()
+            assert heads == []
+    finally:
+        async with session_scope() as session:
+            for c in (await session.exec(select(IdpDocument).where(IdpDocument.parent_document_id == doc_id))).all():
+                await session.delete(c)
+            await session.commit()
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_pipeline_classify_failure_does_not_poison_session(monkeypatch):
+    """A classification hook failure must roll back and NOT corrupt extraction/finalize."""
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpExtractedHeader, IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch)
+
+    async def boom_classify(session, document_id, merged_text, org_id, *, auto_select, threshold):
+        # The hook now runs this on an ISOLATED session, so even a DB-poisoning failure
+        # (out-of-range confidence violating the CHECK on commit) must not touch the main
+        # pipeline session. This is the real scenario the isolation fix protects against.
+        from agentcore.services.database.models.idp.documents import IdpDocumentClassification
+        session.add(IdpDocumentClassification(document_id=document_id, predicted_type="X", confidence=1.5))
+        await session.commit()  # CheckViolation -> rolls back the ISOLATED session, re-raises
+
+    monkeypatch.setattr("agentcore.services.idp.classification.classify_and_persist", boom_classify)
+
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(
+            session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf(), extra={"classify_enabled": True},
+        )
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            assert doc.status in ("auto_approved", "pending_review")  # pipeline survived the bad hook
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            assert job.status == "completed"
+            heads = (await session.exec(select(IdpExtractedHeader).where(IdpExtractedHeader.job_id == job.id))).all()
+            assert len(heads) >= 1  # extraction still persisted despite the classify failure
+            assert "classify" in [e["step"] for e in job.log]  # the warn was logged
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_pipeline_split_all_enqueue_fail_fails_parent(monkeypatch):
+    """If split produces children but NONE can be enqueued, the parent fails (not silently 'split')."""
+    from agentcore.services.database.models.idp.config import IdpAgent
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch)
+
+    def fake_boundaries(tokens, page_status):
+        return [(0, 0), (1, 1)]
+
+    async def fake_materialize(session, storage, parent_doc, boundaries):
+        ids = []
+        for i, _ in enumerate(boundaries):
+            child = IdpDocument(
+                agent_id=parent_doc.agent_id, parent_document_id=parent_doc.id,
+                original_filename=f"c{i}.pdf", file_path=f"{parent_doc.agent_id}/c{i}.pdf",
+                file_type="pdf", file_size_bytes=10, source="upload", status="queued",
+            )
+            session.add(child)
+            await session.flush()
+            ids.append(child.id)
+        await session.commit()
+        return ids
+
+    async def always_fail_enqueue(session, document_id):
+        raise RuntimeError("queue down")
+
+    monkeypatch.setattr("agentcore.services.idp.splitting.detect_document_boundaries", fake_boundaries)
+    monkeypatch.setattr("agentcore.services.idp.splitting.materialize_children", fake_materialize)
+    monkeypatch.setattr(pipeline, "enqueue_document", always_fail_enqueue)
+
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf())
+        idp = await session.get(IdpAgent, agent_id)
+        idp.multi_doc_split = True
+        session.add(idp)
+        await session.commit()
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            parent = await session.get(IdpDocument, doc_id)
+            assert parent.status == "failed"  # not 'split' — nothing got enqueued
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            assert job.status == "failed" and "enqueue" in (job.error_message or "").lower()
+    finally:
+        async with session_scope() as session:
+            for c in (await session.exec(select(IdpDocument).where(IdpDocument.parent_document_id == doc_id))).all():
+                await session.delete(c)
+            await session.commit()
+        await _cleanup(agent_id, doc_id)
+
+
 @pytest.mark.skipif(
     not __import__("agentcore.services.idp.ocr", fromlist=["_paddle_ocr_available"])._paddle_ocr_available,
     reason="PaddleOCR not installed (runs on M4/NVIDIA/Docker/CI)",

@@ -261,3 +261,36 @@ async def test_classification_low_conf(monkeypatch):
             if db_reg:
                 await session.delete(db_reg)
                 await session.commit()
+
+
+@pytest.mark.anyio
+async def test_classification_clamps_out_of_range_confidence(monkeypatch):
+    """An LLM confidence > 1.0 must be clamped to 1.0 (the DB CHECK is 0..1), not raise."""
+    model_id = uuid4()
+    async with session_scope() as session:
+        reg = ModelRegistry(id=model_id, provider="openai", model="gpt-4o", model_type="chat",
+                            is_active=True, approval_status="approved", display_name="gpt-4o", model_name="gpt-4o")
+        session.add(reg)
+        await session.commit()
+        agent_id, doc_id, org_id = await _setup_test_agent_and_doc(session, model_id)
+
+    mock_result = ClassificationResult(predicted_type="Invoice", confidence=1.5, candidates={"Invoice": 1.5})
+    monkeypatch.setattr("agentcore.services.model_service_client.MicroserviceChatModel", lambda **k: MockLLM(mock_result))
+
+    try:
+        async with session_scope() as session:
+            res = await classify_and_persist(
+                session=session, document_id=doc_id, merged_text="INV-1 Invoice",
+                org_id=org_id, auto_select=False, threshold=0.8,
+            )
+        assert res["confidence"] == 1.0  # clamped
+        async with session_scope() as session:
+            row = (await session.exec(select(IdpDocumentClassification).where(IdpDocumentClassification.document_id == doc_id))).first()
+            assert row is not None and float(row.confidence) == 1.0  # persisted without violating the CHECK
+    finally:
+        await _cleanup(agent_id, doc_id, org_id)
+        async with session_scope() as session:
+            db_reg = await session.get(ModelRegistry, model_id)
+            if db_reg:
+                await session.delete(db_reg)
+                await session.commit()
