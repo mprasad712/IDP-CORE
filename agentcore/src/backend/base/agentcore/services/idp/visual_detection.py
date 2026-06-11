@@ -174,3 +174,52 @@ def _detect_on_page_image(image_bytes: bytes, page_number: int) -> list[dict]:
         logger.debug("OpenCV is not installed. Heuristic visual element detection skipped.")
 
     return elements
+
+
+async def detect_and_persist(
+    session,
+    document_id: UUID,
+    file_bytes: bytes,
+    file_type: str,
+    enabled_types: set[str] | None = None,
+) -> list[UUID]:
+    """Detect visual elements and persist them to the database.
+
+    Args:
+        session: The active database session.
+        document_id: The document UUID.
+        file_bytes: Raw bytes of the document.
+        file_type: File type extension (e.g. 'pdf', 'png').
+        enabled_types: An optional set of element types to persist (e.g. {'signature', 'stamp'}).
+                       If None, all detected element types are persisted.
+
+    Returns:
+        List of created IdpDetectedElement IDs.
+    """
+    from uuid import UUID as PyUUID, uuid4
+    from agentcore.services.database.models.idp.documents import IdpDetectedElement
+
+    elements = await detect_visual_elements(file_bytes, file_type)
+    created_ids = []
+
+    for el in elements:
+        element_type = el["element_type"]
+        if enabled_types is not None and element_type not in enabled_types:
+            continue
+
+        db_el = IdpDetectedElement(
+            id=uuid4(),
+            document_id=document_id,
+            element_type=element_type,
+            page_number=el["page_number"],
+            bounding_box=el["bounding_box"],
+            confidence=el["confidence"],
+            decoded_value=el["decoded_value"]
+        )
+        session.add(db_el)
+        created_ids.append(db_el.id)
+
+    if created_ids:
+        await session.commit()
+
+    return created_ids
