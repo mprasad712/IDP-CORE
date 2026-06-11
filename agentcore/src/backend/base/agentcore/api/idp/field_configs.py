@@ -19,6 +19,8 @@ from agentcore.services.database.models.idp.config import (
 from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
 from agentcore.services.database.models.user_department_membership.model import UserDepartmentMembership
 from agentcore.services.auth.permissions import normalize_role
+from agentcore.services.idp.pipeline import _build_llm, PipelineError
+from agentcore.services.idp.config_generation import generate_field_config, ConfigGenerationError
 
 router = APIRouter(prefix="/field-configs", tags=["IDP Field Configurations"])
 
@@ -134,6 +136,31 @@ class LineItemReorderItem(BaseModel):
 class TemplateCloneRequest(BaseModel):
     name: str = PydanticField(..., description="The name of the cloned configuration")
     org_id: UUID | None = PydanticField(default=None, description="The target organization UUID")
+
+
+class GenerateConfigRequest(BaseModel):
+    description: str = PydanticField(..., min_length=1, description="Plain-language description of the document type")
+    sample_text: str | None = PydanticField(default=None, description="Optional sample OCR text to ground the fields")
+    model_id: UUID = PydanticField(..., description="Registry model UUID used to generate the schema")
+
+class GenerateConfigHeader(BaseModel):
+    field_name: str
+    field_type: str
+    is_required: bool
+    prompt: str | None
+    display_order: int
+
+class GenerateConfigLineItem(BaseModel):
+    column_name: str
+    column_type: str
+    is_required: bool
+    prompt: str | None
+    display_order: int
+
+class GenerateConfigResponse(BaseModel):
+    suggested_name: str
+    headers: list[GenerateConfigHeader]
+    line_items: list[GenerateConfigLineItem]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -294,6 +321,36 @@ async def create_field_config(
     config_db.headers = sorted(config_db.headers, key=lambda h: h.display_order)
     config_db.line_items = sorted(config_db.line_items, key=lambda l: l.display_order)
     return config_db
+
+
+@router.post("/generate", response_model=GenerateConfigResponse)
+async def generate_config(
+    *,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+    payload: GenerateConfigRequest,
+):
+    """Generate a DRAFT field configuration from a description (no persistence).
+
+    The caller reviews/edits the returned fields and saves via POST /field-configs/.
+    """
+    try:
+        llm = await _build_llm(session, str(payload.model_id))
+    except PipelineError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    try:
+        draft = await generate_field_config(payload.description, payload.sample_text, llm)
+    except ConfigGenerationError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[idp] config generation failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The model service could not generate a configuration.",
+        ) from e
+
+    return draft
 
 
 @router.get("/names", response_model=list[str])
