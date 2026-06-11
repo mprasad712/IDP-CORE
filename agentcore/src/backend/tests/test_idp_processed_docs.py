@@ -40,10 +40,11 @@ async def setup_test_data():
         developer_role = (await session.exec(select(Role).where(Role.name == "developer"))).first()
 
         # Create user
+        unique_suffix = uuid4().hex[:8]
         user = User(
             id=uuid4(),
-            username="docs_test_user@test.com",
-            email="docs_test_user@test.com",
+            username=f"docs_test_user_{unique_suffix}@test.com",
+            email=f"docs_test_user_{unique_suffix}@test.com",
             password="testpassword",
             is_active=True,
             is_superuser=False,
@@ -55,7 +56,7 @@ async def setup_test_data():
         # Create organization
         org = Organization(
             id=uuid4(),
-            name="Docs Test Org",
+            name=f"Docs Test Org {unique_suffix}",
             owner_user_id=user.id,
             created_by=user.id,
         )

@@ -64,3 +64,71 @@ async def test_detect_visual_elements_pyzbar_fallback():
         assert isinstance(elements, list)
     finally:
         vd.PYZBAR_AVAILABLE = original_pyzbar_state
+
+
+@pytest.mark.anyio
+async def test_detect_and_persist(monkeypatch):
+    from uuid import uuid4
+    from agentcore.services.deps import session_scope
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpDetectedElement
+    from agentcore.services.idp.visual_detection import detect_and_persist
+    from sqlmodel import select
+
+    # 1. Create a dummy image
+    img_bytes = create_test_checkbox_image()
+
+    # 2. Setup document
+    agent_id = uuid4()
+    doc_id = uuid4()
+
+    async with session_scope() as session:
+        base_agent = Agent(id=agent_id, name="Test Visual Base Agent")
+        session.add(base_agent)
+        await session.flush()
+
+        idp_agent = IdpAgent(id=agent_id, agent_id=agent_id, extraction_mode="dynamic_prompting")
+        session.add(idp_agent)
+        await session.flush()
+
+        doc = IdpDocument(
+            id=doc_id,
+            agent_id=agent_id,
+            original_filename="visual_test.png",
+            file_path="mock/visual_test.png",
+            file_type="png",
+            file_size_bytes=len(img_bytes),
+            source="upload",
+            status="queued"
+        )
+        session.add(doc)
+        await session.commit()
+
+    try:
+        # 3. Run detect_and_persist
+        async with session_scope() as session:
+            created_ids = await detect_and_persist(session, doc_id, img_bytes, "png", enabled_types={"checkbox"})
+            
+        # 4. Assert DB values
+        async with session_scope() as session:
+            db_elements = (await session.exec(select(IdpDetectedElement).where(IdpDetectedElement.document_id == doc_id))).all()
+            if OPENCV_AVAILABLE:
+                assert len(db_elements) >= 1
+                assert db_elements[0].element_type == "checkbox"
+                assert db_elements[0].id in created_ids
+            else:
+                assert len(db_elements) == 0
+                assert len(created_ids) == 0
+    finally:
+        # Cleanup
+        async with session_scope() as session:
+            for el in (await session.exec(select(IdpDetectedElement).where(IdpDetectedElement.document_id == doc_id))).all():
+                await session.delete(el)
+            d = await session.get(IdpDocument, doc_id)
+            if d: await session.delete(d)
+            ia = await session.get(IdpAgent, agent_id)
+            if ia: await session.delete(ia)
+            ba = await session.get(Agent, agent_id)
+            if ba: await session.delete(ba)
+            await session.commit()
