@@ -38,15 +38,22 @@ class IDPLLMExtractor(Node):
         DropdownInput(
             name="extraction_mode",
             display_name="Extraction Mode",
-            options=["dynamic_prompt", "field_configuration", "multimodal_prompt", "multimodal_config"],
-            value="dynamic_prompt",
-            info="dynamic_prompt: freeform text prompt. field_configuration: text schema. multimodal_prompt: vision prompt. multimodal_config: vision schema.",
+            # Extraction in the builder is config-driven: pick a saved Field Configuration
+            # (text or vision). The freeform dynamic-prompt mode is intentionally NOT offered
+            # here — author fields on the Field Configurations page instead. The backend still
+            # supports dynamic_prompt at runtime (legacy agents + config generation), so this
+            # only hides it from the canvas, it does not remove the capability.
+            options=["field_configuration", "multimodal_config"],
+            value="field_configuration",
+            info="field_configuration: extract using a saved text schema. multimodal_config: extract using a saved schema with a vision model.",
         ),
         MultilineInput(
             name="prompt",
             display_name="Extraction Prompt",
             value="",
-            info="Describe the fields to extract. Used when Extraction Mode is 'dynamic_prompt' or 'multimodal_prompt'.",
+            advanced=True,
+            info="Legacy/advanced: freeform prompt used only by the backend dynamic_prompt path. "
+            "Not used by the config-driven builder modes.",
         ),
         MessageTextInput(
             name="config_name",
