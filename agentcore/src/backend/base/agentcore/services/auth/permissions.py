@@ -5,6 +5,7 @@ from loguru import logger
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
+from redis.exceptions import RedisClusterException
 
 from agentcore.services.settings.service import SettingsService
 from agentcore.services.cache.redis_client import get_redis_client, reset_redis_client
@@ -403,7 +404,7 @@ class PermissionCacheService:
     ) -> Any:
         try:
             return await call(self.redis)
-        except (RedisConnectionError, RedisTimeoutError, RedisError, OSError) as exc:
+        except (RedisConnectionError, RedisTimeoutError, RedisError, RedisClusterException, OSError) as exc:
             logger.warning(
                 f"RBAC cache {action} failed for {key}: {exc}. "
                 "Resetting Redis client and retrying once."
