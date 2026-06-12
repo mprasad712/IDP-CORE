@@ -46,7 +46,7 @@ async def upload_documents(
     Saves the files to storage and creates IdpDocument database records
     with status set to 'queued'.
     """
-    # 1. Resolve IDP Agent
+    # 1. Resolve IDP Agent — auto-create if absent so the playground works without publishing
     stmt = (
         select(IdpAgent)
         .where(
@@ -59,10 +59,25 @@ async def upload_documents(
     )
     idp_agent = (await session.exec(stmt)).first()
     if not idp_agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Active IDP Agent with ID/agent_id '{agent_id}' not found."
+        base_agent = await session.get(Agent, agent_id)
+        if not base_agent or base_agent.deleted_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Active IDP Agent with ID/agent_id '{agent_id}' not found."
+            )
+        idp_agent = IdpAgent(
+            agent_id=agent_id,
+            extraction_mode="dynamic_prompting",
+            dynamic_prompt="",
+            default_rule_action="pending_review",
+            is_active=True,
+            created_by=current_user.id,
+            updated_by=current_user.id,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
         )
+        session.add(idp_agent)
+        await session.flush()
 
     # 2. Get file upload settings
     try:

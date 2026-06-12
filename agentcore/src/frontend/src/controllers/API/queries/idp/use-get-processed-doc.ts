@@ -31,6 +31,7 @@ export interface ExtractedLineItem {
 export interface ProcessedDocDetail extends ProcessedDoc {
   headers: ExtractedHeader[];
   line_items: ExtractedLineItem[];
+  error_message: string | null;
 }
 
 export const useGetProcessedDoc: useQueryFunctionType<

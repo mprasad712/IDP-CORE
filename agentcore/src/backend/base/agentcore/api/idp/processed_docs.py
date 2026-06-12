@@ -12,6 +12,7 @@ from agentcore.services.database.models.idp.documents import (
     IdpDocument,
     IdpExtractedHeader,
     IdpExtractedLineItem,
+    IdpProcessingJob,
 )
 from agentcore.services.database.models.idp.config import IdpAgent, IdpReviewSession
 from agentcore.services.database.models.agent.model import Agent
@@ -79,6 +80,7 @@ class ExtractedLineItemRead(BaseModel):
 class ProcessedDocDetailRead(ProcessedDocRead):
     headers: list[ExtractedHeaderRead] = []
     line_items: list[ExtractedLineItemRead] = []
+    error_message: str | None = None
 
 class FieldUpdateItem(BaseModel):
     id: UUID
@@ -204,9 +206,20 @@ async def get_processed_doc(
     )
     line_items = (await session.exec(stmt_lines)).all()
 
+    # Load the most recent job's error message (for failed documents)
+    last_job = (
+        await session.exec(
+            select(IdpProcessingJob)
+            .where(IdpProcessingJob.document_id == id)
+            .order_by(IdpProcessingJob.created_at.desc())
+            .limit(1)
+        )
+    ).first()
+
     detail = ProcessedDocDetailRead.model_validate(doc)
     detail.headers = headers
     detail.line_items = line_items
+    detail.error_message = last_job.error_message if last_job else None
     return detail
 
 
