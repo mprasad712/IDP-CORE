@@ -90,6 +90,7 @@ class LineItemRead(BaseModel):
 class FieldConfigCreate(BaseModel):
     name: str = PydanticField(..., description="Name of the field configuration")
     description: str | None = PydanticField(default=None, description="Optional description")
+    doc_type: str | None = PydanticField(default=None, description="Canonical document type this config handles (e.g. 'Invoice')")
     org_id: UUID | None = PydanticField(default=None, description="Organization ID scoping this configuration")
     is_template: bool = PydanticField(default=False, description="Is this configuration a template")
     is_active: bool = PydanticField(default=True, description="Is this configuration active")
@@ -100,6 +101,7 @@ class FieldConfigCreate(BaseModel):
 class FieldConfigUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
+    doc_type: str | None = None
     is_template: bool | None = None
     is_active: bool | None = None
     visibility: str | None = None
@@ -109,6 +111,7 @@ class FieldConfigRead(BaseModel):
     id: UUID
     name: str
     description: str | None
+    doc_type: str | None
     org_id: UUID | None
     is_template: bool
     is_active: bool
@@ -287,6 +290,7 @@ async def create_field_config(
     new_config = IdpFieldConfiguration(
         name=payload.name,
         description=payload.description,
+        doc_type=payload.doc_type,
         org_id=resolved_org_id,
         is_template=payload.is_template,
         is_active=payload.is_active,
@@ -385,6 +389,43 @@ async def list_field_config_names(
         )
 
     stmt = stmt.order_by(IdpFieldConfiguration.name.asc())
+    rows = (await session.exec(stmt)).all()
+    return [r for r in rows if r]
+
+
+@router.get("/doc-types", response_model=list[str])
+async def list_field_config_doc_types(
+    *,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+):
+    """Return a sorted list of unique doc_type values accessible to the user.
+
+    Used by the Document Classifier node to populate the 'Document Types'
+    multi-select dropdown — one entry per distinct doc_type on any config the
+    user can access (org-scoped configs and global templates).
+    """
+    stmt = (
+        select(IdpFieldConfiguration.doc_type)
+        .where(
+            IdpFieldConfiguration.deleted_at.is_(None),
+            IdpFieldConfiguration.is_active == True,
+            IdpFieldConfiguration.doc_type.isnot(None),
+        )
+    )
+
+    org_ids, _ = await _get_scope_memberships(session, current_user.id)
+    role = normalize_role(getattr(current_user, "role", None))
+
+    if role != "root":
+        stmt = stmt.where(
+            or_(
+                IdpFieldConfiguration.org_id.in_(list(org_ids)),
+                and_(IdpFieldConfiguration.org_id.is_(None), IdpFieldConfiguration.is_template == True),
+            )
+        )
+
+    stmt = stmt.distinct().order_by(IdpFieldConfiguration.doc_type.asc())
     rows = (await session.exec(stmt)).all()
     return [r for r in rows if r]
 
@@ -644,6 +685,7 @@ async def clone_template(
     new_config = IdpFieldConfiguration(
         name=payload.name,
         description=template.description,
+        doc_type=template.doc_type or template.name,
         org_id=resolved_org_id,
         is_template=False,
         is_active=True,

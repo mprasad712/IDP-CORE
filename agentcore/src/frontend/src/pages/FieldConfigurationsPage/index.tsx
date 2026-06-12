@@ -80,6 +80,7 @@ interface FieldConfig {
   id: string;
   name: string;
   description: string;
+  doc_type: string;
   visibility: Visibility;
   headerFields: ConfigField[];
   lineItemColumns: ConfigField[];
@@ -120,6 +121,7 @@ function apiConfigToLocal(c: ApiFieldConfig): FieldConfig {
     id: c.id,
     name: c.name,
     description: c.description ?? "",
+    doc_type: c.doc_type ?? "",
     visibility: (c.visibility ?? "org") as Visibility,
     headerFields: [...c.headers]
       .sort((a, b) => a.display_order - b.display_order)
@@ -344,6 +346,7 @@ function ConfigDialog({ open, initial, onSave, onClose, saving, error, templates
   const isNew = !initial?.id;
   const [name,           setName]           = useState(initial?.name ?? "");
   const [description,    setDescription]    = useState(initial?.description ?? "");
+  const [docType,        setDocType]        = useState(initial?.doc_type ?? "");
   const [visibility,     setVisibility]     = useState<Visibility>(initial?.visibility ?? "org");
   const [headerFields,   setHeaderFields]   = useState<ConfigField[]>(initial?.headerFields ?? []);
   const [lineItemColumns,setLineItemColumns] = useState<ConfigField[]>(initial?.lineItemColumns ?? []);
@@ -373,6 +376,7 @@ function ConfigDialog({ open, initial, onSave, onClose, saving, error, templates
       id: initial?.id ?? uid(),
       name: name.trim(),
       description: description.trim(),
+      doc_type: docType.trim(),
       visibility,
       headerFields,
       lineItemColumns,
@@ -397,6 +401,11 @@ function ConfigDialog({ open, initial, onSave, onClose, saving, error, templates
             <div className="space-y-1.5">
               <label className="text-sm font-medium">Description</label>
               <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What documents does this schema extract?" className="rounded-lg" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Document Type</label>
+              <p className="text-xs text-muted-foreground -mt-0.5">Used by the Document Classifier node to route documents to this configuration (e.g. "Invoice", "Contract").</p>
+              <Input value={docType} onChange={(e) => setDocType(e.target.value)} placeholder="e.g. Invoice" className="rounded-lg" />
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Visibility</label>
@@ -548,7 +557,12 @@ function TemplatePreviewDialog({ template, onClone, onClose }: {
             </div>
             <div className="min-w-0">
               <DialogTitle className="text-lg leading-tight">{template.name}</DialogTitle>
-              <p className="text-sm text-muted-foreground mt-0.5">{template.description}</p>
+              <div className="flex items-center gap-2 mt-0.5">
+                <p className="text-sm text-muted-foreground">{template.description}</p>
+                {template.doc_type && (
+                  <Badge variant="outline" className="text-[10px] rounded-md border-[#D04A02]/40 text-[#D04A02] bg-[#D04A02]/5 flex-shrink-0">{template.doc_type}</Badge>
+                )}
+              </div>
               <div className="flex items-center gap-3 mt-2">
                 <span className="text-[11px] text-muted-foreground">
                   <span className="font-semibold text-foreground">{template.headerFields.length}</span> header fields
@@ -753,6 +767,7 @@ export default function FieldConfigurationsPage() {
         const created = await createConfig({
           name: cfg.name,
           description: cfg.description || null,
+          doc_type: cfg.doc_type || null,
           is_template: false,
           visibility: cfg.visibility,
           headers: cfg.headerFields.map((f) => ({
@@ -779,7 +794,7 @@ export default function FieldConfigurationsPage() {
           }),
         );
       } else {
-        await updateConfig({ id: cfg.id, payload: { name: cfg.name, description: cfg.description || null, visibility: cfg.visibility } });
+        await updateConfig({ id: cfg.id, payload: { name: cfg.name, description: cfg.description || null, doc_type: cfg.doc_type || null, visibility: cfg.visibility } });
         await syncHeaders(cfg.id, cfg.headerFields, editing?.headerFields ?? []);
         await syncLineItems(cfg.id, cfg.lineItemColumns, editing?.lineItemColumns ?? []);
       }
@@ -802,6 +817,7 @@ export default function FieldConfigurationsPage() {
       id: uid(),   // non-UUID → signals "new" to handleSave
       name: `${cfg.name} (Copy)`,
       description: cfg.description,
+      doc_type: cfg.doc_type,
       visibility: cfg.isTemplate ? "org" : cfg.visibility,
       headerFields: cfg.headerFields.map((f) => ({ ...f, id: uid() })),
       lineItemColumns: cfg.lineItemColumns.map((f) => ({ ...f, id: uid() })),
@@ -900,8 +916,9 @@ export default function FieldConfigurationsPage() {
                   <TableRow className="bg-muted/30 hover:bg-muted/30">
                     <TableHead className="text-xs font-semibold uppercase tracking-wide">Name</TableHead>
                     <TableHead className="text-xs font-semibold uppercase tracking-wide">Description</TableHead>
-                    <TableHead className="w-28 text-center text-xs font-semibold uppercase tracking-wide">Header Fields</TableHead>
-                    <TableHead className="w-28 text-center text-xs font-semibold uppercase tracking-wide">Line Columns</TableHead>
+                    <TableHead className="w-28 text-xs font-semibold uppercase tracking-wide">Doc Type</TableHead>
+                    <TableHead className="w-24 text-center text-xs font-semibold uppercase tracking-wide">Header Fields</TableHead>
+                    <TableHead className="w-24 text-center text-xs font-semibold uppercase tracking-wide">Line Columns</TableHead>
                     <TableHead className="w-24 text-xs font-semibold uppercase tracking-wide">Visibility</TableHead>
                     <TableHead className="w-28 text-xs font-semibold uppercase tracking-wide">Created</TableHead>
                     <TableHead className="w-32 text-right" />
@@ -910,21 +927,21 @@ export default function FieldConfigurationsPage() {
                 <TableBody>
                   {loadingCustom && (
                     <TableRow>
-                      <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-14">
+                      <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-14">
                         Loading…
                       </TableCell>
                     </TableRow>
                   )}
                   {!loadingCustom && !customError && filtered.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-14">
+                      <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-14">
                         {search ? "No configurations match your search." : "No custom configurations yet — create one or clone a template."}
                       </TableCell>
                     </TableRow>
                   )}
                   {customError && !loadingCustom && (
                     <TableRow>
-                      <TableCell colSpan={7} className="text-center text-sm text-destructive py-14">
+                      <TableCell colSpan={8} className="text-center text-sm text-destructive py-14">
                         Could not load configurations. Click Refresh to try again.
                       </TableCell>
                     </TableRow>
@@ -933,6 +950,13 @@ export default function FieldConfigurationsPage() {
                     <TableRow key={cfg.id} className="group hover:bg-muted/20 transition-colors">
                       <TableCell className="font-medium">{cfg.name}</TableCell>
                       <TableCell className="text-sm text-muted-foreground max-w-xs truncate">{cfg.description}</TableCell>
+                      <TableCell>
+                        {cfg.doc_type ? (
+                          <Badge variant="outline" className="text-[10px] rounded-md border-[#D04A02]/40 text-[#D04A02] bg-[#D04A02]/5">{cfg.doc_type}</Badge>
+                        ) : (
+                          <span className="text-muted-foreground/40 text-xs">—</span>
+                        )}
+                      </TableCell>
                       <TableCell className="text-center"><Badge variant="outline" className="text-xs rounded-md">{cfg.headerFields.length}</Badge></TableCell>
                       <TableCell className="text-center"><Badge variant="outline" className="text-xs rounded-md">{cfg.lineItemColumns.length}</Badge></TableCell>
                       <TableCell>
@@ -988,10 +1012,15 @@ export default function FieldConfigurationsPage() {
                       </div>
                       <div className="min-w-0">
                         <p className="font-semibold text-sm leading-tight">{tpl.name}</p>
-                        <p className="text-[10px] text-muted-foreground mt-0.5">
-                          {tpl.headerFields.length} fields
-                          {tpl.lineItemColumns.length > 0 && ` · ${tpl.lineItemColumns.length} line cols`}
-                        </p>
+                        <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                          <p className="text-[10px] text-muted-foreground">
+                            {tpl.headerFields.length} fields
+                            {tpl.lineItemColumns.length > 0 && ` · ${tpl.lineItemColumns.length} line cols`}
+                          </p>
+                          {tpl.doc_type && (
+                            <Badge variant="outline" className="text-[9px] px-1 py-0 rounded border-[#D04A02]/30 text-[#D04A02] bg-[#D04A02]/5">{tpl.doc_type}</Badge>
+                          )}
+                        </div>
                       </div>
                     </div>
                     <p className="text-xs text-muted-foreground flex-1 leading-relaxed">{tpl.description}</p>

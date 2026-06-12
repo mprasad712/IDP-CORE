@@ -17,6 +17,7 @@ data:
   MODEL_SERVICE_KEY_VAULT_SECRET_PREFIX: "agentcore-model"
   MODEL_SERVICE_KEY_VAULT_API_KEY_SECRET_NAME: "agentcore-model-service-api-key"
   MODEL_SERVICE_KEY_VAULT_DATABASE_URL_SECRET_NAME: "agentcore-shared-postgres-url"
+  MODEL_SERVICE_KEY_VAULT_ENCRYPTION_KEY_SECRET_NAME: "agentcore-model-encryption-key"
 
   # ── PostgreSQL ────────────────────────────────────────
   POSTGRES_HOST: "idpflow-postgres.postgres.database.azure.com"

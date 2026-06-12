@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from agentcore.components.IDP.chunk_aggregator import IDPChunkAggregator
     from agentcore.components.IDP.chunking_strategy import IDPChunkingStrategy
     from agentcore.components.IDP.confidence_router import IDPConfidenceRouter
+    from agentcore.components.IDP.document_classifier import IDPDocumentClassifier
     from agentcore.components.IDP.document_type_detector import IDPDocumentTypeDetector
     from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
     from agentcore.components.IDP.multi_branch_router import IDPMultiBranchRouter
@@ -22,6 +23,7 @@ _dynamic_imports = {
     "IDPChunkAggregator": "chunk_aggregator",
     "IDPChunkingStrategy": "chunking_strategy",
     "IDPConfidenceRouter": "confidence_router",
+    "IDPDocumentClassifier": "document_classifier",
     "IDPDocumentTypeDetector": "document_type_detector",
     "IDPLLMExtractor": "llm_extractor",
     "IDPMultiBranchRouter": "multi_branch_router",

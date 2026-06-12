@@ -18,6 +18,7 @@ from fastapi.responses import StreamingResponse
 from fastapi_pagination import Page, Params
 from fastapi_pagination.ext.sqlmodel import apaginate
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy import exists, or_
 from sqlmodel import and_, col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -583,7 +584,13 @@ async def acquire_agent_session(
             lock_row.locked_at = now
             lock_row.expires_at = expires_at
             session.add(lock_row)
-            await session.commit()
+            try:
+                await session.commit()
+            except StaleDataError:
+                # Row was concurrently deleted between SELECT and UPDATE; insert fresh lock
+                await session.rollback()
+                session.add(AgentEditLock(agent_id=agent_id, locked_by=current_user.id, locked_at=now, expires_at=expires_at))
+                await session.commit()
             return {"status": "acquired"}
         raise HTTPException(
             status_code=423,
@@ -603,8 +610,6 @@ async def acquire_agent_session(
     except IntegrityError:
         await session.rollback()
         existing_lock = (await session.exec(select(AgentEditLock).where(AgentEditLock.agent_id == agent_id))).first()
-        if existing_lock:
-            await session.refresh(existing_lock)
         if existing_lock and existing_lock.locked_by != current_user.id and existing_lock.expires_at > now:
             raise HTTPException(
                 status_code=423,
@@ -615,7 +620,13 @@ async def acquire_agent_session(
             existing_lock.locked_at = now
             existing_lock.expires_at = expires_at
             session.add(existing_lock)
-            await session.commit()
+            try:
+                await session.commit()
+            except StaleDataError:
+                # Row was concurrently deleted between SELECT and UPDATE; insert fresh lock
+                await session.rollback()
+                session.add(AgentEditLock(agent_id=agent_id, locked_by=current_user.id, locked_at=now, expires_at=expires_at))
+                await session.commit()
     return {"status": "acquired"}
 
 

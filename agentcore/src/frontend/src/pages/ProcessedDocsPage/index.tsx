@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   Clock,
   AlertCircle,
+  MinusCircle,
   X,
   Plus,
   RotateCcw,
@@ -53,7 +54,7 @@ import {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type DocStatus = "pending" | "auto_approved" | "reviewed";
+type DocStatus = "pending" | "auto_approved" | "reviewed" | "skipped";
 
 interface ExtractedField {
   key: string;
@@ -87,6 +88,7 @@ interface ProcessedDoc {
 function mapApiStatus(s: string): DocStatus {
   if (s === "auto_approved") return "auto_approved";
   if (s === "reviewed") return "reviewed";
+  if (s === "skipped") return "skipped";
   return "pending"; // pending_review, extracted, queued, processing, failed
 }
 
@@ -219,6 +221,12 @@ function StatusChip({ status }: { status: DocStatus }) {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-500/10 border border-blue-500/20 px-2.5 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400">
         <CheckCircle2 className="h-3 w-3" /> Reviewed
+      </span>
+    );
+  if (status === "skipped")
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-muted border border-border px-2.5 py-0.5 text-xs font-medium text-muted-foreground">
+        <MinusCircle className="h-3 w-3" /> Skipped
       </span>
     );
   return (
@@ -639,6 +647,7 @@ export default function ProcessedDocsPage() {
     pending:       docs.filter((d) => d.status === "pending").length,
     auto_approved: docs.filter((d) => d.status === "auto_approved").length,
     reviewed:      docs.filter((d) => d.status === "reviewed").length,
+    skipped:       docs.filter((d) => d.status === "skipped").length,
   }), [docs]);
 
   // NOTE: persisting edits (PATCH /fields) + review/approve mutations are wired
@@ -709,6 +718,7 @@ export default function ProcessedDocsPage() {
               { value: "pending",       label: "Pending Review",  icon: AlertCircle,    count: counts.pending       },
               { value: "auto_approved", label: "Auto-Approved",   icon: CheckCircle2,   count: counts.auto_approved },
               { value: "reviewed",      label: "Reviewed",        icon: CheckCircle2,   count: counts.reviewed      },
+              { value: "skipped",       label: "Skipped",         icon: MinusCircle,    count: counts.skipped       },
             ] as const).map(({ value, label, icon: Icon, count }) => (
               <TabsTrigger
                 key={value}
@@ -734,7 +744,7 @@ export default function ProcessedDocsPage() {
           </TabsList>
         </div>
 
-        {(["pending", "auto_approved", "reviewed"] as const).map((tab) => (
+        {(["pending", "auto_approved", "reviewed", "skipped"] as const).map((tab) => (
           <TabsContent key={tab} value={tab} className="flex-1 overflow-auto m-0">
             <div className="px-6 py-5 space-y-4">
 

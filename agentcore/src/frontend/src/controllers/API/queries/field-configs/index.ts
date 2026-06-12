@@ -12,3 +12,4 @@ export * from "./use-put-field-config-line-item";
 export * from "./use-delete-field-config-line-item";
 export * from "./use-patch-line-items-reorder";
 export * from "./use-get-field-config-names";
+export * from "./use-get-field-config-doc-types";
