@@ -4,7 +4,7 @@ from fastapi.security import APIKeyHeader
 from app.config import Settings, get_settings
 
 api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
-
+  
 
 async def verify_api_key(
     api_key: str | None = Security(api_key_header),
