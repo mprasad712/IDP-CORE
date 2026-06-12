@@ -1,0 +1,282 @@
+import pytest
+from uuid import uuid4
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from agentcore.services.idp.agent_config import resolve_pipeline_config, ResolvedPipelineConfig
+from agentcore.services.database.models.idp.config import IdpAgent, IdpAgentRule
+from agentcore.services.idp import long_doc
+from agentcore.services.idp.pipeline import _route
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Config Parsing tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.anyio
+async def test_resolve_pipeline_config_from_canvas_nodes():
+    # Build a mock base agent with custom React-Flow data containing the 5 nodes
+    class MockBaseAgent:
+        def __init__(self):
+            self.id = uuid4()
+            self.data = {
+                "nodes": [
+                    {
+                        "data": {
+                            "node": {
+                                "display_name": "Large Language Model",
+                                "template": {
+                                    "registry_model": {"value": "gpt-4o | gpt-4o | 11111111-2222-3333-4444-555555555555"}
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "data": {
+                            "node": {
+                                "display_name": "AI Field Extractor",
+                                "template": {
+                                    "extraction_mode": {"value": "dynamic_prompt"},
+                                    "prompt": {"value": "Extract everything."},
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "data": {
+                            "node": {
+                                "display_name": "Chunking Strategy",
+                                "template": {
+                                    "chunk_size_tokens": {"value": 1500},
+                                    "overlap_tokens": {"value": 120},
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "data": {
+                            "node": {
+                                "display_name": "Chunk Aggregator",
+                                "template": {
+                                    "dedup_strategy": {"value": "merge_all"}
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "data": {
+                            "node": {
+                                "display_name": "Confidence Router",
+                                "template": {
+                                    "threshold": {"value": 0.85}
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "data": {
+                            "node": {
+                                "display_name": "Rules / Conditions",
+                                "template": {
+                                    "logic_operator": {"value": "OR"},
+                                    "conditions": {"value": '[{"field":"confidence","op":"gte","value":0.9}]'}
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "data": {
+                            "node": {
+                                "display_name": "Approval Gate",
+                                "template": {
+                                    "approval_field": {"value": "decision_action"},
+                                    "approve_value": {"value": "approved_path"}
+                                }
+                            }
+                        }
+                    }
+                ]
+            }
+
+    base_agent = MockBaseAgent()
+    idp_agent = IdpAgent(
+        agent_id=base_agent.id,
+        extraction_mode="dynamic_prompting",
+        default_rule_action="pending_review",
+        extra={}
+    )
+
+    # Resolve configuration
+    cfg: ResolvedPipelineConfig = await resolve_pipeline_config(None, idp_agent, base_agent)
+
+    # Verify Chunking Strategy parsing
+    assert cfg.long_doc_enabled is True
+    assert cfg.long_doc_max_tokens == 1500
+    assert cfg.long_doc_overlap_tokens == 120
+
+    # Verify Chunk Aggregator parsing
+    assert cfg.dedup_strategy == "merge_all"
+
+    # Verify Confidence Router parsing
+    assert cfg.confidence_threshold == 0.85
+
+    # Verify Rules / Conditions parsing
+    assert cfg.rules_operator == "OR"
+    assert len(cfg.canvas_rules) == 1
+    assert cfg.canvas_rules[0]["field"] == "confidence"
+
+    # Verify Approval Gate parsing
+    assert cfg.approval_field == "decision_action"
+    assert cfg.approve_value == "approved_path"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. Text splitting with Overlap tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_long_doc_text_splitting_with_overlap():
+    # We want to force splitting, so we need a text longer than 4000 characters.
+    # Let's repeat a line 100 times to get ~7700 characters.
+    single_line = "This is a line of page text that will be repeated to exceed 4000 characters.\n"
+    text = single_line * 100
+    
+    # max_chars = max(4000, 1000 * 4) = 4000.
+    parts = long_doc._split_text_by_tokens(text, limit=1000, overlap=100)
+    assert len(parts) >= 2
+    # Verify that the overlap context is preserved (last characters of part 0 exist in part 1)
+    assert parts[0] != parts[1]
+    
+    # We look for overlapping text content. Since character splitting uses back-scan for newline,
+    # the second chunk should contain text from the first chunk due to overlap.
+    overlap_found = False
+    for line in parts[0].split("\n")[-10:]:
+        if line.strip() and line in parts[1]:
+            overlap_found = True
+            break
+    assert overlap_found, "No overlap found between split text parts."
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Aggregation Deduplication Strategies tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_chunk_aggregator_deduplication_strategies():
+    results = [
+        {
+            "headers": {
+                "vendor_name": {"value": "Google", "confidence": 0.8},
+                "invoice_number": {"value": "INV-100", "confidence": 0.9}
+            },
+            "line_items": []
+        },
+        {
+            "headers": {
+                "vendor_name": {"value": "Google Inc.", "confidence": 0.95},
+                "invoice_number": {"value": "INV-100", "confidence": 0.7}
+            },
+            "line_items": []
+        }
+    ]
+
+    # Strategy: keep_highest_confidence
+    merged_high_conf = long_doc.merge_chunk_extractions(results, strategy="keep_highest_confidence")
+    assert merged_high_conf["headers"]["vendor_name"]["value"] == "Google Inc."  # 0.95 conf wins
+    assert merged_high_conf["headers"]["invoice_number"]["value"] == "INV-100"
+    assert merged_high_conf["headers"]["invoice_number"]["confidence"] == 0.9    # 0.9 conf wins
+
+    # Strategy: keep_first
+    merged_first = long_doc.merge_chunk_extractions(results, strategy="keep_first")
+    assert merged_first["headers"]["vendor_name"]["value"] == "Google"  # First result value wins
+    assert merged_first["headers"]["invoice_number"]["value"] == "INV-100"
+    assert merged_first["headers"]["invoice_number"]["confidence"] == 0.9
+
+    # Strategy: merge_all
+    merged_all = long_doc.merge_chunk_extractions(results, strategy="merge_all")
+    assert merged_all["headers"]["vendor_name"]["value"] == "Google, Google Inc."  # Both concatenated
+    assert merged_all["headers"]["invoice_number"]["value"] == "INV-100"  # Identical value not duplicated
+    assert merged_all["headers"]["invoice_number"]["confidence"] == 0.9
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Rules mapping and routing tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DummyObject:
+    def __init__(self, **kwargs):
+        self.field_name = None
+        self.column_name = None
+        self.extracted_value = None
+        self.confidence_score = None
+        self.element_type = None
+        self.decoded_value = None
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+        if self.field_name and not self.column_name:
+            self.column_name = self.field_name
+
+
+@pytest.mark.anyio
+async def test_route_transient_canvas_rules_evaluation():
+    # Setup mock config with canvas rules
+    cfg = ResolvedPipelineConfig(
+        model_id=str(uuid4()),
+        extraction_mode="dynamic_prompt",
+        prompt=None,
+        config_name=None,
+        field_config_id=None,
+        multimodal_requested=False,
+        page_selection_mode="all",
+        first_n_pages=1,
+        page_range_start=1,
+        page_range_end=2,
+        rules_operator="AND",
+        canvas_rules=[
+            {"field": "confidence", "op": "gte", "value": 0.85},
+            {"field": "total_amount", "op": "gt", "value": 100}
+        ],
+        approval_field="rule_action",
+        approve_value="auto_approve",
+        confidence_threshold=0.8
+    )
+
+    class MockSession:
+        async def exec(self, query):
+            class MockResult:
+                def all(self):
+                    return [
+                        DummyObject(field_name="total_amount", extracted_value="150.00", confidence_score=0.9)
+                    ]
+            return MockResult()
+
+    session = MockSession()
+    doc_id = uuid4()
+    job_id = uuid4()
+    agent_id = uuid4()
+
+    # Flow trace logger
+    class MockFlow:
+        def __init__(self):
+            self.events = []
+        def step(self, name, status, detail="", **fields):
+            self.events.append((name, status, detail))
+
+    flow = MockFlow()
+
+    # Evaluate route: overall confidence = 0.9 (gte 0.85) AND total_amount = 150.00 (gt 100) -> auto_approved
+    status_and = await _route(session, doc_id, job_id, agent_id, 0.9, cfg, flow)
+    assert status_and == "auto_approved"
+
+    # Evaluate route: overall confidence fails (0.80 < 0.85) -> pending_review
+    flow_fail = MockFlow()
+    status_fail = await _route(session, doc_id, job_id, agent_id, 0.80, cfg, flow_fail)
+    assert status_fail == "pending_review"
+
+    # Evaluate rules with logic operator = OR: overall confidence fails (0.80) but total_amount still passes (150.00 gt 100) -> auto_approved
+    cfg.rules_operator = "OR"
+    flow_or = MockFlow()
+    status_or = await _route(session, doc_id, job_id, agent_id, 0.80, cfg, flow_or)
+    assert status_or == "auto_approved"

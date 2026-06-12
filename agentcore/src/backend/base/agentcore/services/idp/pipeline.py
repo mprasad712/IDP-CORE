@@ -177,13 +177,63 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
     With no rules, fall back to the B19 default-action + confidence-threshold behaviour.
     A zero-confidence (no fields) extraction always routes to review, whatever the rules say.
     """
-    rules = (
-        await session.exec(
-            select(IdpAgentRule)
-            .where(IdpAgentRule.idp_agent_id == idp_agent_id)
-            .order_by(IdpAgentRule.rule_group, IdpAgentRule.display_order)
-        )
-    ).all()
+    rules = []
+    if cfg.canvas_rules:
+        # Construct transient/mock IdpAgentRule objects
+        for idx, r in enumerate(cfg.canvas_rules):
+            field_name = r.get("field")
+            op = r.get("op")
+            val = r.get("value")
+            
+            # Map operator names from canvas to rules engine expectations if needed
+            op_map = {
+                "gte": ">=",
+                "lte": "<=",
+                "gt": ">",
+                "lt": "<",
+                "eq": "==",
+                "neq": "!=",
+            }
+            mapped_op = op_map.get(op, op)
+
+            # Determine condition type
+            cond_type = "field_value_text"
+            if field_name == "confidence":
+                cond_type = "confidence_overall"
+            elif mapped_op in ("is_present", "is_missing"):
+                cond_type = "field_presence"
+            elif field_name in ("signature", "checkbox", "qr", "barcode"):
+                cond_type = "visual_element"
+            else:
+                if isinstance(val, (int, float)):
+                    cond_type = "field_value_numeric"
+            
+            # Map rules_operator logic:
+            # - If AND: all rules belong to group 1 (AND logic).
+            # - If OR: each rule gets its own group (first-match wins OR logic).
+            group_id = 1 if cfg.rules_operator == "AND" else (idx + 1)
+
+            rules.append(
+                IdpAgentRule(
+                    id=uuid4(),
+                    idp_agent_id=idp_agent_id,
+                    rule_group=group_id,
+                    display_order=idx,
+                    condition_type=cond_type,
+                    field_name=field_name,
+                    operator=mapped_op,
+                    value=val,
+                    action=cfg.approve_value,
+                )
+            )
+    else:
+        rules = (
+            await session.exec(
+                select(IdpAgentRule)
+                .where(IdpAgentRule.idp_agent_id == idp_agent_id)
+                .order_by(IdpAgentRule.rule_group, IdpAgentRule.display_order)
+            )
+        ).all()
 
     if not rules:
         if overall_conf <= 0.0:
@@ -222,7 +272,7 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
         flow.step("route", "warn", f"rules engine error ({e}); falling back to review")
         return "pending_review"
 
-    new_status = "auto_approved" if action == "auto_approve" else "pending_review"
+    new_status = "auto_approved" if action in (cfg.approve_value, "auto_approve") else "pending_review"
     if overall_conf <= 0.0:
         new_status = "pending_review"
     flow.step(
@@ -594,7 +644,10 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                 except Exception as e:  # pragma: no cover - section persistence is best-effort
                     flow.step("long_doc", "warn", f"could not persist sections ({e})")
                 chunk_texts = long_doc.chunks_for_extraction(
-                    tokens, sections, max_tokens=cfg.long_doc_max_tokens
+                    tokens,
+                    sections,
+                    max_tokens=cfg.long_doc_max_tokens,
+                    overlap_tokens=cfg.long_doc_overlap_tokens,
                 )
                 flow.step("long_doc", "ok", f"{len(sections)} section(s) -> {len(chunk_texts)} chunk(s)")
                 results: list[dict] = []
@@ -602,8 +655,6 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                 for i, ct in enumerate(chunk_texts):
                     try:
                         res = await _extract_text(session, cfg, llm, ct)
-                        # extract_dynamic swallows LLM/transport errors into {"error":...} rather
-                        # than raising; surface that per chunk so a failed chunk isn't silent.
                         if isinstance(res, dict) and res.get("error"):
                             last_err = str(res.get("error"))
                             flow.step("long_doc", "warn", f"chunk {i + 1}/{len(chunk_texts)} error: {last_err}")
@@ -613,12 +664,13 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                     except Exception as e:
                         last_err = str(e)
                         flow.step("long_doc", "warn", f"chunk {i + 1}/{len(chunk_texts)} failed ({e})")
-                # If chunking produced chunks but EVERY one failed, treat it as a fatal
-                # extraction failure (consistent with the single-pass path), not a silent
-                # zero-field pending_review.
                 if chunk_texts and not results:
                     raise PipelineError(f"extraction failed: all {len(chunk_texts)} chunk(s) failed ({last_err})")
-                extracted = long_doc.merge_chunk_extractions(results) if results else {"headers": {}, "line_items": []}
+                extracted = (
+                    long_doc.merge_chunk_extractions(results, strategy=cfg.dedup_strategy)
+                    if results
+                    else {"headers": {}, "line_items": []}
+                )
             else:
                 extracted = await _extract_text(session, cfg, llm, merged_text)
         except PipelineError:

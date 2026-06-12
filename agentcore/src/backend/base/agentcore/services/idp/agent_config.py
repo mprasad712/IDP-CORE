@@ -8,6 +8,7 @@ This mirrors the legacy ``process_backend_bulk.py`` (parse graph JSON -> run a f
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import UUID
@@ -86,7 +87,13 @@ class ResolvedPipelineConfig:
     long_doc_enabled: bool = True
     long_doc_max_pages: int = 8
     long_doc_max_tokens: int = 12000
+    long_doc_overlap_tokens: int = 256
     entity_linking_enabled: bool = True
+    dedup_strategy: str = "keep_highest_confidence"
+    rules_operator: str = "AND"
+    canvas_rules: list[dict] = field(default_factory=list)
+    approval_field: str = "rule_action"
+    approve_value: str = "auto_approve"
 
 
 # ───────────────────────── graph helpers ─────────────────────────
@@ -225,8 +232,61 @@ async def resolve_pipeline_config(
     # routing / misc from idp_agent + extra
     extra = idp_agent.extra or {}
     default_rule_action = (idp_agent.default_rule_action or "pending_review").strip().lower()
-    confidence_threshold = _to_float(extra.get("confidence_threshold"), 0.8)
     ocr_lang = str(extra.get("ocr_language") or _field(extractor, "language") or "en")
+
+    # ── Resolve visual canvas configuration nodes if present on the graph ──
+    chunking_node = _find_node(data, "Chunking Strategy")
+    aggregator_node = _find_node(data, "Chunk Aggregator")
+    router_node = _find_node(data, "Confidence Router")
+    rules_node = _find_node(data, "Rules / Conditions")
+    gate_node = _find_node(data, "Approval Gate")
+
+    # 1. Chunking settings
+    long_doc_enabled = chunking_node is not None or _as_bool(extra.get("long_doc_enabled"), True)
+    long_doc_max_tokens = 12000
+    if chunking_node:
+        long_doc_max_tokens = _to_int(_field(chunking_node, "chunk_size_tokens"), 4096)
+    else:
+        long_doc_max_tokens = _to_int(extra.get("long_doc_max_tokens"), 12000)
+    
+    long_doc_overlap_tokens = _to_int(
+        _field(chunking_node, "overlap_tokens") if chunking_node else extra.get("long_doc_overlap_tokens"), 256
+    )
+
+    # 2. Aggregator settings
+    dedup_strategy = str(
+        _field(aggregator_node, "dedup_strategy") if aggregator_node else extra.get("dedup_strategy") or "keep_highest_confidence"
+    )
+
+    # 3. Router settings
+    if router_node:
+        confidence_threshold = _to_float(_field(router_node, "threshold"), 0.8)
+    else:
+        confidence_threshold = _to_float(extra.get("confidence_threshold"), 0.8)
+
+    # 4. Rules / Conditions settings
+    rules_operator = "AND"
+    canvas_rules = []
+    if rules_node:
+        rules_operator = str(_field(rules_node, "logic_operator") or "AND")
+        raw_conds = _field(rules_node, "conditions")
+        if isinstance(raw_conds, str) and raw_conds.strip():
+            try:
+                parsed_conds = json.loads(raw_conds)
+                if isinstance(parsed_conds, list):
+                    canvas_rules = parsed_conds
+            except Exception as e:
+                logger.warning(f"[agent_config] failed to parse rules conditions JSON: {e}")
+        elif isinstance(raw_conds, list):
+            canvas_rules = raw_conds
+
+    # 5. Gate settings
+    approval_field = str(
+        _field(gate_node, "approval_field") if gate_node else extra.get("approval_field") or "rule_action"
+    )
+    approve_value = str(
+        _field(gate_node, "approve_value") if gate_node else extra.get("approve_value") or "auto_approve"
+    )
 
     # ── Differentiator toggles: a canvas node's PRESENCE enables the feature; idp_agent.extra
     # is a fallback/override (so API/test config and on-the-fly toggling still work). ──
@@ -293,10 +353,16 @@ async def resolve_pipeline_config(
         math_reconcile_enabled=math_reconcile_enabled,
         math_reconcile_max_attempts=math_reconcile_max_attempts,
         math_reconcile_tolerance=math_reconcile_tolerance,
-        long_doc_enabled=_as_bool(extra.get("long_doc_enabled"), True),
+        long_doc_enabled=long_doc_enabled,
         long_doc_max_pages=_to_int(extra.get("long_doc_max_pages"), 8),
-        long_doc_max_tokens=_to_int(extra.get("long_doc_max_tokens"), 12000),
+        long_doc_max_tokens=long_doc_max_tokens,
+        long_doc_overlap_tokens=long_doc_overlap_tokens,
         entity_linking_enabled=_as_bool(extra.get("entity_linking_enabled"), True),
+        dedup_strategy=dedup_strategy,
+        rules_operator=rules_operator,
+        canvas_rules=canvas_rules,
+        approval_field=approval_field,
+        approve_value=approve_value,
     )
 
 

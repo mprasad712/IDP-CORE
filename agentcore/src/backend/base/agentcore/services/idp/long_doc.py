@@ -117,14 +117,19 @@ async def persist_sections(session, document_id: UUID, sections: list[dict]) -> 
     await session.commit()
 
 
-def _split_text_by_tokens(text: str, limit: int) -> list[str]:
-    """Fixed-size split of one text block into ~``limit``-token pieces (token ~ 4 chars).
+def _split_text_by_tokens(text: str, limit: int, overlap: int = 0) -> list[str]:
+    """Fixed-size split of one text block into ~``limit``-token pieces (token ~ 4 chars) with overlap.
 
     Breaks at the nearest newline/space before the cut so lines aren't sliced mid-word. If the
     block opens with a ``===== PAGE N =====`` citation header, that header is repeated at the
     top of every piece so each sub-chunk stays attributable to its page.
     """
     max_chars = max(4000, limit * 4)
+    overlap_chars = max(0, overlap * 4)
+    step = max_chars - overlap_chars
+    if step <= 0:
+        step = max_chars // 2
+
     if len(text) <= max_chars:
         return [text] if text.strip() else []
 
@@ -148,12 +153,17 @@ def _split_text_by_tokens(text: str, limit: int) -> list[str]:
         if piece.strip():
             # Re-attach the header to continuation pieces (the first piece already has it).
             parts.append(piece if (not parts or not header) else header + piece)
-        i = end + 1 if end <= i else end
+        
+        if end >= n:
+            break
+        i = max(i + 1, end - overlap_chars)
     return parts
 
 
-def chunks_for_extraction(tokens: list[dict], sections: list[dict], *, max_tokens: int = 12000) -> list[str]:
-    """Group tokens into page-numbered chunk texts, each roughly ``<= max_tokens``.
+def chunks_for_extraction(
+    tokens: list[dict], sections: list[dict], *, max_tokens: int = 12000, overlap_tokens: int = 256
+) -> list[str]:
+    """Group tokens into page-numbered chunk texts, each roughly ``<= max_tokens``, respecting overlap.
 
     Packs whole sections together while they fit; a single oversized section is split by page,
     and a single page that ALONE exceeds the limit is further fixed-token-split so no chunk
@@ -188,7 +198,7 @@ def chunks_for_extraction(tokens: list[dict], sections: list[dict], *, max_token
             # have and emit it as its own fixed-token-split sub-chunks.
             if page_tokens > limit:
                 _flush()
-                chunks.extend(_split_text_by_tokens(page_text, limit))
+                chunks.extend(_split_text_by_tokens(page_text, limit, overlap_tokens))
                 continue
             if cur_pages and cur_tokens + page_tokens > limit:
                 _flush()
@@ -202,13 +212,13 @@ def chunks_for_extraction(tokens: list[dict], sections: list[dict], *, max_token
     return chunks
 
 
-def merge_chunk_extractions(results: list[dict]) -> dict:
-    """Merge per-chunk extraction dicts into one ``{headers, line_items}`` result.
+def merge_chunk_extractions(results: list[dict], strategy: str = "keep_highest_confidence") -> dict:
+    """Merge per-chunk extraction dicts into one ``{headers, line_items}`` result based on strategy.
 
-    Headers: keep the highest-confidence value seen for each field name across chunks.
-    Line items: concatenate every chunk's rows, re-indexing ``row_index`` continuously so
-    rows from later chunks don't collide with earlier ones. Flat rows (no ``columns``) are
-    passed through unchanged for the downstream normaliser.
+    Strategies:
+      * keep_highest_confidence: Keep header field with the highest confidence score.
+      * keep_first: Keep the first non-null header field value encountered.
+      * merge_all: Concatenate string values if they differ.
     """
     merged_headers: dict = {}
     merged_lines: list = []
@@ -221,11 +231,31 @@ def merge_chunk_extractions(results: list[dict]) -> dict:
             errors.append(str(res["error"]))
 
         for name, field in (res.get("headers") or {}).items():
-            new_conf = field.get("confidence", 0.0) if isinstance(field, dict) else 0.0
+            if not isinstance(field, dict):
+                continue
+            
+            value = field.get("value")
+            if value is None:
+                continue
+
             existing = merged_headers.get(name)
-            old_conf = existing.get("confidence", 0.0) if isinstance(existing, dict) else -1.0
-            if existing is None or (new_conf or 0.0) > (old_conf or 0.0):
-                merged_headers[name] = field
+            if existing is None:
+                merged_headers[name] = field.copy()
+            else:
+                if strategy == "keep_first":
+                    # Already have the first one, do nothing
+                    pass
+                elif strategy == "merge_all":
+                    # Concatenate if they are different
+                    exist_val = existing.get("value")
+                    if exist_val is not None and str(exist_val).strip() != str(value).strip():
+                        existing["value"] = f"{exist_val}, {value}"
+                    existing["confidence"] = max(existing.get("confidence", 0.0), field.get("confidence", 0.0))
+                else:  # keep_highest_confidence
+                    new_conf = field.get("confidence", 0.0)
+                    old_conf = existing.get("confidence", 0.0)
+                    if new_conf > old_conf:
+                        merged_headers[name] = field.copy()
 
         for row in res.get("line_items") or []:
             merged_lines.append(row)
