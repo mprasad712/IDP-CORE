@@ -974,6 +974,38 @@ async def test_pipeline_split_early_returns_and_enqueues_children(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_pipeline_flow_log_is_detailed(monkeypatch):
+    """The per-document flow log records the full cycle: input, config, OCR/native, what the LLM gave."""
+    from agentcore.services.database.models.idp.documents import IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch, result={
+        "headers": {"invoice_number": {"value": "INV-9", "confidence": 0.9}, "total": {"value": "100", "confidence": 0.9}},
+        "line_items": [],
+    })
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf())
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            by_step = {e["step"]: e["detail"] for e in job.log}
+            # input received
+            assert "input received" in by_step["load"]
+            # the agent config (what runs) is logged
+            assert "config" in by_step and "extraction=" in by_step["config"] and "features=" in by_step["config"]
+            # OCR/native output size is logged
+            assert "native" in by_step and "chars" in by_step["native"]
+            # merged text size + location
+            assert "text" in by_step and "chars" in by_step["text"] and "ocr_output" in by_step["text"]
+            # what the LLM gave (field names)
+            assert "invoice_number" in by_step["extract"] and "header field" in by_step["extract"]
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
 async def test_pipeline_classify_failure_does_not_poison_session(monkeypatch):
     """A classification hook failure must roll back and NOT corrupt extraction/finalize."""
     from agentcore.services.database.models.idp.documents import IdpDocument, IdpExtractedHeader, IdpProcessingJob
@@ -1062,6 +1094,110 @@ async def test_pipeline_split_all_enqueue_fail_fails_parent(monkeypatch):
             for c in (await session.exec(select(IdpDocument).where(IdpDocument.parent_document_id == doc_id))).all():
                 await session.delete(c)
             await session.commit()
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_agent_config_reads_differentiator_nodes():
+    """Classifier / Visual Detection / Math Reconcile canvas nodes drive the pipeline toggles."""
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent
+    from agentcore.services.deps import session_scope
+
+    extra_nodes = [
+        _node("Document Classifier", {"confidence_threshold": 0.6}),
+        _node("Visual Element Detection", {"detect_signatures": True, "detect_qr": True, "detect_stamps": False}),
+        _node("Math Reconcile", {"max_retries": 3, "tolerance": 0.05}),
+    ]
+    graph = _graph(str(uuid4()), extra_nodes=extra_nodes)
+    idp_agent = IdpAgent(id=uuid4(), agent_id=uuid4(), extraction_mode="dynamic_prompting", default_rule_action="pending_review")
+    base_agent = Agent(id=uuid4(), name="x", data=graph)
+    async with session_scope() as session:
+        cfg = await resolve_pipeline_config(session, idp_agent, base_agent)
+
+    assert cfg.classify_enabled is True and cfg.classify_threshold == 0.6
+    # detect_qr maps to both qr + barcode (pyzbar emits both); stamps not supported -> ignored
+    assert cfg.detect_enabled is True and cfg.detect_enabled_types == {"signature", "qr", "barcode"}
+    assert cfg.math_reconcile_enabled is True
+    assert cfg.math_reconcile_max_attempts == 3 and cfg.math_reconcile_tolerance == 0.05
+
+
+@pytest.mark.anyio
+async def test_agent_config_no_differentiator_nodes_defaults_off():
+    """Without the nodes, classify/detect/math default OFF; idp_agent.extra still overrides."""
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent
+    from agentcore.services.deps import session_scope
+
+    graph = _graph(str(uuid4()))  # no differentiator nodes
+    idp_off = IdpAgent(id=uuid4(), agent_id=uuid4(), extraction_mode="dynamic_prompting", default_rule_action="pending_review")
+    idp_extra = IdpAgent(id=uuid4(), agent_id=uuid4(), extraction_mode="dynamic_prompting",
+                         default_rule_action="pending_review", extra={"classify_enabled": True})
+    base_agent = Agent(id=uuid4(), name="x", data=graph)
+    async with session_scope() as session:
+        cfg_off = await resolve_pipeline_config(session, idp_off, base_agent)
+        cfg_extra = await resolve_pipeline_config(session, idp_extra, base_agent)
+
+    assert cfg_off.classify_enabled is False and cfg_off.detect_enabled is False and cfg_off.math_reconcile_enabled is False
+    assert cfg_extra.classify_enabled is True  # extra fallback still works
+
+
+@pytest.mark.anyio
+async def test_pipeline_txt_file(monkeypatch):
+    """A .txt file is accepted, read as digital native text (no OCR), and processed."""
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch)
+    txt = b"Invoice Number INV-TXT-1\nVendor: ACME Supplies Ltd\nSubtotal 100.00\nTax 18.00\nTotal 118.00\n"
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=txt, file_type="txt")
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            assert doc.status in ("auto_approved", "pending_review")
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            steps = [e["step"] for e in job.log]
+            assert "native" in steps and "ocr" not in steps  # txt = digital native text, no OCR
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_document_log_endpoint(monkeypatch):
+    """GET /documents/{id}/log returns the per-document flow log after processing."""
+    from fastapi.testclient import TestClient
+    from agentcore.main import create_app
+    from agentcore.services.auth.utils import get_current_active_user
+    from agentcore.api.idp import idp_rbac
+    from agentcore.services.deps import session_scope
+
+    def mock_user():
+        from types import SimpleNamespace
+        return SimpleNamespace(id=uuid4(), role="root")  # root bypasses org scoping
+
+    _patch_extraction(monkeypatch)
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf())
+    try:
+        await pipeline.process_document(doc_id)
+        app = create_app()
+        app.dependency_overrides[get_current_active_user] = mock_user
+        app.dependency_overrides[idp_rbac] = mock_user
+        client = TestClient(app)
+        try:
+            r = client.get(f"/api/v1/idp/documents/{doc_id}/log")
+            assert r.status_code == 200, r.text
+            body = r.json()
+            steps = [e["step"] for e in body["log"]]
+            assert "load" in steps and "extract" in steps and "finalize" in steps
+            assert body["status"] == "completed"
+            assert "input received" in body["log"][0]["detail"]
+        finally:
+            app.dependency_overrides.clear()
+    finally:
         await _cleanup(agent_id, doc_id)
 
 

@@ -347,7 +347,11 @@ async def _hook_math_reconcile(extracted, llm, job, cfg, flow: "FlowLog"):
         flow.step("math_reconcile", "warn", "math reconcile not available yet")
         return extracted
     try:
-        res = await reconcile_math(extracted, llm, max_attempts=cfg.math_reconcile_max_attempts)
+        res = await reconcile_math(
+            extracted, llm,
+            max_attempts=cfg.math_reconcile_max_attempts,
+            tolerance=getattr(cfg, "math_reconcile_tolerance", 0.01),
+        )
         res = res if isinstance(res, dict) else {}
         job.math_reconcile_attempts = int(res.get("attempts", 0) or 0)
         flow.step("math_reconcile", "ok",
@@ -427,7 +431,12 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         session.add(doc)
         session.add(job)
         await session.commit()
-        flow.step("load", "ok", f"{doc.original_filename} ({doc.file_size_bytes} bytes, {doc.file_type})")
+        flow.step(
+            "load", "ok",
+            f"input received: '{doc.original_filename}' ({doc.file_size_bytes} bytes, .{doc.file_type}, "
+            f"source={doc.source}) — document marked processing",
+            document_id=str(document_id),
+        )
 
         # resolve agents + config
         idp_agent = await session.get(IdpAgent, doc.agent_id)
@@ -438,6 +447,24 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
 
         if not cfg.model_id:
             raise PipelineError("no model configured in agent graph")
+
+        # Log the resolved agent configuration so the trail shows EXACTLY what this agent is set
+        # to do for this document (which steps/features run, the model, the extraction mode).
+        _features = [
+            name for name, on in (
+                ("skew", cfg.fix_skew), ("rotation", cfg.fix_rotation), ("classify", cfg.classify_enabled),
+                ("detect", cfg.detect_enabled), ("long-doc", cfg.long_doc_enabled),
+                ("entity-link", cfg.entity_linking_enabled), ("math-reconcile", cfg.math_reconcile_enabled),
+                ("multi-doc-split", cfg.multi_doc_split),
+            ) if on
+        ]
+        flow.step(
+            "config", "ok",
+            f"agent config: extraction={cfg.extraction_mode}"
+            + (f" (config={cfg.config_name})" if cfg.config_name else "")
+            + f", model={str(cfg.model_id)[:8]}…, ocr_lang={cfg.ocr_lang}, "
+            f"page_select={cfg.page_selection_mode}, features=[{', '.join(_features) or 'none'}]",
+        )
 
         file_bytes = await storage.get_file(agent_scope, file_name)
         file_type = (doc.file_type or "").lower().lstrip(".")
@@ -462,11 +489,13 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         tokens: list[dict] = []
         if overall_kind == text_layer.DIGITAL:
             _, tokens = text_layer.extract_native_text(original_bytes, file_type)
-            flow.step("native", "ok", f"native text: {len(tokens)} token(s)")
+            _chars = sum(len(str(t.get("text", ""))) for t in tokens)
+            flow.step("native", "ok", f"digital — native text layer used (no OCR): {len(tokens)} token(s), {_chars} chars")
         elif overall_kind == text_layer.SCANNED:
             ocr_bytes = await _maybe_preprocess(original_bytes, file_type, cfg, flow)
             tokens = await run_paddle_ocr(ocr_bytes, file_type, cfg.ocr_lang)
-            flow.step("ocr", "ok", f"PaddleOCR {cfg.ocr_lang}: {len(tokens)} token(s)")
+            _chars = sum(len(str(t.get("text", ""))) for t in tokens)
+            flow.step("ocr", "ok", f"PaddleOCR ({cfg.ocr_lang}) output: {len(tokens)} token(s), {_chars} chars")
         else:  # mixed: native text for digital pages, OCR for scanned pages
             _, native = text_layer.extract_native_text(original_bytes, file_type)
             tokens += [t for t in native if int(t.get("page_number", 1) or 1) in digital_pages]
@@ -534,8 +563,14 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         await _save_artifact(
             storage, agent_scope, f"ocr_output/{document_id}/ocr_text.txt", merged_text.encode("utf-8")
         )
-        if not merged_text.strip():
-            flow.step("text", "warn", "no text extracted")
+        if merged_text.strip():
+            flow.step(
+                "text", "ok",
+                f"merged page-numbered text built: {len(merged_text)} chars across {len(selected)} page(s) "
+                f"→ saved to ocr_output/{document_id}/ocr_text.txt",
+            )
+        else:
+            flow.step("text", "warn", "no text extracted from the document")
 
         # HOOK: B29 classification — may set cfg.predicted_type + auto-select a Named Config
         # (mutates cfg.field_config_id / cfg.extraction_mode) before extraction runs.
@@ -614,10 +649,18 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             extraction_result=extracted if isinstance(extracted, dict) else {},
             ocr_tokens=tokens,
         )
-        n_head = len(extracted.get("headers", {})) if isinstance(extracted, dict) else 0
+        _headers = extracted.get("headers", {}) if isinstance(extracted, dict) else {}
+        n_head = len(_headers)
         n_line = len(extracted.get("line_items", [])) if isinstance(extracted, dict) else 0
+        _names = list(_headers.keys())
+        _preview = ", ".join(_names[:12]) + ("…" if len(_names) > 12 else "")
         job.extraction_mode_used = cfg.extraction_mode
-        flow.step("extract", "ok", f"mode={cfg.extraction_mode} headers={n_head} lines={n_line} conf={overall_conf:.2f}")
+        flow.step(
+            "extract", "ok",
+            f"LLM ({cfg.extraction_mode}) returned {n_head} header field(s) [{_preview}] "
+            f"+ {n_line} line-item row(s); overall confidence={overall_conf:.2f} → saved to "
+            f"idp_extracted_headers/idp_extracted_line_items",
+        )
 
         # HOOK: B36 cross-page entity linking — record entities seen on multiple pages.
         if cfg.entity_linking_enabled:

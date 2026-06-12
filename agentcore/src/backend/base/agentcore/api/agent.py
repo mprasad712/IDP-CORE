@@ -82,6 +82,20 @@ async def _save_agent_to_fs(agent: Agent) -> None:
                 logger.exception("Failed to write agent %s to path %s", agent.name, agent.fs_path)
 
 
+async def _sync_idp_agent(agent: Agent, user_id) -> None:
+    """Best-effort, ISOLATED: create/sync the IdpAgent row for an agent whose saved graph
+    contains IDP nodes, so a builder-built agent becomes processable. Runs on its OWN session
+    so a sync failure can never poison or break the agent save."""
+    try:
+        from agentcore.services.deps import session_scope
+        from agentcore.services.idp.agent_config import sync_idp_agent_from_graph
+
+        async with session_scope() as idp_session:
+            await sync_idp_agent_from_graph(idp_session, agent, user_id)
+    except Exception as e:  # noqa: BLE001 - never break agent save
+        logger.warning("Could not sync IdpAgent for agent %s: %s", getattr(agent, "id", None), e)
+
+
 async def _resolve_tenant_scope_for_user(
     *,
     session: AsyncSession,
@@ -352,6 +366,9 @@ async def create_agent(
             org_id = await _get_user_org_id(session, current_user.id)
             await sync_agent_tags(session, db_agent.id, tag_names, org_id, current_user.id)
             await session.commit()
+
+        # ── Auto-create the IdpAgent row if the graph contains IDP nodes (best-effort) ──
+        await _sync_idp_agent(db_agent, current_user.id)
 
         await _save_agent_to_fs(db_agent)
 
@@ -691,6 +708,9 @@ async def update_agent(
             db_agent.tags = incoming_tags
             session.add(db_agent)
             await session.commit()
+
+        # ── Create/sync the IdpAgent row if the graph contains IDP nodes (best-effort) ──
+        await _sync_idp_agent(db_agent, current_user.id)
 
         await _save_agent_to_fs(db_agent)
 

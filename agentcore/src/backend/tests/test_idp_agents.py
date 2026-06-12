@@ -118,8 +118,14 @@ async def setup_test_data():
 
         # Cleanup test data after test runs
         async with session_scope() as cleanup_session:
-            # Delete any created IDP agents
-            agents = (await cleanup_session.exec(select(IdpAgent))).all()
+            # Delete ONLY the IDP agents this test created (scoped to its own base agents).
+            # A bare select(IdpAgent) here would delete EVERY idp_agents row in the DB (and
+            # cascade to idp_documents) — it was wiping seeded/dev data on every suite run.
+            agents = (
+                await cleanup_session.exec(
+                    select(IdpAgent).where(IdpAgent.agent_id.in_([base_agent.id, base_agent2.id]))
+                )
+            ).all()
             for a in agents:
                 await cleanup_session.delete(a)
 

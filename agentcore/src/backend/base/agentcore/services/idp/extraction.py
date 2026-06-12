@@ -82,16 +82,148 @@ SYSTEM_PROMPT = (
     "Conform strictly to the StructuredExtractionResult schema. Return ONLY valid JSON."
 )
 
+# Compact prompt: asks for FLAT values only (no per-field confidence/reasoning). The verbose
+# schema above forces value+confidence+reasoning for every one of N columns on every row, which
+# overflows the model's output token limit on multi-row invoices → truncated/invalid JSON →
+# dropped line items. The compact output is ~half the tokens; we re-attach a uniform default
+# confidence in post-processing (`_expand_extraction`).
+COMPACT_SYSTEM_PROMPT = (
+    "You are an expert document data extractor.\n"
+    "Extract the requested fields from the document text and return ONLY a JSON object of this shape:\n"
+    '{"headers": {"field_name": "value", ...}, "line_items": [{"column_name": "value", ...}, ...]}\n\n'
+    "Rules:\n"
+    "- 'headers' are single document-level fields (invoice number, date, vendor, totals).\n"
+    "- 'line_items' is a list of rows; each row is a flat object of column_name -> value.\n"
+    "- Include ONLY fields/columns you actually find. Omit anything not present (do NOT invent values).\n"
+    "- Dates as YYYY-MM-DD; numbers as plain strings. Values must be strings or null.\n"
+    "- Do NOT include confidence or reasoning. Return ONLY valid JSON, no prose, no code fences."
+)
 
-async def _invoke_llm(system: str, user: str, llm_model: Any) -> Dict[str, Any]:
-    """Call the LLM with given system/user strings and return a normalised extraction dict.
+# Uniform confidence assigned to any field the model returns in compact mode (it returns no
+# real per-field score). Fields that are absent/empty get 0.0, so a document missing fields has
+# a lower overall average and routes to HITL review.
+_DEFAULT_FIELD_CONFIDENCE = 0.85
 
-    Tries with_structured_output first; falls back to raw JSON parsing.
+
+def _strip_code_fences(text: str) -> str:
+    """Strip a leading/trailing ``` ... ``` markdown fence if present."""
+    raw = (text or "").strip()
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        if lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+    return raw
+
+
+def _expand_value(v: Any) -> tuple:
+    """Map a scalar value OR a {value,confidence,reasoning} dict to (value:str|None, confidence, reasoning).
+
+    Compact responses give a scalar → assign the uniform default confidence. A verbose response
+    (dict with a real confidence) is preserved, so this works for both output styles.
+    """
+    if isinstance(v, dict):
+        val = v.get("value")
+        val_s = str(val) if val not in (None, "") else None
+        if v.get("confidence") is not None:
+            try:
+                conf = float(v.get("confidence"))
+            except (TypeError, ValueError):
+                conf = _DEFAULT_FIELD_CONFIDENCE if val_s is not None else 0.0
+        else:
+            conf = _DEFAULT_FIELD_CONFIDENCE if val_s is not None else 0.0
+        reasoning = v.get("reasoning") if v.get("reasoning") is not None else None
+        return val_s, conf, reasoning
+    val_s = str(v) if v not in (None, "") else None
+    conf = _DEFAULT_FIELD_CONFIDENCE if val_s is not None else 0.0
+    return val_s, conf, ("compact extraction" if val_s is not None else None)
+
+
+def _expand_extraction(parsed: Any) -> Dict[str, Any]:
+    """Expand a parsed LLM result (flat compact OR nested verbose) into the canonical shape that
+    ``save_extraction_results`` consumes: ``{headers:{name:{value,confidence,reasoning}}, line_items:[...]}``."""
+    if not isinstance(parsed, dict):
+        return {"headers": {}, "line_items": []}
+
+    headers: Dict[str, Any] = {}
+    raw_headers = parsed.get("headers") or {}
+    if isinstance(raw_headers, dict):
+        for name, v in raw_headers.items():
+            val, conf, reasoning = _expand_value(v)
+            headers[str(name)] = {"value": val, "confidence": conf, "reasoning": reasoning}
+
+    line_items: List[Dict[str, Any]] = []
+    raw_rows = parsed.get("line_items") or []
+    if isinstance(raw_rows, list):
+        counter = 0
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                continue
+            cols_out: List[Dict[str, Any]] = []
+            cols = row.get("columns")
+            if isinstance(cols, list):  # nested/verbose row
+                for col in cols:
+                    if not isinstance(col, dict):
+                        continue
+                    cname = str(col.get("column_name", "")).strip()
+                    if not cname:
+                        continue
+                    src = col if col.get("confidence") is not None else col.get("value")
+                    val, conf, reasoning = _expand_value(src)
+                    cols_out.append({"column_name": cname, "value": val, "confidence": conf, "reasoning": reasoning})
+            else:  # flat row: {column_name: value}
+                for key, val_raw in row.items():
+                    if key in ("row_index", "columns"):
+                        continue
+                    val, conf, reasoning = _expand_value(val_raw)
+                    cols_out.append({"column_name": str(key), "value": val, "confidence": conf, "reasoning": reasoning})
+            if cols_out:
+                line_items.append({"row_index": counter, "columns": cols_out})
+                counter += 1
+
+    return {"headers": headers, "line_items": line_items}
+
+async def extract_dynamic(
+    ocr_text: str,
+    prompt: str,
+    llm_model: Any,
+    compact: bool = True,
+) -> Dict[str, Any]:
+    """Extract structured data dynamically based on a freeform user prompt.
+
+    ``compact=True`` (default) asks the model for a FLAT key-value JSON (no per-field
+    confidence/reasoning) and re-attaches a uniform default confidence in post-processing —
+    this avoids the output-token truncation of the verbose schema on multi-row invoices.
+    ``compact=False`` keeps the verbose structured-output path (for tests asserting real
+    per-field confidence). Both return the same canonical dict shape.
     """
     if llm_model is None:
         raise ValueError("Language Model is required for extraction.")
 
-    messages = [SystemMessage(content=system), HumanMessage(content=user)]
+    user_content = f"Instruction: {prompt}\n\nDocument Text:\n{ocr_text}"
+
+    # ── Compact path (default): flat JSON -> expand with default confidence ──
+    if compact:
+        messages = [
+            SystemMessage(content=COMPACT_SYSTEM_PROMPT),
+            HumanMessage(content=user_content),
+        ]
+        try:
+            response = await llm_model.ainvoke(messages)
+            raw_content = response.content if hasattr(response, "content") else str(response)
+            parsed = json.loads(_strip_code_fences(raw_content))
+            return _expand_extraction(parsed)
+        except Exception as e:
+            logger.error(f"[Extraction] compact extraction parsing failed: {e}")
+            return {"headers": {}, "line_items": [], "error": f"Extraction parsing failed: {str(e)}"}
+
+    # ── Verbose path (compact=False): structured schema ──
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=user_content)
+    ]
 
     # Attempt structured output (tool-calling capable models)
     if hasattr(llm_model, "with_structured_output"):
