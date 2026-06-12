@@ -27,8 +27,8 @@ def get_ocr_instance(lang: str):
 
     if ocr_lang not in _ocr_instances:
         try:
-            # use_angle_cls=True to handle text lines direction, show_log=False to reduce logging noise
-            _ocr_instances[ocr_lang] = PaddleOCR(use_angle_cls=True, lang=ocr_lang, show_log=False)
+            # use_angle_cls=True to handle text lines direction
+            _ocr_instances[ocr_lang] = PaddleOCR(use_angle_cls=True, lang=ocr_lang)
             logger.info(f"[OCR] Initialized PaddleOCR model for language: {ocr_lang}")
         except Exception as e:
             logger.error(f"[OCR] Failed to initialize PaddleOCR for language {ocr_lang}: {e}")
@@ -112,6 +112,41 @@ async def run_paddle_ocr(file_bytes: bytes, file_type: str, lang: str = "en") ->
     if ocr_model is not None:
         try:
             results = []
+            
+            def parse_result(ocr_res_raw, page_num):
+                parsed_lines = []
+                # Check for new dict structure: [{'rec_texts': ..., 'dt_polys': ..., 'rec_scores': ...}]
+                if isinstance(ocr_res_raw, list) and len(ocr_res_raw) > 0 and isinstance(ocr_res_raw[0], dict) and "rec_texts" in ocr_res_raw[0]:
+                    data = ocr_res_raw[0]
+                    texts = data.get("rec_texts", [])
+                    boxes = data.get("dt_polys", []) or data.get("rec_boxes", [])
+                    scores = data.get("rec_scores", [])
+                    for idx in range(min(len(texts), len(boxes), len(scores))):
+                        box = boxes[idx]
+                        if isinstance(box, np.ndarray):
+                            box = box.tolist()
+                        parsed_lines.append({
+                            "text": str(texts[idx]),
+                            "bounding_box": box,
+                            "confidence": float(scores[idx]),
+                            "page_number": page_num
+                        })
+                else:
+                    # Legacy structure: list of list of elements like [box, (text, conf)]
+                    if ocr_res_raw and isinstance(ocr_res_raw, list) and isinstance(ocr_res_raw[0], list):
+                        for line in ocr_res_raw[0]:
+                            box = line[0]
+                            if isinstance(box, np.ndarray):
+                                box = box.tolist()
+                            text, conf = line[1]
+                            parsed_lines.append({
+                                "text": str(text),
+                                "bounding_box": box,
+                                "confidence": float(conf),
+                                "page_number": page_num
+                            })
+                return parsed_lines
+
             if is_pdf:
                 doc = fitz.open(stream=file_bytes, filetype="pdf")
                 for page_num in range(len(doc)):
@@ -125,35 +160,24 @@ async def run_paddle_ocr(file_bytes: bytes, file_type: str, lang: str = "en") ->
                     if img is None:
                         continue
 
-                    # PaddleOCR expects a numpy array or image file path
-                    ocr_res = ocr_model.ocr(img, cls=True)
-                    if ocr_res and ocr_res[0]:
-                        for line in ocr_res[0]:
-                            box = line[0]
-                            text, conf = line[1]
-                            # box structure is: [[x0, y0], [x1, y1], [x2, y2], [x3, y3]]
-                            results.append({
-                                "text": text,
-                                "bounding_box": box,
-                                "confidence": float(conf),
-                                "page_number": page_num + 1
-                            })
+                    # Try predict (which is the recommended method in PP-OCRv4/v5)
+                    try:
+                        ocr_res = ocr_model.predict(img)
+                    except Exception:
+                        # Fallback to legacy ocr call
+                        ocr_res = ocr_model.ocr(img, cls=True)
+
+                    results.extend(parse_result(ocr_res, page_num + 1))
                 doc.close()
             else:
                 nparr = np.frombuffer(file_bytes, np.uint8)
                 img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 if img is not None:
-                    ocr_res = ocr_model.ocr(img, cls=True)
-                    if ocr_res and ocr_res[0]:
-                        for line in ocr_res[0]:
-                            box = line[0]
-                            text, conf = line[1]
-                            results.append({
-                                "text": text,
-                                "bounding_box": box,
-                                "confidence": float(conf),
-                                "page_number": 1
-                            })
+                    try:
+                        ocr_res = ocr_model.predict(img)
+                    except Exception:
+                        ocr_res = ocr_model.ocr(img, cls=True)
+                    results.extend(parse_result(ocr_res, 1))
             return results
         except Exception as e:
             logger.warning(f"[OCR] PaddleOCR execution failed: {e}. Falling back to text/mock extraction.")
