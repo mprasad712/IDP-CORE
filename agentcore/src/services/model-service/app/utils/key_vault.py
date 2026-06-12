@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from uuid import UUID
@@ -28,13 +29,14 @@ class KeyVaultSecretStore:
         if not config.vault_url:
             return None
 
-        from azure.identity import DefaultAzureCredential
         from azure.keyvault.secrets import SecretClient
 
-        credential = DefaultAzureCredential(
-            exclude_environment_credential=True,
-            exclude_interactive_browser_credential=True,
-        )
+        if os.getenv("AZURE_FEDERATED_TOKEN_FILE"):
+            from azure.identity import WorkloadIdentityCredential
+            credential = WorkloadIdentityCredential()
+        else:
+            from azure.identity import DefaultAzureCredential
+            credential = DefaultAzureCredential(exclude_interactive_browser_credential=True)
 
         client = SecretClient(
             vault_url=config.vault_url,
