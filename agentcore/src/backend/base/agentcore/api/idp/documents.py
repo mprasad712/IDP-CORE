@@ -277,3 +277,65 @@ async def get_document_file(
         media_type=media_type,
         headers={"Content-Disposition": f'inline; filename="{safe_name}"'},
     )
+
+
+@router.get("/{document_id}/log")
+async def get_document_log(
+    *,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+    document_id: UUID,
+):
+    """Return the per-document processing FLOW LOG (the step-by-step trail) for the viewer.
+
+    This is the readable cycle — input received → config → OCR/native → classify → extract
+    (what the LLM returned) → route → finalize — recorded on the latest processing job.
+    """
+    # Scope: root sees all; everyone else only documents whose agent belongs to one of their orgs.
+    role = normalize_role(getattr(current_user, "role", None))
+    stmt = select(IdpDocument).where(IdpDocument.id == document_id)
+    if role != "root":
+        rows = (
+            await session.exec(
+                select(UserOrganizationMembership.org_id).where(
+                    UserOrganizationMembership.user_id == current_user.id,
+                    UserOrganizationMembership.status.in_(["accepted", "active"]),
+                )
+            )
+        ).all()
+        org_ids = [r if not isinstance(r, tuple) else r[0] for r in rows]
+        stmt = (
+            stmt.join(IdpAgent, IdpDocument.agent_id == IdpAgent.id)
+            .join(Agent, IdpAgent.agent_id == Agent.id)
+            .where(Agent.org_id.in_(org_ids))
+        )
+    doc = (await session.exec(stmt)).first()
+    if doc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    job = (
+        await session.exec(
+            select(IdpProcessingJob)
+            .where(IdpProcessingJob.document_id == document_id)
+            .order_by(IdpProcessingJob.created_at.desc())
+        )
+    ).first()
+    if job is None:
+        return {
+            "document_id": str(document_id),
+            "job_id": None,
+            "status": doc.status,
+            "steps_completed": [],
+            "error_message": None,
+            "processing_time_ms": None,
+            "log": [],
+        }
+    return {
+        "document_id": str(document_id),
+        "job_id": str(job.id),
+        "status": job.status,
+        "steps_completed": job.steps_completed or [],
+        "error_message": job.error_message,
+        "processing_time_ms": job.processing_time_ms,
+        "log": job.log or [],
+    }

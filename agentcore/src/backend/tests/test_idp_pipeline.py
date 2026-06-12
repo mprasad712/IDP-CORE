@@ -1097,6 +1097,42 @@ async def test_pipeline_split_all_enqueue_fail_fails_parent(monkeypatch):
         await _cleanup(agent_id, doc_id)
 
 
+@pytest.mark.anyio
+async def test_document_log_endpoint(monkeypatch):
+    """GET /documents/{id}/log returns the per-document flow log after processing."""
+    from fastapi.testclient import TestClient
+    from agentcore.main import create_app
+    from agentcore.services.auth.utils import get_current_active_user
+    from agentcore.api.idp import idp_rbac
+    from agentcore.services.deps import session_scope
+
+    def mock_user():
+        from types import SimpleNamespace
+        return SimpleNamespace(id=uuid4(), role="root")  # root bypasses org scoping
+
+    _patch_extraction(monkeypatch)
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf())
+    try:
+        await pipeline.process_document(doc_id)
+        app = create_app()
+        app.dependency_overrides[get_current_active_user] = mock_user
+        app.dependency_overrides[idp_rbac] = mock_user
+        client = TestClient(app)
+        try:
+            r = client.get(f"/api/v1/idp/documents/{doc_id}/log")
+            assert r.status_code == 200, r.text
+            body = r.json()
+            steps = [e["step"] for e in body["log"]]
+            assert "load" in steps and "extract" in steps and "finalize" in steps
+            assert body["status"] == "completed"
+            assert "input received" in body["log"][0]["detail"]
+        finally:
+            app.dependency_overrides.clear()
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
 @pytest.mark.skipif(
     not __import__("agentcore.services.idp.ocr", fromlist=["_paddle_ocr_available"])._paddle_ocr_available,
     reason="PaddleOCR not installed (runs on M4/NVIDIA/Docker/CI)",
