@@ -10,8 +10,14 @@ export default function IDPFieldConfigMultiselect({
   disabled,
   ...baseInputProps
 }: InputProps<string[]>) {
-  const { data } = useGetFieldConfigNames(undefined, {});
+  const { data, isLoading } = useGetFieldConfigNames(undefined, {});
   const options = data?.names ?? [];
+
+  if (isLoading) {
+    return (
+      <span className="text-sm text-muted-foreground italic">Loading field configurations…</span>
+    );
+  }
 
   return (
     <MultiselectComponent
