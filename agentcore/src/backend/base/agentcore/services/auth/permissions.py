@@ -211,7 +211,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "approve_documents",
         "view_idp_analytics",
     ],
-    "leader_executive": [
+    "idp_auditor": [
         "view_dashboard",
         # IDP: read-only reporting and audit
         "view_idp",
@@ -331,7 +331,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "approve_documents",
         "view_idp_analytics",
     ],
-    "developer": [
+    "idp_configurator": [
         "view_dashboard",
         "view_projects_page",
         "view_published_agents",
@@ -366,7 +366,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "manage_idp",
         "submit_documents",
     ],
-    "business_user": [
+    "doc_reviewer": [
         "view_dashboard",
         "view_projects_page",
         "view_published_agents",
@@ -400,7 +400,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_idp",
         "review_docs",
     ],
-    "consumer": [
+    "doc_submitter": [
         "view_published_agents",
         "view_registry_agent",
         "view_orchastration_page",
@@ -409,7 +409,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_idp",
         "submit_documents",
     ],
-    "document_approver": [
+    "doc_approver": [
         "view_dashboard",
         "view_hitl_approvals_page",
         # IDP: final approval gate after HITL review
@@ -419,7 +419,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
     ],
 }
 
-PERMISSION_VERSION = "v24"  # bump when permissions change (v24: IDP role redesign — submit_documents, approve_documents, view_idp_analytics, document_approver role)
+PERMISSION_VERSION = "v25"  # bump when permissions change (v25: IDP-native role key renames — doc_submitter, doc_reviewer, doc_approver, idp_auditor, idp_configurator)
 
 
 class PermissionCacheService:

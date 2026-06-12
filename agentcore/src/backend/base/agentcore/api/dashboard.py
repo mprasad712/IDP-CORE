@@ -1034,7 +1034,7 @@ async def get_developer_code_kpis(
     current_user: CurrentActiveUser,
 ):
     role = str(getattr(current_user, "role", "")).lower()
-    if role != "developer":
+    if role != "idp_configurator":
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     rows = (
@@ -1074,7 +1074,7 @@ async def get_business_maturity_kpis(
     current_user: CurrentActiveUser,
 ):
     role = str(getattr(current_user, "role", "")).lower()
-    if role != "business_user":
+    if role != "doc_reviewer":
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     total_agents = (
@@ -1147,7 +1147,7 @@ async def get_business_experience_kpis(
     current_user: CurrentActiveUser,
 ):
     role = str(getattr(current_user, "role", "")).lower()
-    if role != "business_user":
+    if role != "doc_reviewer":
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     assigned_agent_ids = select(AgentPublishRecipient.agent_id).where(
@@ -1226,7 +1226,7 @@ async def get_root_maturity_kpis(
         return proxied
 
     role = str(getattr(current_user, "role", "")).lower()
-    if role not in {"root", "leader_executive"}:
+    if role not in {"root", "idp_auditor"}:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     total_agents = (
@@ -1528,7 +1528,7 @@ async def get_cost_p95_trend(
         return proxied
 
     role = str(getattr(current_user, "role", "")).lower()
-    if role != "leader_executive":
+    if role != "idp_auditor":
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     days = 90 if range == "90d" else 30

@@ -7,6 +7,7 @@ from sqlmodel import Field, SQLModel
 
 class AgentEditLock(SQLModel, table=True):  # type: ignore[call-arg]
     __tablename__ = "agent_edit_lock"
+    __mapper_args__ = {"confirm_deleted_rows": False}
 
     agent_id: UUID = Field(primary_key=True, foreign_key="agent.id", nullable=False)
     locked_by: UUID = Field(foreign_key="user.id", nullable=False, index=True)

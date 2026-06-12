@@ -416,7 +416,7 @@ def _grafana_headers() -> dict:
 def _require_admin(user: User, *, allowed: set[str] | None = None) -> str:
     if allowed is None:
         allowed = {"root", "super_admin"}
-    role = normalize_role(getattr(user, "role", None) or "developer")
+    role = normalize_role(getattr(user, "role", None) or "idp_configurator")
     if role not in allowed:
         raise HTTPException(status_code=403, detail=f"This endpoint requires one of {sorted(allowed)} roles")
     return role
@@ -479,7 +479,7 @@ async def _scoped_agent_ids(
 
     None means 'all agents' (root).  Otherwise the list restricts queries.
     """
-    role = normalize_role(getattr(user, "role", None) or "developer")
+    role = normalize_role(getattr(user, "role", None) or "idp_configurator")
 
     if role == "root":
         return "platform", None

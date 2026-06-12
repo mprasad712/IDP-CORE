@@ -143,7 +143,7 @@ const KnowledgeBasesTab = ({
       if (kb.visibility === "PRIVATE") return isDeptScopedForUser(kb);
       return false;
     }
-    if (normalizedRole === "developer" || normalizedRole === "business_user") {
+    if (normalizedRole === "idp_configurator" || normalizedRole === "doc_reviewer") {
       return kb.visibility === "PRIVATE" && kb.created_by === userData?.id;
     }
     return false;
@@ -161,7 +161,7 @@ const KnowledgeBasesTab = ({
       if (kb.visibility === "PRIVATE") return isDeptScopedForUser(kb);
       return false;
     }
-    if (normalizedRole === "developer" || normalizedRole === "business_user") {
+    if (normalizedRole === "idp_configurator" || normalizedRole === "doc_reviewer") {
       return kb.visibility === "PRIVATE" && kb.created_by === userData?.id;
     }
     return false;
@@ -1035,9 +1035,9 @@ const KnowledgeBasesTab = ({
                 value={selectedOrgId}
                 onValueChange={setSelectedOrgId}
                 disabled={
-                  normalizedRole === "developer" ||
+                  normalizedRole === "idp_configurator" ||
                   normalizedRole === "department_admin" ||
-                  normalizedRole === "business_user"
+                  normalizedRole === "doc_reviewer"
                 }
               >
                 <SelectTrigger className="w-full">
@@ -1418,9 +1418,9 @@ const KnowledgeBasesTab = ({
                   value={selectedOrgId}
                   onValueChange={setSelectedOrgId}
                   disabled={
-                    normalizedRole === "developer" ||
+                    normalizedRole === "idp_configurator" ||
                     normalizedRole === "department_admin" ||
-                    normalizedRole === "business_user"
+                    normalizedRole === "doc_reviewer"
                   }
                 >
                   <SelectTrigger className="w-full">

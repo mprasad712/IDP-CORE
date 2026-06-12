@@ -406,7 +406,7 @@ def _can_delete_model(
     user_id = str(current_user.id)
 
     # Developer/Business User: never delete.
-    if normalized_roles.intersection({"developer", "business_user"}):
+    if normalized_roles.intersection({"idp_configurator", "doc_reviewer"}):
         return False
 
     # Department Admin: can delete only models approved by self.
@@ -1175,7 +1175,7 @@ async def request_model_visibility_change(
         if target_visibility == ModelVisibilityScope.PRIVATE.value:
             requested_org_id = requested_org_id or row.org_id
             if not requested_dept_id:
-                if current_role in {"department_admin", "developer", "business_user"} and dept_pairs:
+                if current_role in {"department_admin", "idp_configurator", "doc_reviewer"} and dept_pairs:
                     current_org_id, current_dept_id = sorted(dept_pairs, key=lambda x: (str(x[0]), str(x[1])))[0]
                     requested_org_id = requested_org_id or current_org_id
                     requested_dept_id = current_dept_id

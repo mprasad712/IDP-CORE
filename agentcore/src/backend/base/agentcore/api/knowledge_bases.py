@@ -209,7 +209,7 @@ async def _can_edit_knowledge_base(
             return bool(kb_dept_ids.intersection(dept_ids))
         return False
 
-    if role in {"developer", "business_user"}:
+    if role in {"idp_configurator", "doc_reviewer"}:
         return kb.visibility == KBVisibilityEnum.PRIVATE and kb.created_by == current_user.id
 
     return False
@@ -251,7 +251,7 @@ async def _can_delete_knowledge_base(
             return bool(kb_dept_ids.intersection(dept_ids))
         return False
 
-    if role in {"developer", "business_user"}:
+    if role in {"idp_configurator", "doc_reviewer"}:
         return kb.visibility == KBVisibilityEnum.PRIVATE and kb.created_by == current_user.id
 
     return False
@@ -316,7 +316,7 @@ async def _enforce_kb_scope_for_update(
     )
 
     if target_visibility == KBVisibilityEnum.PRIVATE:
-        if role in {"department_admin", "developer", "business_user"}:
+        if role in {"department_admin", "idp_configurator", "doc_reviewer"}:
             if not dept_pairs:
                 raise HTTPException(status_code=403, detail="No active department scope found")
             current_org_id, current_dept_id = sorted(dept_pairs, key=lambda x: (str(x[0]), str(x[1])))[0]
@@ -532,7 +532,7 @@ async def list_knowledge_bases(
         # created_by_email / updated_by_email are returned for every role so
         # the UI can show the email on hover. Department / organization
         # scope names remain gated by role below.
-        if role in {"developer", "business_user"}:
+        if role in {"idp_configurator", "doc_reviewer"}:
             department_name = None
             organization_name = None
         elif role == "department_admin":

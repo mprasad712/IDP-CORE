@@ -920,7 +920,7 @@ def _can_manage_dataset(
             return bool(dept_candidates.intersection(dept_id_set))
         return False
 
-    if role in {"developer", "business_user"}:
+    if role in {"idp_configurator", "doc_reviewer"}:
         return visibility == "private" and owner is not None and str(owner) == str(current_user.id)
 
     return False
@@ -966,7 +966,7 @@ async def _enforce_dataset_creation_scope(
                 raise HTTPException(status_code=403, detail="No active organization scope found")
             p_org_id = current_org_id
             p_dept_id = None
-        elif user_role in {"department_admin", "developer", "business_user"}:
+        elif user_role in {"department_admin", "idp_configurator", "doc_reviewer"}:
             current_org_id, current_dept_id = _first_eval_membership_scope(org_ids, dept_pairs)
             if not current_org_id or not current_dept_id:
                 raise HTTPException(status_code=403, detail="No active department scope found")
@@ -4506,7 +4506,7 @@ def _can_edit_dataset(
             return bool(dept_candidates.intersection(dept_id_set))
         return False
 
-    if role in {"developer", "business_user"}:
+    if role in {"idp_configurator", "doc_reviewer"}:
         return ds_visibility == "private" and dataset.user_id == current_user.id
 
     return False

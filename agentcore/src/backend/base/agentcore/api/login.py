@@ -83,15 +83,16 @@ def _normalize_login_identity(value: str | None) -> str:
 
 
 def _role_priority(role: str | None) -> int:
-    normalized = normalize_role(role or "consumer")
+    normalized = normalize_role(role or "doc_submitter")
     priorities = {
         "root": 500,
         "super_admin": 400,
-        "leader_executive": 350,
+        "idp_auditor": 350,
         "department_admin": 300,
-        "developer": 200,
-        "business_user": 200,
-        "consumer": 100,
+        "idp_configurator": 200,
+        "doc_reviewer": 200,
+        "doc_submitter": 100,
+        "doc_approver": 150,
     }
     return priorities.get(normalized, 0)
 
@@ -146,7 +147,7 @@ async def _resolve_sso_identity_user(
         changed = True
 
     for duplicate in candidates[1:]:
-        if normalize_role(getattr(duplicate, "role", "consumer")) != "consumer":
+        if normalize_role(getattr(duplicate, "role", "doc_submitter")) != "doc_submitter":
             continue
         duplicate.is_active = False
         duplicate.deleted_at = duplicate.deleted_at or now
@@ -192,7 +193,7 @@ async def login_to_get_access_token(
         user_email = (user.email or "").strip().lower()
         user_username = (user.username or "").strip().lower()
         if root_email and (user_email == root_email or user_username == root_email):
-            if normalize_role(getattr(user, "role", "consumer")) != "root":
+            if normalize_role(getattr(user, "role", "doc_submitter")) != "root":
                 user.role = "root"
                 user.is_superuser = True
                 db.add(user)
@@ -200,7 +201,7 @@ async def login_to_get_access_token(
                 await db.refresh(user)
             current_role = "root"
         else:
-            current_role = normalize_role(getattr(user, "role", "developer"))
+            current_role = normalize_role(getattr(user, "role", "idp_configurator"))
 
         tokens = await create_user_tokens(user_id=user.id, db=db, update_last_login=True)
         _apply_auth_cookies(response, tokens, auth_settings, user)
@@ -273,21 +274,21 @@ async def azure_sso_login(
     # -----------------------------
     # Find or Create User
     # -----------------------------
-    resolved_role = "consumer"
+    resolved_role = "doc_submitter"
 
     if root_email and normalized_email == root_email:
         resolved_role = "root"
         if user:
-            if normalize_role(getattr(user, "role", "consumer")) != "root":
+            if normalize_role(getattr(user, "role", "doc_submitter")) != "root":
                 user.role = "root"
                 user.is_superuser = True
                 db.add(user)
                 await db.commit()
                 await db.refresh(user)
     elif user:
-        resolved_role = normalize_role(getattr(user, "role", "consumer"))
+        resolved_role = normalize_role(getattr(user, "role", "doc_submitter"))
     else:
-        resolved_role = "consumer"
+        resolved_role = "doc_submitter"
 
     is_new_user = False
     if not user:
@@ -318,11 +319,11 @@ async def azure_sso_login(
             if not existing_user:
                 raise HTTPException(status_code=500, detail="Unable to provision SSO user.")
             user = existing_user
-            resolved_role = normalize_role(getattr(user, "role", "consumer"))
+            resolved_role = normalize_role(getattr(user, "role", "doc_submitter"))
 
     # DB role always wins for registered users (except configured root email override above)
     if user and not (root_email and normalized_email == root_email):
-        resolved_role = normalize_role(getattr(user, "role", "consumer"))
+        resolved_role = normalize_role(getattr(user, "role", "doc_submitter"))
 
     # Check if user account has expired
     if user and not is_new_user and user.expires_at is not None:
@@ -380,7 +381,7 @@ async def refresh_token(
         user = await get_user_by_id(db, user_id)
         if not user:
              raise HTTPException(status_code=404, detail="User not found")
-        user_role = normalize_role(getattr(user, "role", "developer"))
+        user_role = normalize_role(getattr(user, "role", "idp_configurator"))
         permissions = await get_permissions_for_role(user_role)
         _apply_auth_cookies(response, tokens, auth_settings, user)
         return {
@@ -450,7 +451,7 @@ async def register_user(body: RegisterRequest, request: Request, db: DbSession):
         email=email,
         display_name=username,
         password=get_password_hash(body.password),
-        role="consumer",
+        role="doc_submitter",
         is_active=False,
         is_superuser=False,
     )

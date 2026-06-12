@@ -58,7 +58,7 @@ async def setup_test_data():
             password="testpassword",
             is_active=True,
             is_superuser=False,
-            role="developer",
+            role="idp_configurator",
         )
         session.add(std_user)
 
@@ -77,7 +77,7 @@ async def setup_test_data():
         await session.refresh(test_org)
 
         # Resolve the developer role by name (UUIDs differ per environment)
-        developer_role = (await session.exec(select(Role).where(Role.name == "developer"))).first()
+        developer_role = (await session.exec(select(Role).where(Role.name == "idp_configurator"))).first()
 
         # Create user organization membership
         membership = UserOrganizationMembership(

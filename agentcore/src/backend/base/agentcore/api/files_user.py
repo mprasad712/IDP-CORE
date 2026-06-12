@@ -190,7 +190,7 @@ async def _resolve_upload_scope(
             )
         ).all()
         allowed_orgs = {r if isinstance(r, uuid.UUID) else r[0] for r in org_memberships}
-        if role in {"department_admin", "developer", "business_user"}:
+        if role in {"department_admin", "idp_configurator", "doc_reviewer"}:
             resolved_org_id, resolved_dept_id = await _resolve_default_scope(session, current_user)
             return KBVisibilityEnum.PRIVATE, resolved_org_id, resolved_dept_id, None
         if role == "super_admin":

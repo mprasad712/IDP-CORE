@@ -643,8 +643,12 @@ async def release_agent_session(
 
     existing_lock = (await session.exec(select(AgentEditLock).where(AgentEditLock.agent_id == agent_id))).first()
     if existing_lock and existing_lock.locked_by == current_user.id:
-        await session.delete(existing_lock)
-        await session.commit()
+        try:
+            await session.delete(existing_lock)
+            await session.commit()
+        except StaleDataError:
+            # Concurrent release already deleted this lock — treat as success
+            await session.rollback()
     return {"status": "released"}
 
 

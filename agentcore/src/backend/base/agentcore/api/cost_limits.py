@@ -73,28 +73,30 @@ CREATE TABLE IF NOT EXISTS cost_limit_notification (
 );
 """
 
-_CREATE_INDEXES_SQL = """
-CREATE INDEX IF NOT EXISTS ix_cost_limit_org_id ON cost_limit(org_id);
-CREATE INDEX IF NOT EXISTS ix_cost_limit_dept_id ON cost_limit(dept_id);
-CREATE INDEX IF NOT EXISTS ix_cost_limit_notification_cost_limit_id ON cost_limit_notification(cost_limit_id);
-"""
+_CREATE_INDEX_STATEMENTS = [
+    "CREATE INDEX IF NOT EXISTS ix_cost_limit_org_id ON cost_limit(org_id)",
+    "CREATE INDEX IF NOT EXISTS ix_cost_limit_dept_id ON cost_limit(dept_id)",
+    "CREATE INDEX IF NOT EXISTS ix_cost_limit_notification_cost_limit_id ON cost_limit_notification(cost_limit_id)",
+]
 
 
 async def _ensure_tables(session: DbSession) -> None:
     global _tables_ensured
     if _tables_ensured:
         return
+    from sqlmodel import text as sql_text
+
     try:
-        from sqlmodel import text as sql_text
         await session.exec(sql_text(_CREATE_COST_LIMIT_SQL))
         await session.exec(sql_text(_CREATE_COST_LIMIT_NOTIFICATION_SQL))
-        await session.exec(sql_text(_CREATE_INDEXES_SQL))
+        for statement in _CREATE_INDEX_STATEMENTS:
+            await session.exec(sql_text(statement))
         await session.commit()
         _tables_ensured = True
         logger.info("cost_limit and cost_limit_notification tables ensured")
     except Exception:
-        _tables_ensured = True  # Don't retry on every request
-        logger.opt(exception=True).warning("Failed to ensure cost_limit tables (may already exist)")
+        await session.rollback()
+        logger.opt(exception=True).warning("Failed to ensure cost_limit tables")
 
 
 # ---------------------------------------------------------------------------

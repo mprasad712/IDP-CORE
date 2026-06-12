@@ -1,11 +1,7 @@
 from typing import Optional
 import json
-import redis.asyncio as redis
 
-from agentcore.services.database.models.user.model import User
-from agentcore.services.settings.service import SettingsService
 from .redis_client import get_redis_client
-import json
 
 class UserCacheService:
     def __init__(self, settings_service):
@@ -21,7 +17,7 @@ class UserCacheService:
         await self.redis.setex(
             key,
             self.ttl,
-            json.dumps(user_dict),
+            json.dumps(user_dict, default=str),
         )
 
     async def delete_user(self, user_id: str):
