@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from agentcore.schema.serialize import UUIDstr
+from sqlalchemy import Column, DateTime
 from sqlmodel import Field, SQLModel
 
 class File(SQLModel, table=True):  # type: ignore[call-arg]
@@ -13,5 +14,5 @@ class File(SQLModel, table=True):  # type: ignore[call-arg]
     path: str = Field(nullable=False)
     size: int = Field(nullable=False)
     provider: str | None = Field(default=None)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))

@@ -71,6 +71,16 @@ function DefaultLandingRedirect() {
   if (permissions.includes("view_dashboard")) {
     return <CustomNavigate replace to="dashboard-admin" />;
   }
+  // IDP roles: land on the processed-docs page (review queue / approval queue / submission tracker).
+  if (permissions.includes("approve_documents") || permissions.includes("review_docs")) {
+    return <CustomNavigate replace to="processed-docs" />;
+  }
+  if (permissions.includes("submit_documents")) {
+    return <CustomNavigate replace to="processed-docs" />;
+  }
+  if (permissions.includes("view_idp")) {
+    return <CustomNavigate replace to="field-configurations" />;
+  }
   if (permissions.includes("view_projects_page")) {
     return <CustomNavigate replace to="agents" />;
   }
@@ -231,7 +241,7 @@ const router = createBrowserRouter(
                   <Route
                     path="field-configurations"
                     element={
-                      <ProtectedPermissionRoute permission="view_projects_page">
+                      <ProtectedPermissionRoute permission="view_idp">
                         <Suspense fallback={<PageLoader />}><FieldConfigurationsPage /></Suspense>
                       </ProtectedPermissionRoute>
                     }
@@ -239,7 +249,7 @@ const router = createBrowserRouter(
                   <Route
                     path="processed-docs"
                     element={
-                      <ProtectedPermissionRoute permission="view_projects_page">
+                      <ProtectedPermissionRoute permission="view_idp">
                         <Suspense fallback={<PageLoader />}><ProcessedDocsPage /></Suspense>
                       </ProtectedPermissionRoute>
                     }

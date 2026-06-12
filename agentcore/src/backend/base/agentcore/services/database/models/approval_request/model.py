@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel
-from sqlalchemy import JSON, Column, Enum as SQLEnum, ForeignKey, Index, Text, Uuid, text
+from sqlalchemy import JSON, Column, DateTime, Enum as SQLEnum, ForeignKey, Index, Text, Uuid, text
 from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
@@ -57,11 +57,8 @@ class ApprovalRequestBase(SQLModel):
         nullable=True,
         description="User who reviewed (approved/rejected) the request",
     )
-    requested_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    reviewed_at: datetime | None = Field(default=None, nullable=True)
+    requested_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
+    reviewed_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     decision: ApprovalDecisionEnum | None = Field(
         default=None,
         sa_column=Column(
@@ -101,14 +98,8 @@ class ApprovalRequestBase(SQLModel):
         sa_column=Column(JSON, nullable=True),
         description="Attachment references for the approval request (e.g. supporting docs, screenshots)",
     )
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
 
 
 class ApprovalRequest(ApprovalRequestBase, table=True):  # type: ignore[call-arg]

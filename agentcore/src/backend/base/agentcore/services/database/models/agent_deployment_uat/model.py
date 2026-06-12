@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel
-from sqlalchemy import JSON, Column, Enum as SQLEnum, Index, Text, UniqueConstraint, text
+from sqlalchemy import JSON, Column, DateTime, Enum as SQLEnum, Index, Text, UniqueConstraint, text
 from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
@@ -115,10 +115,7 @@ class AgentDeploymentUATBase(SQLModel):
         ),
     )
     deployed_by: UUID = Field(foreign_key="user.id", nullable=False, index=True)
-    deployed_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
+    deployed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
     error_message: str | None = Field(
         default=None,
         sa_column=Column(Text, nullable=True),
@@ -129,14 +126,8 @@ class AgentDeploymentUATBase(SQLModel):
         nullable=False,
         description="True if this UAT deployment has been promoted to PROD.",
     )
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
 
 
 class AgentDeploymentUAT(AgentDeploymentUATBase, table=True):  # type: ignore[call-arg]

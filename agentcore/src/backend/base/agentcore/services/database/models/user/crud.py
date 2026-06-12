@@ -99,6 +99,9 @@ async def update_user(user_db: User | None, user: UserUpdate, db: AsyncSession) 
     except IntegrityError as e:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception:
+        await db.rollback()
+        raise
 
     return user_db
 
@@ -110,3 +113,4 @@ async def update_user_last_login_at(user_id: UUID, db: AsyncSession):
         return await update_user(user, user_data, db)
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error updating user last login at: {e!s}")
+        await db.rollback()

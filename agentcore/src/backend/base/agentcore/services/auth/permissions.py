@@ -142,6 +142,14 @@ ACTIONS = {
     "ADD_CONNECTOR": "add_connector",
     "EDIT_MODEL_REGISTRY": "edit_model",
     "DELETE_MODEL_REGISTRY": "delete_model",
+    # IDP
+    "VIEW_IDP": "view_idp",
+    "MANAGE_IDP": "manage_idp",
+    "REVIEW_DOCS": "review_docs",
+    "ADMIN_IDP": "admin_idp",
+    "SUBMIT_DOCUMENTS": "submit_documents",
+    "APPROVE_DOCUMENTS": "approve_documents",
+    "VIEW_IDP_ANALYTICS": "view_idp_analytics",
 }
 
 ROLE_PERMISSIONS: Dict[str, List[str]] = {
@@ -199,9 +207,15 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "manage_idp",
         "review_docs",
         "admin_idp",
+        "submit_documents",
+        "approve_documents",
+        "view_idp_analytics",
     ],
     "leader_executive": [
         "view_dashboard",
+        # IDP: read-only reporting and audit
+        "view_idp",
+        "view_idp_analytics",
     ],
     "super_admin": [
         "view_dashboard",
@@ -256,6 +270,9 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "manage_idp",
         "review_docs",
         "admin_idp",
+        "submit_documents",
+        "approve_documents",
+        "view_idp_analytics",
     ],
     "department_admin": [
         "view_dashboard",
@@ -310,6 +327,9 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "manage_idp",
         "review_docs",
         "admin_idp",
+        "submit_documents",
+        "approve_documents",
+        "view_idp_analytics",
     ],
     "developer": [
         "view_dashboard",
@@ -341,10 +361,10 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_connector_page",
         "add_connector",
         "view_hitl_approvals_page",
-        # IDP: developers build + review, not admin
+        # IDP: configurators build templates and can submit test docs, not review/approve/admin
         "view_idp",
         "manage_idp",
-        "review_docs",
+        "submit_documents",
     ],
     "business_user": [
         "view_dashboard",
@@ -376,16 +396,30 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_connector_page",
         "add_connector",
         "view_hitl_approvals_page",
+        # IDP: reviewers correct AI-extracted data via HITL
+        "view_idp",
+        "review_docs",
     ],
     "consumer": [
         "view_published_agents",
         "view_registry_agent",
         "view_orchastration_page",
         "interact_agents",
+        # IDP: submitters upload documents and track processing status
+        "view_idp",
+        "submit_documents",
+    ],
+    "document_approver": [
+        "view_dashboard",
+        "view_hitl_approvals_page",
+        # IDP: final approval gate after HITL review
+        "view_idp",
+        "review_docs",
+        "approve_documents",
     ],
 }
 
-PERMISSION_VERSION = "v23"  # bump when permissions change (v23: + IDP perms view_idp/manage_idp/review_docs/admin_idp)
+PERMISSION_VERSION = "v24"  # bump when permissions change (v24: IDP role redesign — submit_documents, approve_documents, view_idp_analytics, document_approver role)
 
 
 class PermissionCacheService:
