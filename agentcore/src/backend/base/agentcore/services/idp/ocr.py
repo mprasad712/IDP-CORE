@@ -8,6 +8,7 @@ Spreadsheet and Word files are extracted natively (no OCR needed).
 
 import cv2
 import numpy as np
+import fitz
 from loguru import logger
 
 _paddle_ocr_available = False
@@ -154,6 +155,7 @@ async def run_paddle_ocr(file_bytes: bytes, file_type: str, lang: str = "en") ->
     - XLSX/DOCX: native text extraction, no OCR
     """
     file_type = file_type.lower().strip(".")
+    is_pdf = (file_type == "pdf")
 
     if file_type in ("xlsx", "xls"):
         return _extract_spreadsheet_text(file_bytes)
