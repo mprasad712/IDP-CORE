@@ -129,7 +129,7 @@ dependencies = [
     "cryptography>=46.0.5,<47.0.0",
     "aiosqlite==0.21.0",
     "fastparquet>=2024.11.0,<2025.0.0",
-    "opencv-python>=4.11; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "opencv-python-headless>=4.11; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "toml>=0.10.2",
     "sqlparse",
     "matplotlib",

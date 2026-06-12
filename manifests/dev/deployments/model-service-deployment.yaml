@@ -14,7 +14,9 @@ spec:
     metadata:
       labels:
         app: model-service
+        azure.workload.identity/use: "true"
     spec:
+      serviceAccountName: model-service-sa
       containers:
         - name: model-service
           image: idpflowacr1.azurecr.io/model-service:58
