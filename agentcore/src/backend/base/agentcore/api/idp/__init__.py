@@ -20,37 +20,66 @@ def health():
 
 
 _READ_METHODS = {"GET", "HEAD", "OPTIONS"}
+_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
-async def idp_rbac(
+async def _get_user_permissions(role: str) -> list[str]:
+    if permission_cache:
+        return await permission_cache.get_permissions_for_role(role)
+    return await get_permissions_for_role(role)
+
+
+def _make_rbac(read_perm: str, write_perm: str):
+    """Factory for method-aware IDP dependency functions."""
+
+    async def _rbac(
+        request: Request,
+        current_user: User = Depends(get_current_active_user),
+    ) -> User:
+        required = read_perm if request.method in _READ_METHODS else write_perm
+        user_permissions = await _get_user_permissions(current_user.role)
+        if required not in user_permissions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required IDP permission: {required}",
+            )
+        return current_user
+
+    return _rbac
+
+
+# Baseline guard: read=view_idp, write=manage_idp (field configs, rules, agents, jobs).
+idp_rbac = _make_rbac("view_idp", "manage_idp")
+
+# Document submission: read=view_idp, write=submit_documents.
+_idp_submit_rbac = _make_rbac("view_idp", "submit_documents")
+
+# HITL review: read=view_idp, write=review_docs.
+_idp_review_rbac = _make_rbac("view_idp", "review_docs")
+
+
+async def idp_approve_rbac(
     request: Request,
     current_user: User = Depends(get_current_active_user),
 ) -> User:
-    """Baseline auth + RBAC for every IDP endpoint (method-aware).
-
-    Reads (GET/HEAD/OPTIONS) require ``view_idp``; writes require ``manage_idp``.
-    Endpoint-specific permissions are layered as features are built:
-    Processed-Docs review/approve -> ``review_docs``; admin/config overrides -> ``admin_idp``.
-    """
-    required = "view_idp" if request.method in _READ_METHODS else "manage_idp"
-    if permission_cache:
-        user_permissions = await permission_cache.get_permissions_for_role(current_user.role)
-    else:
-        user_permissions = await get_permissions_for_role(current_user.role)
-    if required not in user_permissions:
+    """Final-approval endpoints always require approve_documents regardless of HTTP method."""
+    user_permissions = await _get_user_permissions(current_user.role)
+    if "approve_documents" not in user_permissions:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Missing required IDP permission: {required}",
+            detail="Missing required IDP permission: approve_documents",
         )
     return current_user
 
 
 _idp_guard = [Depends(idp_rbac)]
+_idp_submit_guard = [Depends(_idp_submit_rbac)]
+_idp_review_guard = [Depends(_idp_review_rbac)]
 
 router.include_router(field_configs_router, dependencies=_idp_guard)
-router.include_router(documents_router, dependencies=_idp_guard)
+router.include_router(documents_router, dependencies=_idp_submit_guard)
 router.include_router(jobs_router, dependencies=_idp_guard)
-router.include_router(processed_docs_router, dependencies=_idp_guard)
-router.include_router(batches_router, dependencies=_idp_guard)
+router.include_router(processed_docs_router, dependencies=_idp_review_guard)
+router.include_router(batches_router, dependencies=_idp_submit_guard)
 router.include_router(rules_router, dependencies=_idp_guard)
 router.include_router(idp_agents_router, dependencies=_idp_guard)

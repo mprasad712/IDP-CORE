@@ -11,7 +11,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import DateTime, Enum as SQLEnum
 from sqlalchemy import Text, UniqueConstraint, text
 from sqlalchemy.orm import synonym
 from sqlmodel import JSON, Column, Field, Relationship, SQLModel
@@ -44,7 +44,7 @@ class AgentBase(SQLModel):
     name: str = Field(index=True)
     description: str | None = Field(default=None, sa_column=Column(Text, index=True, nullable=True))
     data: dict | None = Field(default=None, nullable=True)
-    updated_at: datetime | None = Field(default_factory=lambda: datetime.now(timezone.utc), nullable=True)
+    updated_at: datetime | None = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=True))
     tags: list[str] | None = None
     locked: bool | None = Field(default=False, nullable=True)
     access_type: AccessTypeEnum = Field(
