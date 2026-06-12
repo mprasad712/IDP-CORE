@@ -178,12 +178,14 @@ class IDPLLMExtractor(Node):
         src = self.document
         text = src.text if isinstance(src, Message) else str(src)
 
-        if self.extraction_mode in ("field_configuration", "multimodal_config") and self.config_name:
-            prompt = self._build_config_prompt(self.config_name)
-        else:
+        # Config-based modes build their own prompt inside extract_named_config / extract_multimodal
+        # using the general template + DB field prompts — no pre-build needed here.
+        if self.extraction_mode not in ("field_configuration", "multimodal_config"):
             prompt = (self.prompt or "").strip()
             if not prompt:
                 prompt = "Extract all key fields from this document. Return as structured JSON."
+        else:
+            prompt = ""  # unused in config modes
 
         try:
             if self.extraction_mode == "dynamic_prompt":

@@ -14,6 +14,7 @@ from agentcore.services.database.models.idp.config import (
     IdpFieldConfigHeader,
     IdpFieldConfigLineItem,
 )
+from agentcore.services.idp.prompt_templates import build_extraction_messages
 
 # ──────────────────────────────────────────────────────────────────────
 # Pydantic Schemas for Structured Output
@@ -199,7 +200,7 @@ async def extract_dynamic(
     per-field confidence). Both return the same canonical dict shape.
     """
     if llm_model is None:
-        raise ValueError("Language Model is required for dynamic prompting extraction.")
+        raise ValueError("Language Model is required for extraction.")
 
     user_content = f"Instruction: {prompt}\n\nDocument Text:\n{ocr_text}"
 
@@ -224,96 +225,81 @@ async def extract_dynamic(
         HumanMessage(content=user_content)
     ]
 
-    # Try utilizing structured output functionality in LangChain if supported
+    # Attempt structured output (tool-calling capable models)
     if hasattr(llm_model, "with_structured_output"):
         try:
             structured_model = llm_model.with_structured_output(StructuredExtractionResult)
             result = await structured_model.ainvoke(messages)
             if isinstance(result, StructuredExtractionResult):
                 return result.model_dump()
-            elif isinstance(result, dict):
+            if isinstance(result, dict):
                 return result
         except Exception as e:
-            logger.warning(f"[Extraction] with_structured_output failed: {e}. Falling back to raw JSON parsing.")
+            logger.warning(f"[LLM] with_structured_output failed: {e}. Falling back to raw JSON parsing.")
 
-    # Fallback: standard invocation with raw JSON parsing
-    try:
-        response = await llm_model.ainvoke(messages)
-        raw_content = response.content if hasattr(response, "content") else str(response)
-        
-        # Clean markdown formatting if present
-        raw_content = raw_content.strip()
-        if raw_content.startswith("```"):
-            lines = raw_content.split("\n")
-            if lines[0].strip().startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            raw_content = "\n".join(lines).strip()
+    # Fallback: raw JSON parsing
+    response = await llm_model.ainvoke(messages)
+    raw_content = response.content if hasattr(response, "content") else str(response)
 
-        parsed = json.loads(raw_content)
-        
-        # Basic validation of the dictionary structure
-        if not isinstance(parsed, dict):
-            raise ValueError("Parsed output is not a dictionary.")
-            
-        # Ensure 'headers' and 'line_items' exist
-        if "headers" not in parsed:
-            parsed["headers"] = {}
-        if "line_items" not in parsed:
-            parsed["line_items"] = []
+    raw_content = raw_content.strip()
+    if raw_content.startswith("```"):
+        lines_raw = raw_content.split("\n")
+        if lines_raw[0].strip().startswith("```"):
+            lines_raw = lines_raw[1:]
+        if lines_raw and lines_raw[-1].strip() == "```":
+            lines_raw = lines_raw[:-1]
+        raw_content = "\n".join(lines_raw).strip()
 
-        # Validate structure to match StructuredExtractionResult schema
-        # (This cleans up any deviations the LLM made)
-        clean_headers = {}
-        for k, v in parsed["headers"].items():
-            if isinstance(v, dict):
-                clean_headers[k] = {
-                    "value": str(v.get("value")) if v.get("value") is not None else None,
-                    "confidence": float(v.get("confidence", 0.8)),
-                    "reasoning": str(v.get("reasoning", "")) if v.get("reasoning") is not None else None
-                }
-            else:
-                clean_headers[k] = {
-                    "value": str(v) if v is not None else None,
-                    "confidence": 0.8,
-                    "reasoning": "Direct extraction"
-                }
+    parsed = json.loads(raw_content)
+    if not isinstance(parsed, dict):
+        raise ValueError("Parsed LLM output is not a JSON object.")
 
-        clean_line_items = []
-        for idx, row in enumerate(parsed["line_items"]):
-            if not isinstance(row, dict):
+    parsed.setdefault("headers", {})
+    parsed.setdefault("line_items", [])
+
+    clean_headers: Dict[str, Any] = {}
+    for k, v in parsed["headers"].items():
+        if isinstance(v, dict):
+            clean_headers[k] = {
+                "value": str(v["value"]) if v.get("value") is not None else None,
+                "confidence": float(v.get("confidence", 0.8)),
+                "reasoning": str(v["reasoning"]) if v.get("reasoning") is not None else None,
+            }
+        else:
+            clean_headers[k] = {"value": str(v) if v is not None else None, "confidence": 0.8, "reasoning": "Direct extraction"}
+
+    clean_line_items: List[Dict[str, Any]] = []
+    for idx, row in enumerate(parsed["line_items"]):
+        if not isinstance(row, dict):
+            continue
+        row_idx = row.get("row_index", idx)
+        clean_cols = []
+        for col in row.get("columns", []):
+            if not isinstance(col, dict):
                 continue
-            row_idx = row.get("row_index", idx)
-            cols = row.get("columns", [])
-            clean_cols = []
-            for col in cols:
-                if not isinstance(col, dict):
-                    continue
-                clean_cols.append({
-                    "column_name": str(col.get("column_name", "")),
-                    "value": str(col.get("value")) if col.get("value") is not None else None,
-                    "confidence": float(col.get("confidence", 0.8)),
-                    "reasoning": str(col.get("reasoning", "")) if col.get("reasoning") is not None else None
-                })
-            clean_line_items.append({
-                "row_index": int(row_idx),
-                "columns": clean_cols
+            clean_cols.append({
+                "column_name": str(col.get("column_name", "")),
+                "value": str(col["value"]) if col.get("value") is not None else None,
+                "confidence": float(col.get("confidence", 0.8)),
+                "reasoning": str(col["reasoning"]) if col.get("reasoning") is not None else None,
             })
+        clean_line_items.append({"row_index": int(row_idx), "columns": clean_cols})
 
-        return {
-            "headers": clean_headers,
-            "line_items": clean_line_items
-        }
+    return {"headers": clean_headers, "line_items": clean_line_items}
 
+
+async def extract_dynamic(
+    ocr_text: str,
+    prompt: str,
+    llm_model: Any
+) -> Dict[str, Any]:
+    """Extract structured data dynamically based on a freeform user prompt."""
+    user_content = f"Instruction: {prompt}\n\nDocument Text:\n{ocr_text}"
+    try:
+        return await _invoke_llm(SYSTEM_PROMPT, user_content, llm_model)
     except Exception as e:
-        logger.error(f"[Extraction] Dynamic prompting extraction parsing failed: {e}")
-        # Return empty structured schema in case of parsing errors to prevent system crash
-        return {
-            "headers": {},
-            "line_items": [],
-            "error": f"Extraction parsing failed: {str(e)}"
-        }
+        logger.error(f"[Extraction] Dynamic prompting extraction failed: {e}")
+        return {"headers": {}, "line_items": [], "error": f"Extraction failed: {str(e)}"}
 
 
 async def extract_named_config(
@@ -343,27 +329,11 @@ async def extract_named_config(
     )
     line_items = (await session.exec(lines_stmt)).all()
 
-    # 3. Format the instructions/prompt based on configuration
-    headers_desc = "\n".join(
-        f"- '{h.field_name}' (type: {h.field_type}{f', description: {h.description}' if h.description else ''})"
-        for h in headers
-    )
-    columns_desc = "\n".join(
-        f"- '{c.column_name}' (type: {c.column_type})"
-        for c in line_items
-    )
+    # 3. Build prompt from general template, inserting field names + DB prompts
+    system_prompt, user_prompt = build_extraction_messages(headers, line_items, ocr_text)
 
-    prompt = (
-        f"You must extract the following specific fields from the document:\n\n"
-        f"Header Fields:\n{headers_desc or 'None'}\n\n"
-        f"Line Item Columns (Table):\n{columns_desc or 'None'}\n\n"
-        "Ensure all extracted values conform to their specified type (number, date, text, boolean). "
-        "For dates, return in YYYY-MM-DD format if possible. For numbers, return numeric values as strings. "
-        "For boolean, return 'true' or 'false'."
-    )
-
-    # 4. Invoke the dynamic prompting extractor with our generated prompt
-    raw_result = await extract_dynamic(ocr_text, prompt, llm_model)
+    # 4. Invoke LLM directly with the template-built messages
+    raw_result = await _invoke_llm(system_prompt, user_prompt, llm_model)
 
     # 5. Filter/Align the output to strictly match the requested configuration fields
     # (Removes hallucinations and maps missing properties with nulls/defaults)
@@ -479,49 +449,25 @@ async def extract_multimodal(
         )
         line_items = (await session.exec(lines_stmt)).all()
 
-        # Format the instructions/prompt based on configuration
-        headers_desc = "\n".join(
-            f"- '{h.field_name}' (type: {h.field_type}{f', description: {h.description}' if h.description else ''})"
-            for h in headers
-        )
-        columns_desc = "\n".join(
-            f"- '{c.column_name}' (type: {c.column_type})"
-            for c in line_items
-        )
-
-        prompt = (
-            f"You must extract the following specific fields from the document:\n\n"
-            f"Header Fields:\n{headers_desc or 'None'}\n\n"
-            f"Line Item Columns (Table):\n{columns_desc or 'None'}\n\n"
-            "Ensure all extracted values conform to their specified type (number, date, text, boolean). "
-            "For dates, return in YYYY-MM-DD format if possible. For numbers, return numeric values as strings. "
-            "For boolean, return 'true' or 'false'."
+        # Build prompt from general template; images are the document so pass a placeholder for {data}
+        _sys, prompt = build_extraction_messages(
+            headers, line_items, ocr_text="(Document content provided as image(s) below)"
         )
     else:
+        _sys = SYSTEM_PROMPT
         prompt = str(prompt_or_config_id).strip()
         if not prompt:
             prompt = "Extract all key fields from this document. Return as structured JSON."
 
-    # 3. Construct multimodal message payload
-    user_content = [
-        {
-            "type": "text",
-            "text": f"Instruction: {prompt}\n\nPlease extract the requested information from the provided document image(s)."
-        }
-    ]
+    # 3. Construct multimodal message payload (text instruction + base64 images)
+    user_content: List[Any] = [{"type": "text", "text": prompt}]
     for img_bytes, mime in page_images:
         b64_data = base64.b64encode(img_bytes).decode("utf-8")
-        user_content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime};base64,{b64_data}"}
-        })
+        user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_data}"}})
 
-    messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=user_content)
-    ]
+    messages = [SystemMessage(content=_sys), HumanMessage(content=user_content)]
 
-    # 4. Invoke the Vision LLM model
+    # 4. Invoke the Vision LLM model (structured output → raw JSON fallback)
     raw_result = None
     if hasattr(llm_model, "with_structured_output"):
         try:
@@ -532,82 +478,52 @@ async def extract_multimodal(
             elif isinstance(result, dict):
                 raw_result = result
         except Exception as e:
-            logger.warning(f"[Multimodal Extraction] with_structured_output failed: {e}. Falling back to raw JSON parsing.")
+            logger.warning(f"[Multimodal] with_structured_output failed: {e}. Falling back to raw JSON.")
 
     if raw_result is None:
         try:
             response = await llm_model.ainvoke(messages)
-            raw_content = response.content if hasattr(response, "content") else str(response)
-            
-            # Clean markdown formatting if present
-            raw_content = raw_content.strip()
-            if raw_content.startswith("```"):
-                lines = raw_content.split("\n")
-                if lines[0].strip().startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                raw_content = "\n".join(lines).strip()
-
-            parsed = json.loads(raw_content)
-            
+            raw_text = response.content if hasattr(response, "content") else str(response)
+            raw_text = raw_text.strip()
+            if raw_text.startswith("```"):
+                lines_mm = raw_text.split("\n")
+                if lines_mm[0].strip().startswith("```"):
+                    lines_mm = lines_mm[1:]
+                if lines_mm and lines_mm[-1].strip() == "```":
+                    lines_mm = lines_mm[:-1]
+                raw_text = "\n".join(lines_mm).strip()
+            parsed = json.loads(raw_text)
             if not isinstance(parsed, dict):
-                raise ValueError("Parsed output is not a dictionary.")
-                
-            if "headers" not in parsed:
-                parsed["headers"] = {}
-            if "line_items" not in parsed:
-                parsed["line_items"] = []
-
-            # Clean and validate structure
-            clean_headers = {}
+                raise ValueError("Parsed output is not a JSON object.")
+            parsed.setdefault("headers", {})
+            parsed.setdefault("line_items", [])
+            # Reuse the same normalisation helper from _invoke_llm path
+            # (build a temporary messages-style response to reuse logic)
+            clean_h: Dict[str, Any] = {}
             for k, v in parsed["headers"].items():
                 if isinstance(v, dict):
-                    clean_headers[k] = {
-                        "value": str(v.get("value")) if v.get("value") is not None else None,
+                    clean_h[k] = {
+                        "value": str(v["value"]) if v.get("value") is not None else None,
                         "confidence": float(v.get("confidence", 0.8)),
-                        "reasoning": str(v.get("reasoning", "")) if v.get("reasoning") is not None else None
+                        "reasoning": str(v["reasoning"]) if v.get("reasoning") is not None else None,
                     }
                 else:
-                    clean_headers[k] = {
-                        "value": str(v) if v is not None else None,
-                        "confidence": 0.8,
-                        "reasoning": "Direct extraction"
-                    }
-
-            clean_line_items = []
+                    clean_h[k] = {"value": str(v) if v is not None else None, "confidence": 0.8, "reasoning": "Direct extraction"}
+            clean_li: List[Dict[str, Any]] = []
             for idx, row in enumerate(parsed["line_items"]):
                 if not isinstance(row, dict):
                     continue
-                row_idx = row.get("row_index", idx)
-                cols = row.get("columns", [])
-                clean_cols = []
-                for col in cols:
-                    if not isinstance(col, dict):
-                        continue
-                    clean_cols.append({
-                        "column_name": str(col.get("column_name", "")),
-                        "value": str(col.get("value")) if col.get("value") is not None else None,
-                        "confidence": float(col.get("confidence", 0.8)),
-                        "reasoning": str(col.get("reasoning", "")) if col.get("reasoning") is not None else None
-                    })
-                clean_line_items.append({
-                    "row_index": int(row_idx),
-                    "columns": clean_cols
-                })
-
-            raw_result = {
-                "headers": clean_headers,
-                "line_items": clean_line_items
-            }
-
+                clean_li.append({"row_index": row.get("row_index", idx), "columns": [
+                    {"column_name": str(c.get("column_name", "")),
+                     "value": str(c["value"]) if c.get("value") is not None else None,
+                     "confidence": float(c.get("confidence", 0.8)),
+                     "reasoning": str(c["reasoning"]) if c.get("reasoning") is not None else None}
+                    for c in row.get("columns", []) if isinstance(c, dict)
+                ]})
+            raw_result = {"headers": clean_h, "line_items": clean_li}
         except Exception as e:
-            logger.error(f"[Multimodal Extraction] parsing failed: {e}")
-            raw_result = {
-                "headers": {},
-                "line_items": [],
-                "error": f"Multimodal extraction parsing failed: {str(e)}"
-            }
+            logger.error(f"[Multimodal] parsing failed: {e}")
+            raw_result = {"headers": {}, "line_items": [], "error": f"Multimodal extraction failed: {str(e)}"}
 
     # 5. Filter/Align if configuration mode was used
     if is_config:
