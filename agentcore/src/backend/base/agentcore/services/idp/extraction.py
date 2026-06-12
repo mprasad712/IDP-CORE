@@ -288,18 +288,26 @@ async def extract_dynamic(
     return {"headers": clean_headers, "line_items": clean_line_items}
 
 
-async def extract_dynamic(
-    ocr_text: str,
-    prompt: str,
-    llm_model: Any
-) -> Dict[str, Any]:
-    """Extract structured data dynamically based on a freeform user prompt."""
-    user_content = f"Instruction: {prompt}\n\nDocument Text:\n{ocr_text}"
-    try:
-        return await _invoke_llm(SYSTEM_PROMPT, user_content, llm_model)
-    except Exception as e:
-        logger.error(f"[Extraction] Dynamic prompting extraction failed: {e}")
-        return {"headers": {}, "line_items": [], "error": f"Extraction failed: {str(e)}"}
+async def _invoke_llm(system: str, user: str, llm_model: Any) -> Dict[str, Any]:
+    """Invoke the LLM with system+user messages, return normalised extraction dict."""
+    messages = [SystemMessage(content=system), HumanMessage(content=user)]
+
+    # Try structured output first (works on tool-calling capable models)
+    if hasattr(llm_model, "with_structured_output"):
+        try:
+            result = await llm_model.with_structured_output(StructuredExtractionResult).ainvoke(messages)
+            if isinstance(result, StructuredExtractionResult):
+                return _expand_extraction(result.model_dump())
+            if isinstance(result, dict):
+                return _expand_extraction(result)
+        except Exception as e:
+            logger.warning(f"[LLM] with_structured_output failed: {e}. Falling back to raw JSON parsing.")
+
+    # Fallback: raw invocation + JSON parse
+    response = await llm_model.ainvoke(messages)
+    raw_content = response.content if hasattr(response, "content") else str(response)
+    parsed = json.loads(_strip_code_fences(raw_content))
+    return _expand_extraction(parsed)
 
 
 async def extract_named_config(
