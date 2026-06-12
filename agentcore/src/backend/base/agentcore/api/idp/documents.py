@@ -24,7 +24,7 @@ from agentcore.services.storage.service import StorageService
 
 router = APIRouter(prefix="/documents", tags=["IDP Documents"])
 
-ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".xlsx", ".xls", ".docx"}
+ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".xlsx", ".xls", ".docx", ".txt"}
 
 @router.get("/health")
 def health():

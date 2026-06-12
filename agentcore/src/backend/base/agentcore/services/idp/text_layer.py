@@ -38,6 +38,8 @@ def is_pdf_searchable(
         return {"1": SCANNED}
     if ft in _OFFICE_EXT:
         return {"1": DIGITAL}
+    if ft == "txt":
+        return {"1": DIGITAL}
     if ft != "pdf":
         return {"1": SCANNED}
 
@@ -89,6 +91,8 @@ def extract_native_text(file_bytes: bytes, file_type: str) -> tuple[str, list[di
         return _office_xlsx(file_bytes)
     if ft == "docx":
         return _office_docx(file_bytes)
+    if ft == "txt":
+        return _plain_text(file_bytes)
     if ft != "pdf":
         return "", []
 
@@ -120,6 +124,20 @@ def extract_native_text(file_bytes: bytes, file_type: str) -> tuple[str, list[di
         logger.error(f"[text_layer] extract_native_text failed: {e}")
         return "", []
     return "\x0c".join(pages_text), tokens
+
+
+def _plain_text(file_bytes: bytes) -> tuple[str, list[dict]]:
+    """Plain .txt: decode and emit one token per non-empty line. Form-feeds (\\x0c) split pages."""
+    try:
+        text = file_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        text = file_bytes.decode("latin-1", errors="replace")
+    tokens: list[dict] = []
+    for pidx, page in enumerate(text.split("\x0c"), start=1):
+        for line in page.splitlines():
+            if line.strip():
+                tokens.append({"text": line, "bounding_box": None, "confidence": 1.0, "page_number": pidx})
+    return text, tokens
 
 
 def _office_xlsx(file_bytes: bytes) -> tuple[str, list[dict]]:

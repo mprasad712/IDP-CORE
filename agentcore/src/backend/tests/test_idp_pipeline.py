@@ -1098,6 +1098,29 @@ async def test_pipeline_split_all_enqueue_fail_fails_parent(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_pipeline_txt_file(monkeypatch):
+    """A .txt file is accepted, read as digital native text (no OCR), and processed."""
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch)
+    txt = b"Invoice Number INV-TXT-1\nVendor: ACME Supplies Ltd\nSubtotal 100.00\nTax 18.00\nTotal 118.00\n"
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=txt, file_type="txt")
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            assert doc.status in ("auto_approved", "pending_review")
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            steps = [e["step"] for e in job.log]
+            assert "native" in steps and "ocr" not in steps  # txt = digital native text, no OCR
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
 async def test_document_log_endpoint(monkeypatch):
     """GET /documents/{id}/log returns the per-document flow log after processing."""
     from fastapi.testclient import TestClient
