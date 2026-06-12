@@ -19,7 +19,7 @@ spec:
       serviceAccountName: model-service-sa
       containers:
         - name: model-service
-          image: idpflowacr1.azurecr.io/model-service:62
+          image: idpflowacr1.azurecr.io/model-service:64
           ports:
             - containerPort: 8001
           envFrom:
