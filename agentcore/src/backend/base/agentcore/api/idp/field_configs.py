@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
+from loguru import logger
 from fastapi import APIRouter, Depends, HTTPException, status, Response
 from fastapi_pagination import Params, Page
 from fastapi_pagination.ext.sqlmodel import apaginate
@@ -18,6 +19,8 @@ from agentcore.services.database.models.idp.config import (
 from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
 from agentcore.services.database.models.user_department_membership.model import UserDepartmentMembership
 from agentcore.services.auth.permissions import normalize_role
+from agentcore.services.idp.pipeline import _build_llm, PipelineError
+from agentcore.services.idp.config_generation import generate_field_config, ConfigGenerationError
 
 router = APIRouter(prefix="/field-configs", tags=["IDP Field Configurations"])
 
@@ -31,6 +34,7 @@ class HeaderCreate(BaseModel):
     is_required: bool = PydanticField(default=False, description="Is this field required")
     display_order: int = PydanticField(..., description="The order index for display")
     description: str | None = PydanticField(default=None, description="Optional description")
+    prompt: str | None = PydanticField(default=None, description="Extraction prompt / instruction for this field")
 
 class HeaderUpdate(BaseModel):
     field_name: str | None = None
@@ -38,6 +42,7 @@ class HeaderUpdate(BaseModel):
     is_required: bool | None = None
     display_order: int | None = None
     description: str | None = None
+    prompt: str | None = None
 
 class HeaderRead(BaseModel):
     id: UUID
@@ -47,6 +52,7 @@ class HeaderRead(BaseModel):
     is_required: bool
     display_order: int
     description: str | None
+    prompt: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -58,12 +64,14 @@ class LineItemCreate(BaseModel):
     column_type: str = PydanticField(..., description="Type: text, number, or date")
     is_required: bool = PydanticField(default=False, description="Is this column required")
     display_order: int = PydanticField(..., description="The order index for display")
+    prompt: str | None = PydanticField(default=None, description="Extraction prompt / instruction for this column")
 
 class LineItemUpdate(BaseModel):
     column_name: str | None = None
     column_type: str | None = None
     is_required: bool | None = None
     display_order: int | None = None
+    prompt: str | None = None
 
 class LineItemRead(BaseModel):
     id: UUID
@@ -72,6 +80,7 @@ class LineItemRead(BaseModel):
     column_type: str
     is_required: bool
     display_order: int
+    prompt: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -81,26 +90,32 @@ class LineItemRead(BaseModel):
 class FieldConfigCreate(BaseModel):
     name: str = PydanticField(..., description="Name of the field configuration")
     description: str | None = PydanticField(default=None, description="Optional description")
+    doc_type: str | None = PydanticField(default=None, description="Canonical document type this config handles (e.g. 'Invoice')")
     org_id: UUID | None = PydanticField(default=None, description="Organization ID scoping this configuration")
     is_template: bool = PydanticField(default=False, description="Is this configuration a template")
     is_active: bool = PydanticField(default=True, description="Is this configuration active")
+    visibility: str = PydanticField(default="org", description="Visibility scope: private | org | dept")
     extra: dict | None = PydanticField(default=None, description="JSON metadata escape-hatch")
     headers: list[HeaderCreate] | None = PydanticField(default=None, description="Nested headers list")
 
 class FieldConfigUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
+    doc_type: str | None = None
     is_template: bool | None = None
     is_active: bool | None = None
+    visibility: str | None = None
     extra: dict | None = None
 
 class FieldConfigRead(BaseModel):
     id: UUID
     name: str
     description: str | None
+    doc_type: str | None
     org_id: UUID | None
     is_template: bool
     is_active: bool
+    visibility: str
     deleted_at: datetime | None
     extra: dict | None
     created_by: UUID | None
@@ -121,6 +136,36 @@ class LineItemReorderItem(BaseModel):
     id: UUID
     display_order: int
 
+class TemplateCloneRequest(BaseModel):
+    name: str = PydanticField(..., description="The name of the cloned configuration")
+    org_id: UUID | None = PydanticField(default=None, description="The target organization UUID")
+
+
+class GenerateConfigRequest(BaseModel):
+    description: str = PydanticField(..., min_length=1, description="Plain-language description of the document type")
+    sample_text: str | None = PydanticField(default=None, description="Optional sample OCR text to ground the fields")
+    model_id: UUID = PydanticField(..., description="Registry model UUID used to generate the schema")
+
+class GenerateConfigHeader(BaseModel):
+    field_name: str
+    field_type: str
+    is_required: bool
+    prompt: str | None
+    display_order: int
+
+class GenerateConfigLineItem(BaseModel):
+    column_name: str
+    column_type: str
+    is_required: bool
+    prompt: str | None
+    display_order: int
+
+class GenerateConfigResponse(BaseModel):
+    suggested_name: str
+    headers: list[GenerateConfigHeader]
+    line_items: list[GenerateConfigLineItem]
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────
@@ -130,7 +175,7 @@ async def _get_scope_memberships(session: DbSession, user_id: UUID) -> tuple[set
         await session.exec(
             select(UserOrganizationMembership.org_id).where(
                 UserOrganizationMembership.user_id == user_id,
-                UserOrganizationMembership.status.in_(["accepted", "active"]),
+                UserOrganizationMembership.status.in_(["accepted", "active", "invited"]),
             )
         )
     ).all()
@@ -236,12 +281,20 @@ async def create_field_config(
                     detail=f"Invalid field type '{h.field_type}'. Must be text, number, date, or boolean.",
                 )
 
+    if payload.visibility not in ("private", "org", "dept"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid visibility value. Must be 'private', 'org', or 'dept'.",
+        )
+
     new_config = IdpFieldConfiguration(
         name=payload.name,
         description=payload.description,
+        doc_type=payload.doc_type,
         org_id=resolved_org_id,
         is_template=payload.is_template,
         is_active=payload.is_active,
+        visibility=payload.visibility,
         extra=payload.extra,
         created_by=current_user.id,
         updated_by=current_user.id,
@@ -254,6 +307,7 @@ async def create_field_config(
                 is_required=h.is_required,
                 display_order=h.display_order,
                 description=h.description,
+                prompt=h.prompt,
             )
             for h in payload.headers
         ]
@@ -271,6 +325,36 @@ async def create_field_config(
     config_db.headers = sorted(config_db.headers, key=lambda h: h.display_order)
     config_db.line_items = sorted(config_db.line_items, key=lambda l: l.display_order)
     return config_db
+
+
+@router.post("/generate", response_model=GenerateConfigResponse)
+async def generate_config(
+    *,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+    payload: GenerateConfigRequest,
+):
+    """Generate a DRAFT field configuration from a description (no persistence).
+
+    The caller reviews/edits the returned fields and saves via POST /field-configs/.
+    """
+    try:
+        llm = await _build_llm(session, str(payload.model_id))
+    except PipelineError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    try:
+        draft = await generate_field_config(payload.description, payload.sample_text, llm)
+    except ConfigGenerationError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[idp] config generation failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The model service could not generate a configuration.",
+        ) from e
+
+    return draft
 
 
 @router.get("/names", response_model=list[str])
@@ -309,6 +393,43 @@ async def list_field_config_names(
     return [r for r in rows if r]
 
 
+@router.get("/doc-types", response_model=list[str])
+async def list_field_config_doc_types(
+    *,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+):
+    """Return a sorted list of unique doc_type values accessible to the user.
+
+    Used by the Document Classifier node to populate the 'Document Types'
+    multi-select dropdown — one entry per distinct doc_type on any config the
+    user can access (org-scoped configs and global templates).
+    """
+    stmt = (
+        select(IdpFieldConfiguration.doc_type)
+        .where(
+            IdpFieldConfiguration.deleted_at.is_(None),
+            IdpFieldConfiguration.is_active == True,
+            IdpFieldConfiguration.doc_type.isnot(None),
+        )
+    )
+
+    org_ids, _ = await _get_scope_memberships(session, current_user.id)
+    role = normalize_role(getattr(current_user, "role", None))
+
+    if role != "root":
+        stmt = stmt.where(
+            or_(
+                IdpFieldConfiguration.org_id.in_(list(org_ids)),
+                and_(IdpFieldConfiguration.org_id.is_(None), IdpFieldConfiguration.is_template == True),
+            )
+        )
+
+    stmt = stmt.distinct().order_by(IdpFieldConfiguration.doc_type.asc())
+    rows = (await session.exec(stmt)).all()
+    return [r for r in rows if r]
+
+
 @router.get("/", response_model=Page[FieldConfigRead])
 async def list_field_configs(
     *,
@@ -324,9 +445,10 @@ async def list_field_configs(
         selectinload(IdpFieldConfiguration.headers),
         selectinload(IdpFieldConfiguration.line_items)
     ).where(IdpFieldConfiguration.deleted_at.is_(None))
-    
+
     org_ids, _ = await _get_scope_memberships(session, current_user.id)
     role = normalize_role(getattr(current_user, "role", None))
+    logger.info(f"[list_field_configs] user={current_user.id} role={role} org_ids={org_ids} is_template={is_template}")
 
     if role != "root":
         if org_id:
@@ -337,14 +459,20 @@ async def list_field_configs(
                 )
             stmt = stmt.where(
                 or_(
+                    IdpFieldConfiguration.created_by == current_user.id,
                     IdpFieldConfiguration.org_id == org_id,
                     and_(IdpFieldConfiguration.org_id.is_(None), IdpFieldConfiguration.is_template == True),
                 )
             )
         else:
+            # Build org condition only when the user has org memberships
+            org_conditions = (
+                [IdpFieldConfiguration.org_id.in_(list(org_ids))] if org_ids else []
+            )
             stmt = stmt.where(
                 or_(
-                    IdpFieldConfiguration.org_id.in_(list(org_ids)),
+                    IdpFieldConfiguration.created_by == current_user.id,
+                    *org_conditions,
                     and_(IdpFieldConfiguration.org_id.is_(None), IdpFieldConfiguration.is_template == True),
                 )
             )
@@ -495,6 +623,115 @@ async def delete_field_config(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.post("/templates/{template_id}/clone", response_model=FieldConfigRead, status_code=status.HTTP_201_CREATED)
+async def clone_template(
+    *,
+    session: DbSession,
+    template_id: UUID,
+    payload: TemplateCloneRequest,
+    current_user: CurrentActiveUser,
+):
+    """Clone a global template into a custom organization-scoped field configuration."""
+    stmt = (
+        select(IdpFieldConfiguration)
+        .options(selectinload(IdpFieldConfiguration.headers), selectinload(IdpFieldConfiguration.line_items))
+        .where(IdpFieldConfiguration.id == template_id, IdpFieldConfiguration.deleted_at.is_(None))
+    )
+    template = (await session.exec(stmt)).first()
+    if not template:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template configuration not found")
+
+    if not template.is_template:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Configuration is not a template")
+
+    org_ids, _ = await _get_scope_memberships(session, current_user.id)
+    user_role = normalize_role(getattr(current_user, "role", None))
+
+    resolved_org_id = payload.org_id
+    if user_role != "root":
+        if resolved_org_id is None:
+            if not org_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No active organization mapping found for user.",
+                )
+            resolved_org_id = sorted(org_ids, key=str)[0]
+        else:
+            if resolved_org_id not in org_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Not authorized to configure for this organization.",
+                )
+    else:
+        if resolved_org_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Must specify a target organization ID for cloning templates.",
+            )
+
+    # Check target name uniqueness in that organization scope
+    stmt_unique = select(IdpFieldConfiguration).where(
+        IdpFieldConfiguration.name == payload.name,
+        IdpFieldConfiguration.org_id == resolved_org_id,
+        IdpFieldConfiguration.deleted_at.is_(None),
+    )
+    existing = (await session.exec(stmt_unique)).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Field configuration name already exists in this organization scope.",
+        )
+
+    new_config = IdpFieldConfiguration(
+        name=payload.name,
+        description=template.description,
+        doc_type=template.doc_type or template.name,
+        org_id=resolved_org_id,
+        is_template=False,
+        is_active=True,
+        visibility="org",
+        extra=template.extra,
+        created_by=current_user.id,
+        updated_by=current_user.id,
+    )
+
+    new_config.headers = [
+        IdpFieldConfigHeader(
+            field_name=h.field_name,
+            field_type=h.field_type,
+            is_required=h.is_required,
+            display_order=h.display_order,
+            description=h.description,
+            prompt=h.prompt,
+        )
+        for h in template.headers
+    ]
+
+    new_config.line_items = [
+        IdpFieldConfigLineItem(
+            column_name=l.column_name,
+            column_type=l.column_type,
+            is_required=l.is_required,
+            display_order=l.display_order,
+            prompt=l.prompt,
+        )
+        for l in template.line_items
+    ]
+
+    session.add(new_config)
+    await session.commit()
+
+    stmt_reload = (
+        select(IdpFieldConfiguration)
+        .options(selectinload(IdpFieldConfiguration.headers), selectinload(IdpFieldConfiguration.line_items))
+        .where(IdpFieldConfiguration.id == new_config.id)
+    )
+    config_db = (await session.exec(stmt_reload)).first()
+    config_db.headers = sorted(config_db.headers, key=lambda h: h.display_order)
+    config_db.line_items = sorted(config_db.line_items, key=lambda l: l.display_order)
+    return config_db
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Header Sub-Resources Endpoints
 # ──────────────────────────────────────────────────────────────────────
@@ -548,6 +785,7 @@ async def create_header(
         is_required=payload.is_required,
         display_order=payload.display_order,
         description=payload.description,
+        prompt=payload.prompt,
     )
     session.add(new_header)
 
@@ -774,6 +1012,7 @@ async def create_line_item(
         column_type=payload.column_type,
         is_required=payload.is_required,
         display_order=payload.display_order,
+        prompt=payload.prompt,
     )
     session.add(new_line_item)
 

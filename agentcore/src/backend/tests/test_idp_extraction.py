@@ -68,7 +68,8 @@ async def test_extract_dynamic_success_structured():
     res = await extract_dynamic(
         ocr_text="Invoice INV-1001. Description: Service fee, Amount: 150.00",
         prompt="Extract invoice number and line items",
-        llm_model=mock_llm
+        llm_model=mock_llm,
+        compact=False,  # this test asserts the verbose structured-output path (real per-field confidence)
     )
 
     assert "headers" in res
@@ -149,13 +150,14 @@ async def test_extract_dynamic_dirty_json_fallback():
     )
 
     assert "headers" in res
-    # Flat value "INV-1003" should be converted to Structured format
+    # Flat value "INV-1003" should be converted to the canonical structured format with the
+    # uniform compact-mode default confidence.
     assert res["headers"]["invoice_number"]["value"] == "INV-1003"
-    assert res["headers"]["invoice_number"]["confidence"] == 0.8
-    assert res["headers"]["invoice_number"]["reasoning"] == "Direct extraction"
-    
-    # Missing columns confidence should default to 0.8
-    assert res["line_items"][0]["columns"][0]["confidence"] == 0.8
+    assert res["headers"]["invoice_number"]["confidence"] == 0.85
+    assert res["headers"]["invoice_number"]["reasoning"] == "compact extraction"
+
+    # Columns present in the document get the same default confidence.
+    assert res["line_items"][0]["columns"][0]["confidence"] == 0.85
 
 @pytest.mark.anyio
 async def test_llm_extractor_node_integration():
@@ -674,3 +676,37 @@ async def test_save_extraction_results_success():
         if db_agent:
             await session.delete(db_agent)
         await session.commit()
+
+
+def test_expand_extraction_flat_and_empty():
+    """_expand_extraction: flat values -> canonical with 0.85; empty/None -> 0.0; continuous row_index."""
+    from agentcore.services.idp.extraction import _expand_extraction
+
+    parsed = {
+        "headers": {"invoice_number": "INV-9", "po_number": "", "vendor": None},
+        "line_items": [
+            {"description": "Widget", "amount": "50.00"},
+            {"description": "Gadget", "amount": "60.00"},
+        ],
+    }
+    out = _expand_extraction(parsed)
+    assert out["headers"]["invoice_number"]["value"] == "INV-9"
+    assert out["headers"]["invoice_number"]["confidence"] == 0.85
+    assert out["headers"]["po_number"]["value"] is None and out["headers"]["po_number"]["confidence"] == 0.0
+    assert out["headers"]["vendor"]["value"] is None and out["headers"]["vendor"]["confidence"] == 0.0
+    assert [r["row_index"] for r in out["line_items"]] == [0, 1]
+    cols0 = {c["column_name"]: c for c in out["line_items"][0]["columns"]}
+    assert cols0["description"]["value"] == "Widget" and cols0["description"]["confidence"] == 0.85
+
+
+@pytest.mark.anyio
+async def test_extract_dynamic_compact_flat_line_items():
+    """Compact mode: a flat multi-row response yields multiple canonical rows (the truncation fix)."""
+    raw = ('{"headers":{"invoice_number":"INV-7"},'
+           '"line_items":[{"description":"A","amount":"10"},{"description":"B","amount":"20"},'
+           '{"description":"C","amount":"30"}]}')
+    mock_llm = MockLLM(response_text=raw)
+    res = await extract_dynamic(ocr_text="doc", prompt="extract", llm_model=mock_llm)  # compact default
+    assert res["headers"]["invoice_number"]["value"] == "INV-7"
+    assert len(res["line_items"]) == 3
+    assert [r["row_index"] for r in res["line_items"]] == [0, 1, 2]

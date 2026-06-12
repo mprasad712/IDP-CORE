@@ -21,9 +21,9 @@ class IDPPageSelector(Node):
         DropdownInput(
             name="selection_mode",
             display_name="Selection Mode",
-            options=["first_n", "last_n", "range", "all"],
-            value="first_n",
-            info="How to select pages.",
+            options=["all", "first_n", "last_n", "range"],
+            value="all",
+            info="How to select pages. Defaults to all pages so documents are never silently truncated.",
         ),
         IntInput(name="first_n_pages", display_name="Number of Pages", value=3,
                  info="Pages to keep when mode is first_n or last_n."),

@@ -33,10 +33,11 @@ async def setup_test_data():
         developer_role = (await session.exec(select(Role).where(Role.name == "developer"))).first()
 
         # Create user
+        unique_suffix = uuid4().hex[:8]
         user = User(
             id=uuid4(),
-            username="agent_test_user@test.com",
-            email="agent_test_user@test.com",
+            username=f"agent_test_user_{unique_suffix}@test.com",
+            email=f"agent_test_user_{unique_suffix}@test.com",
             password="testpassword",
             is_active=True,
             is_superuser=False,
@@ -48,7 +49,7 @@ async def setup_test_data():
         # Create organization
         org = Organization(
             id=uuid4(),
-            name="Agent Test Org",
+            name=f"Agent Test Org {unique_suffix}",
             owner_user_id=user.id,
             created_by=user.id,
         )
@@ -117,8 +118,14 @@ async def setup_test_data():
 
         # Cleanup test data after test runs
         async with session_scope() as cleanup_session:
-            # Delete any created IDP agents
-            agents = (await cleanup_session.exec(select(IdpAgent))).all()
+            # Delete ONLY the IDP agents this test created (scoped to its own base agents).
+            # A bare select(IdpAgent) here would delete EVERY idp_agents row in the DB (and
+            # cascade to idp_documents) — it was wiping seeded/dev data on every suite run.
+            agents = (
+                await cleanup_session.exec(
+                    select(IdpAgent).where(IdpAgent.agent_id.in_([base_agent.id, base_agent2.id]))
+                )
+            ).all()
             for a in agents:
                 await cleanup_session.delete(a)
 

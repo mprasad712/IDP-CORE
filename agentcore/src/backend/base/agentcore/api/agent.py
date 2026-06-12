@@ -18,6 +18,7 @@ from fastapi.responses import StreamingResponse
 from fastapi_pagination import Page, Params
 from fastapi_pagination.ext.sqlmodel import apaginate
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy import exists, or_
 from sqlmodel import and_, col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -80,6 +81,20 @@ async def _save_agent_to_fs(agent: Agent) -> None:
                 await f.write(agent.model_dump_json())
             except OSError:
                 logger.exception("Failed to write agent %s to path %s", agent.name, agent.fs_path)
+
+
+async def _sync_idp_agent(agent: Agent, user_id) -> None:
+    """Best-effort, ISOLATED: create/sync the IdpAgent row for an agent whose saved graph
+    contains IDP nodes, so a builder-built agent becomes processable. Runs on its OWN session
+    so a sync failure can never poison or break the agent save."""
+    try:
+        from agentcore.services.deps import session_scope
+        from agentcore.services.idp.agent_config import sync_idp_agent_from_graph
+
+        async with session_scope() as idp_session:
+            await sync_idp_agent_from_graph(idp_session, agent, user_id)
+    except Exception as e:  # noqa: BLE001 - never break agent save
+        logger.warning("Could not sync IdpAgent for agent %s: %s", getattr(agent, "id", None), e)
 
 
 async def _resolve_tenant_scope_for_user(
@@ -353,6 +368,9 @@ async def create_agent(
             await sync_agent_tags(session, db_agent.id, tag_names, org_id, current_user.id)
             await session.commit()
 
+        # ── Auto-create the IdpAgent row if the graph contains IDP nodes (best-effort) ──
+        await _sync_idp_agent(db_agent, current_user.id)
+
         await _save_agent_to_fs(db_agent)
 
     except Exception as e:
@@ -566,7 +584,13 @@ async def acquire_agent_session(
             lock_row.locked_at = now
             lock_row.expires_at = expires_at
             session.add(lock_row)
-            await session.commit()
+            try:
+                await session.commit()
+            except StaleDataError:
+                # Row was concurrently deleted between SELECT and UPDATE; insert fresh lock
+                await session.rollback()
+                session.add(AgentEditLock(agent_id=agent_id, locked_by=current_user.id, locked_at=now, expires_at=expires_at))
+                await session.commit()
             return {"status": "acquired"}
         raise HTTPException(
             status_code=423,
@@ -586,8 +610,6 @@ async def acquire_agent_session(
     except IntegrityError:
         await session.rollback()
         existing_lock = (await session.exec(select(AgentEditLock).where(AgentEditLock.agent_id == agent_id))).first()
-        if existing_lock:
-            await session.refresh(existing_lock)
         if existing_lock and existing_lock.locked_by != current_user.id and existing_lock.expires_at > now:
             raise HTTPException(
                 status_code=423,
@@ -598,7 +620,13 @@ async def acquire_agent_session(
             existing_lock.locked_at = now
             existing_lock.expires_at = expires_at
             session.add(existing_lock)
-            await session.commit()
+            try:
+                await session.commit()
+            except StaleDataError:
+                # Row was concurrently deleted between SELECT and UPDATE; insert fresh lock
+                await session.rollback()
+                session.add(AgentEditLock(agent_id=agent_id, locked_by=current_user.id, locked_at=now, expires_at=expires_at))
+                await session.commit()
     return {"status": "acquired"}
 
 
@@ -691,6 +719,9 @@ async def update_agent(
             db_agent.tags = incoming_tags
             session.add(db_agent)
             await session.commit()
+
+        # ── Create/sync the IdpAgent row if the graph contains IDP nodes (best-effort) ──
+        await _sync_idp_agent(db_agent, current_user.id)
 
         await _save_agent_to_fs(db_agent)
 

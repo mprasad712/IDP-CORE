@@ -7,7 +7,7 @@ from typing import Any
 from loguru import logger
 
 from agentcore.custom.custom_node.node import Node
-from agentcore.io import DataInput, DropdownInput, HandleInput, MessageTextInput, MultilineInput, Output
+from agentcore.io import DataInput, DropdownInput, HandleInput, MessageTextInput, MultilineInput, MultiselectInput, Output
 from agentcore.schema.data import Data
 from agentcore.schema.message import Message
 
@@ -38,21 +38,40 @@ class IDPLLMExtractor(Node):
         DropdownInput(
             name="extraction_mode",
             display_name="Extraction Mode",
-            options=["dynamic_prompt", "field_configuration", "multimodal_prompt", "multimodal_config"],
-            value="dynamic_prompt",
-            info="dynamic_prompt: freeform text prompt. field_configuration: text schema. multimodal_prompt: vision prompt. multimodal_config: vision schema.",
+            # Extraction in the builder is config-driven: pick a saved Field Configuration
+            # (text or vision). The freeform dynamic-prompt mode is intentionally NOT offered
+            # here — author fields on the Field Configurations page instead. The backend still
+            # supports dynamic_prompt at runtime (legacy agents + config generation), so this
+            # only hides it from the canvas, it does not remove the capability.
+            options=["field_configuration", "multimodal_config"],
+            value="field_configuration",
+            info="field_configuration: extract using a saved text schema. multimodal_config: extract using a saved schema with a vision model.",
         ),
         MultilineInput(
             name="prompt",
             display_name="Extraction Prompt",
             value="",
-            info="Describe the fields to extract. Used when Extraction Mode is 'dynamic_prompt' or 'multimodal_prompt'.",
+            advanced=True,
+            info="Legacy/advanced: freeform prompt used only by the backend dynamic_prompt path. "
+            "Not used by the config-driven builder modes.",
         ),
         MessageTextInput(
             name="config_name",
             display_name="Field Configuration Name",
             value="",
             info="Name of the saved Field Configuration from the Configuration page. Used when Extraction Mode is 'field_configuration' or 'multimodal_config'.",
+        ),
+        MultiselectInput(
+            name="config_names",
+            display_name="Field Configurations (Multi-Type)",
+            options=[],
+            value=[],
+            info=(
+                "Select multiple Field Configurations for multi-type routing. "
+                "When a Document Classifier is upstream, the config whose doc_type matches the "
+                "classified document type is used automatically. Documents with no matching config "
+                "are marked 'skipped'. Leave empty to use the single 'Field Configuration Name' above."
+            ),
         ),
         MessageTextInput(
             name="model_name",
@@ -74,14 +93,17 @@ class IDPLLMExtractor(Node):
             is_prompt = field_value in ("dynamic_prompt", "multimodal_prompt")
             build_config["prompt"]["show"] = is_prompt
             build_config["config_name"]["show"] = not is_prompt
+            build_config["config_names"]["show"] = not is_prompt
 
             if not is_prompt:
-                build_config["config_name"]["options"] = self._fetch_config_names()
+                names = self._fetch_config_names()
+                build_config["config_name"]["options"] = names
+                build_config["config_names"]["options"] = names
 
-        if field_name == "config_name":
-            # Refresh options whenever this field is touched (e.g. on initial render)
+        if field_name in ("config_name", "config_names"):
             current_options = self._fetch_config_names()
             build_config["config_name"]["options"] = current_options
+            build_config["config_names"]["options"] = current_options
 
         return build_config
 
@@ -167,16 +189,102 @@ class IDPLLMExtractor(Node):
 
     # ── extraction ────────────────────────────────────────────────────────────
 
+    async def _resolve_config_name_from_classification(self) -> str | None:
+        """When config_names multi-select is used and classification metadata is present,
+        find which selected config's doc_type matches the classified type.
+        Returns the config name to use, or None if no match (→ skip)."""
+        config_names: list[str] = list(self.config_names) if self.config_names else []
+        if not config_names:
+            return None
+
+        src = self.document
+        classification = {}
+        if isinstance(src, Message):
+            classification = (src.additional_kwargs or {}).get("classification", {})
+
+        classified_type = (classification.get("type") or "").strip().lower()
+        if not classified_type or classified_type == "unknown":
+            return None
+
+        try:
+            from agentcore.services.deps import session_scope
+            from agentcore.services.database.models.idp.config import IdpFieldConfiguration
+            from sqlmodel import select
+
+            async with session_scope() as session:
+                for name in config_names:
+                    config = (await session.exec(
+                        select(IdpFieldConfiguration)
+                        .where(
+                            IdpFieldConfiguration.name == name,
+                            IdpFieldConfiguration.deleted_at.is_(None),
+                        )
+                        .limit(1)
+                    )).first()
+                    if config and config.doc_type and config.doc_type.strip().lower() == classified_type:
+                        return config.name
+        except Exception as exc:
+            logger.warning(f"[AIFieldExtractor] multi-config lookup failed: {exc}")
+
+        return None  # no match
+
+    async def _mark_skipped(self, classified_type: str) -> Data:
+        """Persist 'skipped' status on the source document and return empty Data."""
+        src = self.document
+        try:
+            from agentcore.services.deps import session_scope
+            from agentcore.services.database.models.idp.documents import IdpDocument
+            from uuid import UUID
+
+            doc_id_raw = None
+            if isinstance(src, Message):
+                doc_id_raw = (src.additional_kwargs or {}).get("document_id") or (
+                    getattr(src, "metadata", {}) or {}
+                ).get("document_id")
+
+            if doc_id_raw:
+                doc_id = UUID(str(doc_id_raw))
+                async with session_scope() as session:
+                    doc = await session.get(IdpDocument, doc_id)
+                    if doc:
+                        doc.status = "skipped"
+                        session.add(doc)
+                        await session.commit()
+        except Exception as exc:
+            logger.debug(f"[AIFieldExtractor] Could not mark document as skipped: {exc}")
+
+        self.status = f"Skipped: no field config for classified type '{classified_type}'"
+        return Data(data={})
+
     async def extract(self) -> Data:
         src = self.document
         text = src.text if isinstance(src, Message) else str(src)
 
-        if self.extraction_mode in ("field_configuration", "multimodal_config") and self.config_name:
-            prompt = self._build_config_prompt(self.config_name)
+        # Multi-config routing: if config_names is populated, resolve the right config
+        # based on the upstream classification or skip if no match.
+        config_names: list[str] = list(self.config_names) if self.config_names else []
+        if config_names and self.extraction_mode == "field_configuration":
+            classification = {}
+            if isinstance(src, Message):
+                classification = (src.additional_kwargs or {}).get("classification", {})
+            classified_type = (classification.get("type") or "unknown").strip()
+
+            matched_config = await self._resolve_config_name_from_classification()
+            if matched_config is None:
+                return await self._mark_skipped(classified_type)
+            # Override single config_name with the matched one
+            self._override_config_name = matched_config
         else:
+            self._override_config_name = None
+
+        # Config-based modes build their own prompt inside extract_named_config / extract_multimodal
+        # using the general template + DB field prompts — no pre-build needed here.
+        if self.extraction_mode not in ("field_configuration", "multimodal_config"):
             prompt = (self.prompt or "").strip()
             if not prompt:
                 prompt = "Extract all key fields from this document. Return as structured JSON."
+        else:
+            prompt = ""  # unused in config modes
 
         try:
             if self.extraction_mode == "dynamic_prompt":
@@ -189,8 +297,9 @@ class IDPLLMExtractor(Node):
                     raw = json.dumps(extracted, indent=2)
 
             elif self.extraction_mode == "field_configuration":
+                effective_config_name = self._override_config_name or self.config_name
                 if not self.llm:
-                    raw = f"[No model connected — config would be: {self.config_name}]"
+                    raw = f"[No model connected — config would be: {effective_config_name}]"
                     extracted = {"error": "No model connected"}
                 else:
                     from agentcore.services.deps import session_scope
@@ -202,13 +311,13 @@ class IDPLLMExtractor(Node):
                         config = (await session.exec(
                             select(IdpFieldConfiguration)
                             .where(
-                                IdpFieldConfiguration.name == self.config_name,
+                                IdpFieldConfiguration.name == effective_config_name,
                                 IdpFieldConfiguration.deleted_at.is_(None)
                             )
                         )).first()
 
                         if not config:
-                            raise ValueError(f"Active field configuration '{self.config_name}' not found.")
+                            raise ValueError(f"Active field configuration '{effective_config_name}' not found.")
 
                         extracted = await extract_named_config(
                             session=session,

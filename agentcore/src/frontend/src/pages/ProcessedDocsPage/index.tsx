@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   Clock,
   AlertCircle,
+  MinusCircle,
   X,
   Plus,
   RotateCcw,
@@ -44,10 +45,16 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/utils/utils";
+import {
+  useGetProcessedDocs,
+  useGetProcessedDoc,
+  type ProcessedDoc as ApiProcessedDoc,
+  type ProcessedDocDetail,
+} from "@/controllers/API/queries/idp";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type DocStatus = "pending" | "auto_approved" | "reviewed";
+type DocStatus = "pending" | "auto_approved" | "reviewed" | "skipped";
 
 interface ExtractedField {
   key: string;
@@ -74,6 +81,50 @@ interface ProcessedDoc {
   lineItemColumns: string[];
   reviewer?: string;
   reviewedAt?: string;
+}
+
+// ─── API → page adapters ──────────────────────────────────────────────────────
+
+function mapApiStatus(s: string): DocStatus {
+  if (s === "auto_approved") return "auto_approved";
+  if (s === "reviewed") return "reviewed";
+  if (s === "skipped") return "skipped";
+  return "pending"; // pending_review, extracted, queued, processing, failed
+}
+
+function listDocToPage(d: ApiProcessedDoc): ProcessedDoc {
+  return {
+    id: d.id,
+    name: d.original_filename,
+    sourceAgent: d.agent_id.slice(0, 8),
+    dateProcessed: (d.processing_completed_at ?? d.created_at ?? "").slice(0, 10),
+    documentType: d.predicted_type ?? d.file_type ?? "—",
+    overallConfidence: Math.round((d.overall_confidence ?? 0) * 100),
+    status: mapApiStatus(d.status),
+    headerFields: [],
+    lineItems: [],
+    lineItemColumns: [],
+  };
+}
+
+function enrichWithDetail(
+  base: ProcessedDoc | undefined,
+  detail?: ProcessedDocDetail,
+): ProcessedDoc | null {
+  if (!base) return null;
+  if (!detail) return base;
+  const headerFields: ExtractedField[] = detail.headers.map((h) => ({
+    key: h.field_name,
+    value: h.reviewed_value ?? h.extracted_value ?? "",
+    confidence: Math.round((h.confidence_score ?? 0) * 100),
+  }));
+  const cols = Array.from(new Set(detail.line_items.map((li) => li.column_name)));
+  const rows: Record<number, LineItem> = {};
+  detail.line_items.forEach((li) => {
+    rows[li.row_index] = rows[li.row_index] ?? ({ id: String(li.row_index) } as LineItem);
+    rows[li.row_index][li.column_name] = li.reviewed_value ?? li.extracted_value ?? "";
+  });
+  return { ...base, headerFields, lineItems: Object.values(rows), lineItemColumns: cols };
 }
 
 // ─── Seed data ────────────────────────────────────────────────────────────────
@@ -170,6 +221,12 @@ function StatusChip({ status }: { status: DocStatus }) {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-500/10 border border-blue-500/20 px-2.5 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400">
         <CheckCircle2 className="h-3 w-3" /> Reviewed
+      </span>
+    );
+  if (status === "skipped")
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-muted border border-border px-2.5 py-0.5 text-xs font-medium text-muted-foreground">
+        <MinusCircle className="h-3 w-3" /> Skipped
       </span>
     );
   return (
@@ -551,11 +608,23 @@ function DocTable({
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function ProcessedDocsPage() {
-  const [docs, setDocs]             = useState<ProcessedDoc[]>(SEED_DOCS);
   const [search, setSearch]         = useState("");
   const [activeTab, setActiveTab]   = useState<DocStatus>("pending");
-  const [selectedDoc, setSelectedDoc] = useState<ProcessedDoc | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filterDocType, setFilterDocType] = useState("all");
+
+  // Live data from the IDP backend, plus Manas's demo docs (SEED_DOCS) kept as samples.
+  const { data: docsPage } = useGetProcessedDocs({ size: 100 });
+  const docs: ProcessedDoc[] = useMemo(
+    () => [...(docsPage?.items ?? []).map(listDocToPage), ...SEED_DOCS],
+    [docsPage],
+  );
+  // Extracted fields/line-items come from the detail endpoint, fetched on select.
+  const { data: detail } = useGetProcessedDoc({ id: selectedId ?? "" });
+  const selectedDoc = useMemo(
+    () => (selectedId ? enrichWithDetail(docs.find((d) => d.id === selectedId), detail) : null),
+    [selectedId, docs, detail],
+  );
 
   const docTypes = useMemo(() => {
     const types = Array.from(new Set(docs.map((d) => d.documentType)));
@@ -578,11 +647,13 @@ export default function ProcessedDocsPage() {
     pending:       docs.filter((d) => d.status === "pending").length,
     auto_approved: docs.filter((d) => d.status === "auto_approved").length,
     reviewed:      docs.filter((d) => d.status === "reviewed").length,
+    skipped:       docs.filter((d) => d.status === "skipped").length,
   }), [docs]);
 
-  const handleSave = (updated: ProcessedDoc) => {
-    setDocs((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
-    setSelectedDoc(updated);
+  // NOTE: persisting edits (PATCH /fields) + review/approve mutations are wired
+  // in a follow-up; for now the detail view edits stay local until navigation.
+  const handleSave = (_updated: ProcessedDoc) => {
+    setSelectedId(null);
   };
 
   // ── Split-view (detail) ──
@@ -592,7 +663,7 @@ export default function ProcessedDocsPage() {
         {/* back bar */}
         <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b bg-muted/5">
           <button
-            onClick={() => setSelectedDoc(null)}
+            onClick={() => setSelectedId(null)}
             className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
           >
             <ChevronLeft className="h-4 w-4" />
@@ -602,7 +673,7 @@ export default function ProcessedDocsPage() {
         <div className="flex-1 overflow-hidden">
           <DocDetailView
             doc={selectedDoc}
-            onClose={() => setSelectedDoc(null)}
+            onClose={() => setSelectedId(null)}
             onSave={handleSave}
           />
         </div>
@@ -647,6 +718,7 @@ export default function ProcessedDocsPage() {
               { value: "pending",       label: "Pending Review",  icon: AlertCircle,    count: counts.pending       },
               { value: "auto_approved", label: "Auto-Approved",   icon: CheckCircle2,   count: counts.auto_approved },
               { value: "reviewed",      label: "Reviewed",        icon: CheckCircle2,   count: counts.reviewed      },
+              { value: "skipped",       label: "Skipped",         icon: MinusCircle,    count: counts.skipped       },
             ] as const).map(({ value, label, icon: Icon, count }) => (
               <TabsTrigger
                 key={value}
@@ -672,7 +744,7 @@ export default function ProcessedDocsPage() {
           </TabsList>
         </div>
 
-        {(["pending", "auto_approved", "reviewed"] as const).map((tab) => (
+        {(["pending", "auto_approved", "reviewed", "skipped"] as const).map((tab) => (
           <TabsContent key={tab} value={tab} className="flex-1 overflow-auto m-0">
             <div className="px-6 py-5 space-y-4">
 
@@ -707,7 +779,7 @@ export default function ProcessedDocsPage() {
                 )}
               </div>
 
-              <DocTable docs={getFiltered(tab)} onView={setSelectedDoc} />
+              <DocTable docs={getFiltered(tab)} onView={(d) => setSelectedId(d.id)} />
             </div>
           </TabsContent>
         ))}

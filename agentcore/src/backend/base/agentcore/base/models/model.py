@@ -53,7 +53,7 @@ class LCModelNode(Node):
     ]
 
     outputs = [
-        Output(display_name="Model Response", name="text_output", method="text_response"),
+        Output(display_name="Model Response", name="text_output", method="text_response", hidden=True),
         Output(display_name="Language Model", name="model_output", method="build_model"),
     ]
 

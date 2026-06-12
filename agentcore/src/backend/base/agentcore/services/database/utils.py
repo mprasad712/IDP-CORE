@@ -62,6 +62,12 @@ async def initialize_database(*, fix_migration: bool = False) -> None:
         await _seed_predefined_tags(database_service)
     except Exception:
         logger.exception("Failed to seed predefined tags (non-fatal)")
+    try:
+        from agentcore.services.idp.catalogue import seed_idp_templates
+        async with session_getter(database_service) as session:
+            await seed_idp_templates(session)
+    except Exception:
+        logger.exception("Failed to seed IDP templates (non-fatal)")
     logger.debug("Database initialized")
 
 

@@ -9,6 +9,7 @@ export interface HeaderCreatePayload {
   is_required?: boolean;
   display_order: number;
   description?: string | null;
+  prompt?: string | null;
 }
 
 export const usePostFieldConfigHeader = () => {

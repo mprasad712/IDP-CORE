@@ -76,7 +76,7 @@ class IdpDocument(SQLModel, table=True):  # type: ignore[call-arg]
     __table_args__ = (
         CheckConstraint("source IN ('upload','mail_connector','sharepoint','other')", name="ck_idp_documents_source"),
         CheckConstraint(
-            "status IN ('queued','processing','extracted','pending_review','auto_approved','reviewed','failed')",
+            "status IN ('queued','processing','extracted','pending_review','auto_approved','reviewed','failed','split','skipped')",
             name="ck_idp_documents_status",
         ),
         CheckConstraint("overall_confidence IS NULL OR (overall_confidence >= 0 AND overall_confidence <= 1)", name="ck_idp_documents_conf"),
@@ -97,6 +97,7 @@ class IdpProcessingJob(SQLModel, table=True):  # type: ignore[call-arg]
     )
     status: str = Field(default="queued", sa_column=Column(String(20), nullable=False, default="queued", index=True))
     steps_completed: list | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    log: list | None = Field(default=None, sa_column=Column(JSONB, nullable=True))  # ordered per-step flow-log events
     extraction_mode_used: str | None = Field(default=None, sa_column=Column(String(30), nullable=True))
     math_reconcile_attempts: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
     error_message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))

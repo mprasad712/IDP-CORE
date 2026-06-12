@@ -1,5 +1,4 @@
 import ForwardedIconComponent from "@/components/common/genericIconComponent";
-import ShadTooltip from "@/components/common/shadTooltipComponent";
 import { PLAYGROUND_BUTTON_NAME } from "@/constants/constants";
 import { CustomIOModal } from "@/customization/components/custom-new-modal";
 import { ENABLE_PUBLISH } from "@/customization/feature-flags";
@@ -33,37 +32,21 @@ const ActiveButton = () => (
   </div>
 );
 
-const DisabledButton = () => (
-  <div
-    className="playground-btn-agent-toolbar cursor-not-allowed text-muted-foreground duration-150"
-    data-testid="playground-btn-agent"
-  >
-    <PlayIcon />
-    <ButtonLabel />
-  </div>
-);
-
 const PlaygroundButton = ({
   hasIO,
   open,
   setOpen,
   canvasOpen,
 }: PlaygroundButtonProps) => {
-  return hasIO ? (
+  return (
     <CustomIOModal
       open={open}
       setOpen={setOpen}
-      disable={!hasIO}
+      disable={false}
       canvasOpen={canvasOpen}
     >
       <ActiveButton />
     </CustomIOModal>
-  ) : (
-    <ShadTooltip content="Add a Chat Input or Chat Output to use the playground">
-      <div>
-        <DisabledButton />
-      </div>
-    </ShadTooltip>
   );
 };
 

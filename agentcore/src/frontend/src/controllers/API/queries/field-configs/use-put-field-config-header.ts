@@ -9,6 +9,7 @@ export interface HeaderUpdatePayload {
   is_required?: boolean;
   display_order?: number;
   description?: string | null;
+  prompt?: string | null;
 }
 
 export const usePutFieldConfigHeader = () => {

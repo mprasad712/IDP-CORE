@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10, <3.13"
 
 [[package]]
@@ -695,6 +695,7 @@ dependencies = [
     { name = "cachetools" },
     { name = "cryptography" },
     { name = "fastapi" },
+    { name = "google-genai" },
     { name = "httpx" },
     { name = "langchain-anthropic" },
     { name = "langchain-core" },
@@ -717,6 +718,7 @@ requires-dist = [
     { name = "cachetools", specifier = ">=5.5.0,<6.0.0" },
     { name = "cryptography", specifier = ">=46.0.5,<47.0.0" },
     { name = "fastapi", specifier = ">=0.115.0,<1.0.0" },
+    { name = "google-genai", specifier = ">=1.0.0,<2.0.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0.0" },
     { name = "langchain-anthropic", specifier = ">=0.3.0,<2.0.0" },
     { name = "langchain-core", specifier = ">=0.3.0,<2.0.0" },

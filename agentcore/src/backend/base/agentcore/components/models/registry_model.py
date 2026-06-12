@@ -11,6 +11,7 @@ from loguru import logger
 from agentcore.base.models.model import LCModelNode
 from agentcore.field_typing import LanguageModel
 from agentcore.io import DropdownInput, FloatInput, IntInput
+from agentcore.template.field.base import Output
 
 from agentcore.components.models._rbac_helpers import (
     check_model_access_sync,
@@ -75,7 +76,6 @@ class RegistryModelComponent(LCModelNode):
     priority = 0
 
     inputs = [
-        *LCModelNode._base_inputs,
         DropdownInput(
             name="provider",
             display_name="Provider",
@@ -106,6 +106,10 @@ class RegistryModelComponent(LCModelNode):
             info="Maximum number of tokens to generate. Leave empty for model default.",
             advanced=True,
         ),
+    ]
+
+    outputs = [
+        Output(display_name="Language Model", name="model_output", method="build_model"),
     ]
 
     def update_build_config(self, build_config: dict, field_value: str, field_name: str | None = None):
@@ -183,5 +187,5 @@ class RegistryModelComponent(LCModelNode):
             registry_model_id=model_id,
             temperature=temperature,
             max_tokens=max_tokens,
-            streaming=self.stream,
+            streaming=False,
         )
