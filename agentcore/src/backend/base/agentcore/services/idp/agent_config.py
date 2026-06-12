@@ -9,6 +9,7 @@ This mirrors the legacy ``process_backend_bulk.py`` (parse graph JSON -> run a f
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from uuid import UUID
 
 from loguru import logger
@@ -23,6 +24,20 @@ _N_MODEL = "Large Language Model"
 _N_SCAN = "Scan Corrector"
 _N_PAGE = "Page Selector"
 _N_DETECTOR = "Document Type Detector"
+# Differentiator nodes (frontend-only nodes; their presence on the canvas drives the toggles)
+_N_CLASSIFIER = "Document Classifier"
+_N_DETECTION = "Visual Element Detection"
+_N_MATH = "Math Reconcile"
+# Visual Element Detection node toggles -> the element types the backend detector ACTUALLY
+# emits (signature, checkbox, qr, barcode). Stamps/logos/handwriting are not yet detected by
+# the backend, so those node toggles are intentionally NOT mapped — mapping them would put a
+# never-emitted type into the filter and silently drop everything. If a user selects only the
+# unsupported toggles (or none), the set is empty -> None -> detect all supported types.
+_DETECT_FIELD_TO_TYPES = {
+    "detect_signatures": ("signature",),
+    "detect_checkboxes": ("checkbox",),
+    "detect_qr": ("qr", "barcode"),
+}
 
 # Service-level extraction modes (multimodal is parked -> downgraded to a text mode)
 MODE_DYNAMIC = "dynamic_prompt"
@@ -56,10 +71,10 @@ class ResolvedPipelineConfig:
     confidence_threshold: float = 0.8
     multi_doc_split: bool = False
     ocr_lang: str = "en"
-    # differentiators. The three node-features default OFF (only run when explicitly
-    # enabled via idp_agent.extra, since their canvas nodes are not built yet); the two
-    # automatic backend features default ON but only do work when the document warrants
-    # it (long docs / cross-page repeats), so short docs are unaffected.
+    # differentiators. The three node-features turn ON when their canvas node is present
+    # (Document Classifier / Visual Element Detection / Math Reconcile), with idp_agent.extra
+    # as a fallback/override. The two automatic backend features default ON but only do work
+    # when the document warrants it (long docs / cross-page repeats).
     classify_enabled: bool = False
     classify_auto_select: bool = True
     classify_threshold: float = 0.7
@@ -67,6 +82,7 @@ class ResolvedPipelineConfig:
     detect_enabled_types: set[str] | None = None
     math_reconcile_enabled: bool = False
     math_reconcile_max_attempts: int = 2
+    math_reconcile_tolerance: float = 0.01
     long_doc_enabled: bool = True
     long_doc_max_pages: int = 8
     long_doc_max_tokens: int = 12000
@@ -212,12 +228,39 @@ async def resolve_pipeline_config(
     confidence_threshold = _to_float(extra.get("confidence_threshold"), 0.8)
     ocr_lang = str(extra.get("ocr_language") or _field(extractor, "language") or "en")
 
-    # differentiator toggles (config-driven via idp_agent.extra until canvas nodes exist)
-    det_types = extra.get("detect_enabled_types")
-    detect_enabled_types = (
-        {str(x).strip().lower() for x in det_types if str(x).strip()}
-        if isinstance(det_types, list) and det_types
-        else None
+    # ── Differentiator toggles: a canvas node's PRESENCE enables the feature; idp_agent.extra
+    # is a fallback/override (so API/test config and on-the-fly toggling still work). ──
+    classifier_node = _find_node(data, _N_CLASSIFIER)
+    detection_node = _find_node(data, _N_DETECTION)
+    math_node = _find_node(data, _N_MATH)
+
+    classify_enabled = classifier_node is not None or _as_bool(extra.get("classify_enabled"), False)
+    classify_threshold = _to_float(
+        _field(classifier_node, "confidence_threshold") if classifier_node else extra.get("classify_threshold"), 0.7
+    )
+
+    detect_enabled = detection_node is not None or _as_bool(extra.get("detect_enabled"), False)
+    if detection_node is not None:
+        # the node's per-element toggles select which element types to detect (none/unsupported -> all)
+        selected: set[str] = set()
+        for fname, etypes in _DETECT_FIELD_TO_TYPES.items():
+            if _as_bool(_field(detection_node, fname), False):
+                selected.update(etypes)
+        detect_enabled_types = selected or None
+    else:
+        det_types = extra.get("detect_enabled_types")
+        detect_enabled_types = (
+            {str(x).strip().lower() for x in det_types if str(x).strip()}
+            if isinstance(det_types, list) and det_types
+            else None
+        )
+
+    math_reconcile_enabled = math_node is not None or _as_bool(extra.get("math_reconcile_enabled"), False)
+    math_reconcile_max_attempts = _to_int(
+        _field(math_node, "max_retries") if math_node else extra.get("math_reconcile_max_attempts"), 2
+    )
+    math_reconcile_tolerance = _to_float(
+        _field(math_node, "tolerance") if math_node else extra.get("math_reconcile_tolerance"), 0.01
     )
 
     return ResolvedPipelineConfig(
@@ -242,15 +285,73 @@ async def resolve_pipeline_config(
         confidence_threshold=confidence_threshold,
         multi_doc_split=bool(idp_agent.multi_doc_split),
         ocr_lang=ocr_lang,
-        classify_enabled=_as_bool(extra.get("classify_enabled"), False),
+        classify_enabled=classify_enabled,
         classify_auto_select=_as_bool(extra.get("classify_auto_select"), True),
-        classify_threshold=_to_float(extra.get("classify_threshold"), 0.7),
-        detect_enabled=_as_bool(extra.get("detect_enabled"), False),
+        classify_threshold=classify_threshold,
+        detect_enabled=detect_enabled,
         detect_enabled_types=detect_enabled_types,
-        math_reconcile_enabled=_as_bool(extra.get("math_reconcile_enabled"), False),
-        math_reconcile_max_attempts=_to_int(extra.get("math_reconcile_max_attempts"), 2),
+        math_reconcile_enabled=math_reconcile_enabled,
+        math_reconcile_max_attempts=math_reconcile_max_attempts,
+        math_reconcile_tolerance=math_reconcile_tolerance,
         long_doc_enabled=_as_bool(extra.get("long_doc_enabled"), True),
         long_doc_max_pages=_to_int(extra.get("long_doc_max_pages"), 8),
         long_doc_max_tokens=_to_int(extra.get("long_doc_max_tokens"), 12000),
         entity_linking_enabled=_as_bool(extra.get("entity_linking_enabled"), True),
     )
+
+
+# ───────────────────────── IdpAgent-on-save sync ─────────────────────────
+def agent_contains_idp_nodes(data) -> bool:
+    """True if the agent's saved graph contains IDP nodes (the AI Field Extractor or the IDP
+    output node) — i.e. the builder configured it for document processing."""
+    return _find_node(data, _N_EXTRACTOR) is not None or _find_node(data, "Processed Docs Output") is not None
+
+
+def _idp_extraction_mode(graph_mode: str | None) -> str:
+    """Map the canvas extraction_mode value to the IdpAgent.extraction_mode enum
+    ('dynamic_prompting' | 'named_config' | 'multimodal')."""
+    m = (graph_mode or "").strip().lower()
+    if m in ("field_configuration", "named_config", "multimodal_config"):
+        return "named_config"
+    if m == "multimodal_prompt":
+        return "multimodal"
+    return "dynamic_prompting"
+
+
+async def sync_idp_agent_from_graph(session: AsyncSession, base_agent, user_id) -> None:
+    """Create or sync the IdpAgent row for an agent whose graph contains IDP nodes, so a
+    builder-built agent becomes processable without a manual DB insert.
+
+    No-op for non-IDP agents. Idempotent (upsert by agent_id). Best-effort — the caller MUST
+    guard this so a sync failure never breaks the agent save.
+    """
+    data = getattr(base_agent, "data", None)
+    if not agent_contains_idp_nodes(data):
+        return
+
+    extractor = _find_node(data, _N_EXTRACTOR)
+    mode = _idp_extraction_mode(_field(extractor, "extraction_mode"))
+
+    # Query WITHOUT the deleted_at filter: agent_id is UNIQUE across ALL rows (incl. soft-deleted),
+    # so a deleted_at-only filter could miss a soft-deleted row and then INSERT a duplicate
+    # (IntegrityError). If a soft-deleted row exists, reactivate it instead.
+    existing = (await session.exec(select(IdpAgent).where(IdpAgent.agent_id == base_agent.id))).first()
+    if existing is None:
+        session.add(
+            IdpAgent(
+                agent_id=base_agent.id,
+                extraction_mode=mode,
+                default_rule_action="pending_review",
+                is_active=True,
+                created_by=user_id,
+                updated_by=user_id,
+            )
+        )
+    else:
+        existing.extraction_mode = mode
+        existing.is_active = True
+        existing.deleted_at = None  # reactivate if it had been soft-deleted (agent still has IDP nodes)
+        existing.updated_by = user_id
+        existing.updated_at = datetime.now(timezone.utc)
+        session.add(existing)
+    await session.commit()

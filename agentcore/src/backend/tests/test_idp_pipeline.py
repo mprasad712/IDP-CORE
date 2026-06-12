@@ -1098,6 +1098,51 @@ async def test_pipeline_split_all_enqueue_fail_fails_parent(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_agent_config_reads_differentiator_nodes():
+    """Classifier / Visual Detection / Math Reconcile canvas nodes drive the pipeline toggles."""
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent
+    from agentcore.services.deps import session_scope
+
+    extra_nodes = [
+        _node("Document Classifier", {"confidence_threshold": 0.6}),
+        _node("Visual Element Detection", {"detect_signatures": True, "detect_qr": True, "detect_stamps": False}),
+        _node("Math Reconcile", {"max_retries": 3, "tolerance": 0.05}),
+    ]
+    graph = _graph(str(uuid4()), extra_nodes=extra_nodes)
+    idp_agent = IdpAgent(id=uuid4(), agent_id=uuid4(), extraction_mode="dynamic_prompting", default_rule_action="pending_review")
+    base_agent = Agent(id=uuid4(), name="x", data=graph)
+    async with session_scope() as session:
+        cfg = await resolve_pipeline_config(session, idp_agent, base_agent)
+
+    assert cfg.classify_enabled is True and cfg.classify_threshold == 0.6
+    # detect_qr maps to both qr + barcode (pyzbar emits both); stamps not supported -> ignored
+    assert cfg.detect_enabled is True and cfg.detect_enabled_types == {"signature", "qr", "barcode"}
+    assert cfg.math_reconcile_enabled is True
+    assert cfg.math_reconcile_max_attempts == 3 and cfg.math_reconcile_tolerance == 0.05
+
+
+@pytest.mark.anyio
+async def test_agent_config_no_differentiator_nodes_defaults_off():
+    """Without the nodes, classify/detect/math default OFF; idp_agent.extra still overrides."""
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent
+    from agentcore.services.deps import session_scope
+
+    graph = _graph(str(uuid4()))  # no differentiator nodes
+    idp_off = IdpAgent(id=uuid4(), agent_id=uuid4(), extraction_mode="dynamic_prompting", default_rule_action="pending_review")
+    idp_extra = IdpAgent(id=uuid4(), agent_id=uuid4(), extraction_mode="dynamic_prompting",
+                         default_rule_action="pending_review", extra={"classify_enabled": True})
+    base_agent = Agent(id=uuid4(), name="x", data=graph)
+    async with session_scope() as session:
+        cfg_off = await resolve_pipeline_config(session, idp_off, base_agent)
+        cfg_extra = await resolve_pipeline_config(session, idp_extra, base_agent)
+
+    assert cfg_off.classify_enabled is False and cfg_off.detect_enabled is False and cfg_off.math_reconcile_enabled is False
+    assert cfg_extra.classify_enabled is True  # extra fallback still works
+
+
+@pytest.mark.anyio
 async def test_pipeline_txt_file(monkeypatch):
     """A .txt file is accepted, read as digital native text (no OCR), and processed."""
     from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob

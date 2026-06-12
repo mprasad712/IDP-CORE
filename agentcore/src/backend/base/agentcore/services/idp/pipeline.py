@@ -347,7 +347,11 @@ async def _hook_math_reconcile(extracted, llm, job, cfg, flow: "FlowLog"):
         flow.step("math_reconcile", "warn", "math reconcile not available yet")
         return extracted
     try:
-        res = await reconcile_math(extracted, llm, max_attempts=cfg.math_reconcile_max_attempts)
+        res = await reconcile_math(
+            extracted, llm,
+            max_attempts=cfg.math_reconcile_max_attempts,
+            tolerance=getattr(cfg, "math_reconcile_tolerance", 0.01),
+        )
         res = res if isinstance(res, dict) else {}
         job.math_reconcile_attempts = int(res.get("attempts", 0) or 0)
         flow.step("math_reconcile", "ok",

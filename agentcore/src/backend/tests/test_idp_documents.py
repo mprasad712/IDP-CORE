@@ -173,11 +173,12 @@ async def test_document_upload_flow(setup_test_data):
     assert response.status_code == 404
     assert "not found" in response.json()["detail"]
 
-    # 2. Test upload with invalid file extension
+    # 2. Test upload with invalid file extension (.exe is not an allowed document type;
+    #    .txt is now allowed, so use a genuinely-disallowed extension here)
     response = client.post(
         "/api/v1/idp/documents/upload",
         data={"agent_id": str(idp_agent.id)},
-        files=[("files", ("test.txt", b"txt content", "text/plain"))]
+        files=[("files", ("test.exe", b"binary content", "application/octet-stream"))]
     )
     assert response.status_code == 400
     assert "not allowed" in response.json()["detail"]
