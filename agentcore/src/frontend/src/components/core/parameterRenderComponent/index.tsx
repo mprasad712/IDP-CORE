@@ -21,6 +21,8 @@ import QueryComponent from "./components/queryComponent";
 import SortableListComponent from "./components/sortableListComponent";
 import { StrRenderComponent } from "./components/strRenderComponent";
 import IDPFieldConfigDropdown from "./components/IDPFieldConfigDropdown";
+import IDPDocTypeMultiselect from "./components/IDPDocTypeMultiselect";
+import IDPFieldConfigMultiselect from "./components/IDPFieldConfigMultiselect";
 import ToolsComponent from "./components/ToolsComponent";
 import ToggleShadComponent from "./components/toggleShadComponent";
 import type { InputProps, NodeInfoType } from "./types";
@@ -88,6 +90,14 @@ export function ParameterRenderComponent({
           handleNodeClass={handleNodeClass}
         />
       );
+    }
+
+    if ((templateData as any).idp_doc_type_fetch === true) {
+      return <IDPDocTypeMultiselect {...baseInputProps} />;
+    }
+
+    if ((templateData as any).idp_config_fetch_multi === true) {
+      return <IDPFieldConfigMultiselect {...baseInputProps} />;
     }
 
     if (TEXT_FIELD_TYPES.includes(templateData.type ?? "")) {

@@ -35,6 +35,7 @@ class IdpFieldConfiguration(SQLModel, table=True):  # type: ignore[call-arg]
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     name: str = Field(sa_column=Column(String(200), nullable=False))
     description: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    doc_type: str | None = Field(default=None, sa_column=Column(String(100), nullable=True))
     org_id: UUID | None = Field(
         default=None, sa_column=Column(Uuid, ForeignKey("organization.id", ondelete="SET NULL"), nullable=True, index=True)
     )

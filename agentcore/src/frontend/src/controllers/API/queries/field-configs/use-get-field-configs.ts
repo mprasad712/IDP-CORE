@@ -33,6 +33,7 @@ export interface FieldConfig {
   id: string;
   name: string;
   description: string | null;
+  doc_type: string | null;
   org_id: string | null;
   is_template: boolean;
   is_active: boolean;

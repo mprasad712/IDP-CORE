@@ -1,8 +1,11 @@
 import logging
+import re
 from typing import Any
 
 import httpx
+from groq import BadRequestError
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage
 from langchain_groq import ChatGroq
 
 from app.providers.base import BaseProvider, register_provider
@@ -82,3 +85,23 @@ class GroqProvider(BaseProvider):
                 kwargs["model_kwargs"] = cleaned
 
         return ChatGroq(**kwargs)
+
+    async def invoke(self, model: BaseChatModel, messages: list[BaseMessage]) -> AIMessage:
+        try:
+            return await model.ainvoke(messages)
+        except BadRequestError as e:
+            # Some Groq models emit <function=Name>{...}</function> instead of a
+            # proper JSON tool-call object; Groq's API rejects this as tool_use_failed
+            # even though the generated JSON is complete and valid.  Extract the JSON
+            # and return it as plain content so callers can still parse the result.
+            body = e.body if isinstance(e.body, dict) else {}
+            error_info = body.get("error", {})
+            if error_info.get("code") == "tool_use_failed":
+                failed_gen = error_info.get("failed_generation", "")
+                match = re.search(r"<function=\w+>(.*?)</function>", failed_gen, re.DOTALL)
+                if match:
+                    logger.warning(
+                        "Groq tool_use_failed: returning extracted JSON from failed_generation as content"
+                    )
+                    return AIMessage(content=match.group(1).strip())
+            raise

@@ -6,6 +6,7 @@ import type { FieldConfig } from "./use-get-field-configs";
 export interface FieldConfigUpdatePayload {
   name?: string;
   description?: string | null;
+  doc_type?: string | null;
   is_template?: boolean;
   is_active?: boolean;
   visibility?: "private" | "org" | "dept";

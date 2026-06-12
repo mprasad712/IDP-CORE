@@ -476,10 +476,15 @@ async def seed_idp_templates(session: AsyncSession) -> None:
             IdpFieldConfiguration.deleted_at.is_(None),
         )
         existing = (await session.exec(stmt)).first()
+        if existing and existing.doc_type is None:
+            existing.doc_type = t_def["name"]
+            session.add(existing)
+            seeded_count += 1
         if not existing:
             new_config = IdpFieldConfiguration(
                 name=t_def["name"],
                 description=t_def["description"],
+                doc_type=t_def["name"],
                 org_id=None,
                 is_template=True,
                 is_active=True,
