@@ -974,6 +974,38 @@ async def test_pipeline_split_early_returns_and_enqueues_children(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_pipeline_flow_log_is_detailed(monkeypatch):
+    """The per-document flow log records the full cycle: input, config, OCR/native, what the LLM gave."""
+    from agentcore.services.database.models.idp.documents import IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch, result={
+        "headers": {"invoice_number": {"value": "INV-9", "confidence": 0.9}, "total": {"value": "100", "confidence": 0.9}},
+        "line_items": [],
+    })
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf())
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            by_step = {e["step"]: e["detail"] for e in job.log}
+            # input received
+            assert "input received" in by_step["load"]
+            # the agent config (what runs) is logged
+            assert "config" in by_step and "extraction=" in by_step["config"] and "features=" in by_step["config"]
+            # OCR/native output size is logged
+            assert "native" in by_step and "chars" in by_step["native"]
+            # merged text size + location
+            assert "text" in by_step and "chars" in by_step["text"] and "ocr_output" in by_step["text"]
+            # what the LLM gave (field names)
+            assert "invoice_number" in by_step["extract"] and "header field" in by_step["extract"]
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
 async def test_pipeline_classify_failure_does_not_poison_session(monkeypatch):
     """A classification hook failure must roll back and NOT corrupt extraction/finalize."""
     from agentcore.services.database.models.idp.documents import IdpDocument, IdpExtractedHeader, IdpProcessingJob
