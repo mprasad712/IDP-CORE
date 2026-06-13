@@ -14,7 +14,10 @@ from agentcore.services.database.models.idp.config import (
     IdpFieldConfigHeader,
     IdpFieldConfigLineItem,
 )
-from agentcore.services.idp.prompt_templates import build_extraction_messages
+from agentcore.services.idp.prompt_templates import (
+    build_extraction_messages,
+    build_compact_extraction_messages,
+)
 
 # ──────────────────────────────────────────────────────────────────────
 # Pydantic Schemas for Structured Output
@@ -288,26 +291,24 @@ async def extract_dynamic(
     return {"headers": clean_headers, "line_items": clean_line_items}
 
 
-async def _invoke_llm(system: str, user: str, llm_model: Any) -> Dict[str, Any]:
-    """Invoke the LLM with system+user messages, return normalised extraction dict."""
+async def _compact_invoke(system: str, user: str, llm_model: Any) -> Dict[str, Any]:
+    """Invoke the LLM with a compact (flat-JSON) system+user prompt and expand to the canonical shape.
+
+    Plain ``ainvoke`` (NOT ``with_structured_output``): the verbose per-cell schema overflows the
+    output-token budget on multi-row tables and drops ``line_items``. The model returns flat
+    ``{"headers": {...}, "line_items": [{...}]}``; ``_expand_extraction`` re-attaches a uniform
+    default confidence. On unparseable JSON, return an empty result + error (the pipeline treats a
+    zero-field/error extraction as fatal/partial, matching ``extract_dynamic``'s compact path).
+    """
     messages = [SystemMessage(content=system), HumanMessage(content=user)]
-
-    # Try structured output first (works on tool-calling capable models)
-    if hasattr(llm_model, "with_structured_output"):
-        try:
-            result = await llm_model.with_structured_output(StructuredExtractionResult).ainvoke(messages)
-            if isinstance(result, StructuredExtractionResult):
-                return _expand_extraction(result.model_dump())
-            if isinstance(result, dict):
-                return _expand_extraction(result)
-        except Exception as e:
-            logger.warning(f"[LLM] with_structured_output failed: {e}. Falling back to raw JSON parsing.")
-
-    # Fallback: raw invocation + JSON parse
-    response = await llm_model.ainvoke(messages)
-    raw_content = response.content if hasattr(response, "content") else str(response)
-    parsed = json.loads(_strip_code_fences(raw_content))
-    return _expand_extraction(parsed)
+    try:
+        response = await llm_model.ainvoke(messages)
+        raw_content = response.content if hasattr(response, "content") else str(response)
+        parsed = json.loads(_strip_code_fences(raw_content))
+        return _expand_extraction(parsed)
+    except Exception as e:
+        logger.error(f"[Extraction] compact named-config parsing failed: {e}")
+        return {"headers": {}, "line_items": [], "error": f"Extraction parsing failed: {str(e)}"}
 
 
 async def extract_named_config(
@@ -337,11 +338,12 @@ async def extract_named_config(
     )
     line_items = (await session.exec(lines_stmt)).all()
 
-    # 3. Build prompt from general template, inserting field names + DB prompts
-    system_prompt, user_prompt = build_extraction_messages(headers, line_items, ocr_text)
+    # 3. Build a COMPACT prompt (flat values, field names + DB prompts as hints). The verbose
+    #    per-cell value+confidence+reasoning schema truncates line_items on multi-row tables.
+    system_prompt, user_prompt = build_compact_extraction_messages(headers, line_items, ocr_text)
 
-    # 4. Invoke LLM directly with the template-built messages
-    raw_result = await _invoke_llm(system_prompt, user_prompt, llm_model)
+    # 4. Invoke the LLM with plain ainvoke; _expand_extraction re-attaches uniform confidence.
+    raw_result = await _compact_invoke(system_prompt, user_prompt, llm_model)
 
     # 5. Filter/Align the output to strictly match the requested configuration fields
     # (Removes hallucinations and maps missing properties with nulls/defaults)
@@ -505,8 +507,7 @@ async def extract_multimodal(
                 raise ValueError("Parsed output is not a JSON object.")
             parsed.setdefault("headers", {})
             parsed.setdefault("line_items", [])
-            # Reuse the same normalisation helper from _invoke_llm path
-            # (build a temporary messages-style response to reuse logic)
+            # Normalise the verbose multimodal response into the canonical shape.
             clean_h: Dict[str, Any] = {}
             for k, v in parsed["headers"].items():
                 if isinstance(v, dict):

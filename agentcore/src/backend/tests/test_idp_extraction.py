@@ -710,3 +710,90 @@ async def test_extract_dynamic_compact_flat_line_items():
     assert res["headers"]["invoice_number"]["value"] == "INV-7"
     assert len(res["line_items"]) == 3
     assert [r["row_index"] for r in res["line_items"]] == [0, 1, 2]
+
+
+def test_build_compact_extraction_messages_is_flat():
+    """The compact named-config prompt must ask for FLAT JSON — no per-cell confidence/reasoning."""
+    from agentcore.services.idp.prompt_templates import build_compact_extraction_messages
+
+    class _H:
+        def __init__(self, n, t, p=None, d=None):
+            self.field_name, self.field_type, self.prompt, self.description = n, t, p, d
+
+    class _C:
+        def __init__(self, n, t, p=None):
+            self.column_name, self.column_type, self.prompt = n, t, p
+
+    headers = [_H("invoice_number", "text", "the invoice id top-right"), _H("total", "number")]
+    line_items = [_C("description", "text"), _C("amount", "number", "the row total")]
+    system, user = build_compact_extraction_messages(headers, line_items, ocr_text="DOC TEXT HERE")
+
+    # System forbids confidence/reasoning; user carries the field names + hints + the raw text.
+    assert "confidence" not in system.lower() or "do not include" in system.lower()
+    assert "invoice_number" in user and "description" in user
+    assert "the invoice id top-right" in user  # DB prompt hint preserved
+    assert "DOC TEXT HERE" in user
+    # The flat JSON scaffold must NOT contain a per-cell "confidence" key.
+    assert '"confidence"' not in user
+
+
+@pytest.mark.anyio
+async def test_extract_named_config_compact_flat_multirow():
+    """Named-config goes through the COMPACT path: a FLAT multi-row response persists all rows,
+    undeclared columns are dropped, and missing declared columns are filled at confidence 0.0.
+
+    This is the regression fix — the verbose schema returned 0 line items on multi-row invoices."""
+    from agentcore.services.deps import session_scope
+    from agentcore.services.database.models.idp.config import (
+        IdpFieldConfiguration,
+        IdpFieldConfigHeader,
+        IdpFieldConfigLineItem,
+    )
+    from agentcore.services.idp.extraction import extract_named_config
+
+    config_id = uuid4()
+    async with session_scope() as session:
+        session.add(IdpFieldConfiguration(id=config_id, name="Compact Multirow Cfg", is_active=True))
+        await session.flush()
+        session.add(IdpFieldConfigHeader(id=uuid4(), config_id=config_id, field_name="invoice_number", field_type="text", display_order=0))
+        session.add(IdpFieldConfigLineItem(id=uuid4(), config_id=config_id, column_name="description", column_type="text", display_order=0))
+        session.add(IdpFieldConfigLineItem(id=uuid4(), config_id=config_id, column_name="amount", column_type="number", display_order=1))
+        await session.commit()
+
+    # FLAT compact response with 3 rows; one row has an undeclared "junk" column; one row omits "amount".
+    flat = (
+        '{"headers":{"invoice_number":"INV-3001"},'
+        '"line_items":['
+        '{"description":"Widget A","amount":"10.00","junk":"x"},'
+        '{"description":"Widget B","amount":"20.00"},'
+        '{"description":"Widget C"}'
+        ']}'
+    )
+    mock_llm = MockLLM(response_text=flat)
+    try:
+        async with session_scope() as session:
+            res = await extract_named_config(
+                session=session, ocr_text="multi row invoice", field_config_id=config_id, llm_model=mock_llm
+            )
+
+        assert res["headers"]["invoice_number"]["value"] == "INV-3001"
+        assert len(res["line_items"]) == 3  # all rows persisted (the fix)
+
+        # Every row aligns to exactly the two declared columns; undeclared "junk" dropped.
+        for row in res["line_items"]:
+            names = {c["column_name"] for c in row["columns"]}
+            assert names == {"description", "amount"}
+            assert "junk" not in names
+
+        # Row 3 had no "amount" -> filled as a declared-but-missing cell at confidence 0.0.
+        row3 = {c["column_name"]: c for c in res["line_items"][2]["columns"]}
+        assert row3["amount"]["value"] is None
+        assert float(row3["amount"]["confidence"]) == 0.0
+        # Present compact cells get the uniform default confidence.
+        assert float(row3["description"]["confidence"]) == 0.85
+    finally:
+        async with session_scope() as session:
+            db_cfg = await session.get(IdpFieldConfiguration, config_id)
+            if db_cfg:
+                await session.delete(db_cfg)
+            await session.commit()

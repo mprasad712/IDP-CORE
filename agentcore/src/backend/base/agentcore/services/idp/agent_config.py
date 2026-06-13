@@ -209,18 +209,38 @@ async def resolve_pipeline_config(
     prompt = _field(extractor, "prompt") or idp_agent.dynamic_prompt
     config_name = _field(extractor, "config_name")
 
-    # resolve named-config -> field_config_id (graph name first, else idp_agent column)
+    # resolve named-config -> field_config_id (graph name first, else idp_agent column).
+    # Deterministic when several configs share a name: prefer the agent's org (unique by the
+    # (org_id, name) constraint), else the NEWEST active config of that name — never an arbitrary
+    # .first() over unordered rows.
     field_config_id: UUID | None = idp_agent.field_config_id
     if mode == MODE_NAMED and config_name:
         try:
-            row = (
-                await session.exec(
-                    select(IdpFieldConfiguration).where(
-                        IdpFieldConfiguration.name == config_name,
-                        IdpFieldConfiguration.deleted_at.is_(None),
+            base_q = select(IdpFieldConfiguration).where(
+                IdpFieldConfiguration.name == config_name,
+                IdpFieldConfiguration.deleted_at.is_(None),
+                IdpFieldConfiguration.is_active.is_(True),
+            )
+            agent_org_id = getattr(base_agent, "org_id", None)
+            row = None
+            if agent_org_id is not None:
+                row = (
+                    await session.exec(
+                        base_q.where(IdpFieldConfiguration.org_id == agent_org_id)
+                        .order_by(IdpFieldConfiguration.created_at.desc())
                     )
-                )
-            ).first()
+                ).first()
+            if row is None:  # no org-scoped match -> ONLY global configs (org_id NULL), never
+                # another tenant's private config. Prefer a real global config over a catalogue
+                # template (is_template False sorts first), then newest. Deterministic + tenant-safe.
+                row = (
+                    await session.exec(
+                        base_q.where(IdpFieldConfiguration.org_id.is_(None)).order_by(
+                            IdpFieldConfiguration.is_template.asc(),
+                            IdpFieldConfiguration.created_at.desc(),
+                        )
+                    )
+                ).first()
             if row:
                 field_config_id = row.id
         except Exception as e:  # pragma: no cover - defensive

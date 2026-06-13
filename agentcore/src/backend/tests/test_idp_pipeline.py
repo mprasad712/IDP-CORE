@@ -1231,3 +1231,156 @@ async def test_pipeline_scanned_path(monkeypatch):
             assert doc.status in ("auto_approved", "pending_review", "failed")
     finally:
         await _cleanup(agent_id, doc_id)
+
+
+def test_flow_log_io_helpers_are_bounded():
+    """_clip caps text; _io_sample_rows/_io_headers cap rows/headers for the JSONB log."""
+    assert pipeline._clip("x" * 5000).startswith("x" * pipeline._IO_TEXT_SAMPLE)
+    assert "+" in pipeline._clip("x" * 5000)  # truncation marker
+    assert pipeline._clip("short") == "short"
+
+    extracted = {
+        "headers": {f"h{i}": {"value": str(i)} for i in range(50)},
+        "line_items": [{"columns": [{"column_name": "a", "value": str(i)}]} for i in range(10)],
+    }
+    assert len(pipeline._io_headers(extracted)) == pipeline._IO_MAX_HEADERS
+    assert len(pipeline._io_sample_rows(extracted)) == pipeline._IO_MAX_ROWS
+    assert pipeline._io_sample_rows(extracted)[0] == {"a": "0"}
+
+
+@pytest.mark.anyio
+async def test_pipeline_flow_log_carries_io_payloads(monkeypatch):
+    """The flow log must carry per-component input/output payloads for the UI to render
+    the 'complete cycle' (input received, OCR/text output, what the LLM returned)."""
+    from agentcore.services.database.models.idp.documents import IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch, result={
+        "headers": {"invoice_number": {"value": "INV-IO", "confidence": 0.95}},
+        "line_items": [
+            {"columns": [{"column_name": "description", "value": "Row A"}, {"column_name": "amount", "value": "10"}]},
+            {"columns": [{"column_name": "description", "value": "Row B"}, {"column_name": "amount", "value": "20"}]},
+        ],
+    })
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf())
+
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            by_step = {e["step"]: e for e in job.log}
+
+            # load -> input payload
+            assert by_step["load"]["io"]["input"]["filename"]
+            # native (digital) -> output text sample (string, bounded)
+            nat = by_step["native"]["io"]["output"]
+            assert isinstance(nat["text_sample"], str) and len(nat["text_sample"]) <= pipeline._IO_TEXT_SAMPLE + 32
+            # extract -> the "what the LLM gave" payload
+            ex = by_step["extract"]["io"]["output"]
+            assert ex["headers"]["invoice_number"] == "INV-IO"
+            assert ex["line_item_rows"] == 2
+            assert ex["sample_rows"][0] == {"description": "Row A", "amount": "10"}
+            # route -> decision payload
+            assert by_step["route"]["io"]["output"]["decision"] in ("auto_approved", "pending_review")
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_named_config_resolution_prefers_real_over_template(monkeypatch):
+    """When two active configs share a name (a catalogue template + a real config), resolution is
+    deterministic and picks the REAL config (is_template False), never the template — and never an
+    arbitrary .first() over unordered rows."""
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent, IdpFieldConfiguration
+    from agentcore.services.deps import session_scope
+
+    name = f"ResolveTest-{uuid4().hex[:8]}"
+    template_id, real_id = uuid4(), uuid4()
+    async with session_scope() as session:
+        # Insert the TEMPLATE first (older) ...
+        session.add(IdpFieldConfiguration(id=template_id, name=name, is_active=True, is_template=True))
+        await session.commit()
+    async with session_scope() as session:
+        # ... then the REAL config (newer, non-template).
+        session.add(IdpFieldConfiguration(id=real_id, name=name, is_active=True, is_template=False))
+        await session.commit()
+
+    try:
+        graph = {
+            "nodes": [
+                _node("AI Field Extractor", {"extraction_mode": "field_configuration", "config_name": name, "prompt": ""}),
+                _node("Large Language Model", {"registry_model": f"GPT | gpt-4o | {uuid4()}"}),
+            ],
+            "edges": [],
+        }
+        idp_agent = IdpAgent(id=uuid4(), agent_id=uuid4(), extraction_mode="named_config")
+        base_agent = Agent(id=uuid4(), name="x", data=graph)  # org_id None -> fallback ranking path
+
+        async with session_scope() as session:
+            cfg = await resolve_pipeline_config(session, idp_agent, base_agent)
+        assert cfg.field_config_id == real_id  # real config wins over the template
+    finally:
+        async with session_scope() as session:
+            for cid in (template_id, real_id):
+                row = await session.get(IdpFieldConfiguration, cid)
+                if row:
+                    await session.delete(row)
+            await session.commit()
+
+
+@pytest.mark.anyio
+async def test_named_config_resolution_never_leaks_another_orgs_config():
+    """Tenant safety: an agent with no org must NOT resolve to ANOTHER org's private config of the
+    same name — only global (org_id NULL) configs are eligible in the fallback."""
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent, IdpFieldConfiguration
+    from agentcore.services.database.models.organization.model import Organization
+    from agentcore.services.database.models.user.model import User
+    from agentcore.services.deps import session_scope
+
+    name = f"TenantTest-{uuid4().hex[:8]}"
+    user_id, org_id = uuid4(), uuid4()
+    global_id, foreign_id = uuid4(), uuid4()
+    async with session_scope() as session:
+        session.add(User(id=user_id, username=f"tt_{user_id.hex[:8]}@t.com", email=f"tt_{user_id.hex[:8]}@t.com",
+                         password="x", is_active=True, is_superuser=False, role="developer"))
+        await session.flush()
+        session.add(Organization(id=org_id, name=f"TenantOrg-{org_id.hex[:8]}", owner_user_id=user_id, created_by=user_id))
+        await session.flush()
+        # Org B's PRIVATE config (newer) + a GLOBAL config (older), same name.
+        session.add(IdpFieldConfiguration(id=global_id, name=name, is_active=True, is_template=False, org_id=None))
+        await session.flush()
+        session.add(IdpFieldConfiguration(id=foreign_id, name=name, is_active=True, is_template=False, org_id=org_id))
+        await session.commit()
+
+    try:
+        graph = {
+            "nodes": [
+                _node("AI Field Extractor", {"extraction_mode": "field_configuration", "config_name": name, "prompt": ""}),
+                _node("Large Language Model", {"registry_model": f"GPT | gpt-4o | {uuid4()}"}),
+            ],
+            "edges": [],
+        }
+        idp_agent = IdpAgent(id=uuid4(), agent_id=uuid4(), extraction_mode="named_config")
+        base_agent = Agent(id=uuid4(), name="x", data=graph)  # NO org -> must not see org B's config
+
+        async with session_scope() as session:
+            cfg = await resolve_pipeline_config(session, idp_agent, base_agent)
+        assert cfg.field_config_id == global_id        # the global config, ...
+        assert cfg.field_config_id != foreign_id       # ... never the other org's private config
+    finally:
+        async with session_scope() as session:
+            for cid in (global_id, foreign_id):
+                row = await session.get(IdpFieldConfiguration, cid)
+                if row:
+                    await session.delete(row)
+            org = await session.get(Organization, org_id)
+            if org:
+                await session.delete(org)
+            usr = await session.get(User, user_id)
+            if usr:
+                await session.delete(usr)
+            await session.commit()

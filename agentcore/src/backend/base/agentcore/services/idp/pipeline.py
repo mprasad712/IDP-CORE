@@ -89,6 +89,42 @@ class FlowLog:
         return head + "\n" + "\n".join(self.lines) + "\n"
 
 
+# ── flow-log io payload helpers (bounded, for the per-component input/output trace the UI renders) ──
+_IO_TEXT_SAMPLE = 800   # max chars of any text sample stored in the log
+_IO_VALUE_SAMPLE = 200  # max chars of a single header/cell value stored in the log
+_IO_MAX_ROWS = 3        # max sample line-item rows stored in the log
+_IO_MAX_HEADERS = 30    # max header name->value pairs stored in the log
+_IO_MAX_COLS = 30       # max columns per sampled line-item row stored in the log
+
+
+def _clip(text: Any, n: int = _IO_TEXT_SAMPLE) -> str:
+    """Return at most ``n`` chars of ``text`` (plus an ellipsis marker if truncated)."""
+    s = "" if text is None else str(text)
+    return s if len(s) <= n else s[:n] + f"…(+{len(s) - n} chars)"
+
+
+def _io_value(v: Any):
+    """Clip a single header/cell value for the log (None stays None; everything else bounded str)."""
+    return None if v is None else _clip(v, _IO_VALUE_SAMPLE)
+
+
+def _io_headers(extracted: dict) -> dict:
+    """A compact {name: value} view of extracted headers, capped at _IO_MAX_HEADERS and per-value."""
+    out: dict = {}
+    for name, h in list((extracted.get("headers") or {}).items())[:_IO_MAX_HEADERS]:
+        out[str(name)] = _io_value(h.get("value") if isinstance(h, dict) else h)
+    return out
+
+
+def _io_sample_rows(extracted: dict) -> list:
+    """First _IO_MAX_ROWS line-item rows as flat {column: value} dicts (bounded rows/cols/values)."""
+    rows = []
+    for row in (extracted.get("line_items") or [])[:_IO_MAX_ROWS]:
+        cols = (row.get("columns", []) if isinstance(row, dict) else [])[:_IO_MAX_COLS]
+        rows.append({c.get("column_name"): _io_value(c.get("value")) for c in cols if isinstance(c, dict)})
+    return rows
+
+
 # ─────────────────────────────── helpers ───────────────────────────────
 async def _build_llm(session, model_id: str):
     """Build a MicroserviceChatModel for a registry model UUID (validated)."""
@@ -242,7 +278,10 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
             new_status = "auto_approved"
         else:
             new_status = "pending_review"
-        flow.step("route", "ok", f"{new_status} (no rules; threshold={cfg.confidence_threshold})")
+        flow.step("route", "ok", f"{new_status} (no rules; threshold={cfg.confidence_threshold})",
+                  io={"input": {"overall_conf": round(float(overall_conf), 4), "rules_count": 0,
+                               "threshold": cfg.confidence_threshold, "default_action": cfg.default_rule_action},
+                      "output": {"decision": new_status}})
         return new_status
 
     # Re-query the just-saved fields + any detected visual elements for the rule conditions.
@@ -279,6 +318,8 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
         "route", "ok",
         f"{new_status} via rules (matched_group={matched}, failed={failed}, "
         f"{len(rules)} rule(s))",
+        io={"input": {"overall_conf": round(float(overall_conf), 4), "rules_count": len(rules)},
+            "output": {"decision": new_status, "matched_group": matched, "failed_conditions": failed}},
     )
     return new_status
 
@@ -486,6 +527,12 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             f"input received: '{doc.original_filename}' ({doc.file_size_bytes} bytes, .{doc.file_type}, "
             f"source={doc.source}) — document marked processing",
             document_id=str(document_id),
+            io={"input": {
+                "filename": doc.original_filename,
+                "size_bytes": doc.file_size_bytes,
+                "file_type": doc.file_type,
+                "source": doc.source,
+            }},
         )
 
         # resolve agents + config
@@ -540,19 +587,25 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         if overall_kind == text_layer.DIGITAL:
             _, tokens = text_layer.extract_native_text(original_bytes, file_type)
             _chars = sum(len(str(t.get("text", ""))) for t in tokens)
-            flow.step("native", "ok", f"digital — native text layer used (no OCR): {len(tokens)} token(s), {_chars} chars")
+            flow.step("native", "ok", f"digital — native text layer used (no OCR): {len(tokens)} token(s), {_chars} chars",
+                      io={"output": {"char_count": _chars, "token_count": len(tokens),
+                                     "text_sample": _clip(" ".join(str(t.get("text", "")) for t in tokens))}})
         elif overall_kind == text_layer.SCANNED:
             ocr_bytes = await _maybe_preprocess(original_bytes, file_type, cfg, flow)
             tokens = await run_paddle_ocr(ocr_bytes, file_type, cfg.ocr_lang)
             _chars = sum(len(str(t.get("text", ""))) for t in tokens)
-            flow.step("ocr", "ok", f"PaddleOCR ({cfg.ocr_lang}) output: {len(tokens)} token(s), {_chars} chars")
+            flow.step("ocr", "ok", f"PaddleOCR ({cfg.ocr_lang}) output: {len(tokens)} token(s), {_chars} chars",
+                      io={"output": {"char_count": _chars, "token_count": len(tokens),
+                                     "text_sample": _clip(" ".join(str(t.get("text", "")) for t in tokens))}})
         else:  # mixed: native text for digital pages, OCR for scanned pages
             _, native = text_layer.extract_native_text(original_bytes, file_type)
             tokens += [t for t in native if int(t.get("page_number", 1) or 1) in digital_pages]
             ocr_bytes = await _maybe_preprocess(original_bytes, file_type, cfg, flow)
             ocr = await run_paddle_ocr(ocr_bytes, file_type, cfg.ocr_lang)
             tokens += [t for t in ocr if int(t.get("page_number", 1) or 1) in scanned_pages]
-            flow.step("ocr", "ok", f"mixed: native {len(digital_pages)} digital + OCR {len(scanned_pages)} scanned page(s)")
+            flow.step("ocr", "ok", f"mixed: native {len(digital_pages)} digital + OCR {len(scanned_pages)} scanned page(s)",
+                      io={"output": {"token_count": len(tokens),
+                                     "text_sample": _clip(" ".join(str(t.get("text", "")) for t in tokens))}})
 
         # HOOK: B32 multi-doc split — operate on the WHOLE document (before page selection).
         # If the file holds several documents, materialise a child doc+job each and stop here;
@@ -618,6 +671,12 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                 "text", "ok",
                 f"merged page-numbered text built: {len(merged_text)} chars across {len(selected)} page(s) "
                 f"→ saved to ocr_output/{document_id}/ocr_text.txt",
+                io={"output": {
+                    "chars": len(merged_text),
+                    "pages": len(selected),
+                    "path": f"ocr_output/{document_id}/ocr_text.txt",
+                    "text_sample": _clip(merged_text),
+                }},
             )
         else:
             flow.step("text", "warn", "no text extracted from the document")
@@ -707,11 +766,21 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         _names = list(_headers.keys())
         _preview = ", ".join(_names[:12]) + ("…" if len(_names) > 12 else "")
         job.extraction_mode_used = cfg.extraction_mode
+        _ex = extracted if isinstance(extracted, dict) else {}
         flow.step(
             "extract", "ok",
             f"LLM ({cfg.extraction_mode}) returned {n_head} header field(s) [{_preview}] "
             f"+ {n_line} line-item row(s); overall confidence={overall_conf:.2f} → saved to "
             f"idp_extracted_headers/idp_extracted_line_items",
+            io={
+                "input": {"mode": cfg.extraction_mode, "chars": len(merged_text), "text_sample": _clip(merged_text)},
+                "output": {
+                    "headers": _io_headers(_ex),
+                    "line_item_rows": n_line,
+                    "sample_rows": _io_sample_rows(_ex),
+                    "overall_confidence": round(float(overall_conf), 4),
+                },
+            },
         )
 
         # HOOK: B36 cross-page entity linking — record entities seen on multiple pages.
