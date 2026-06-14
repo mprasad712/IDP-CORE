@@ -89,7 +89,7 @@ class AgentBundleBase(SQLModel):
     )
     created_by: UUID = Field(foreign_key="user.id", nullable=False, index=True)
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
         nullable=False,
     )
 

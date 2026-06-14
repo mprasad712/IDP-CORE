@@ -153,7 +153,16 @@ async def run_paddle_ocr(file_bytes: bytes, file_type: str, lang: str = "en") ->
     - PDF: all pages rendered via pdf2image → PaddleOCR (no scanned/digital check)
     - Images: PaddleOCR directly
     - XLSX/DOCX: native text extraction, no OCR
+
+    Runs the blocking OCR work in a thread executor so the event loop is never frozen.
     """
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _paddle_ocr_impl, file_bytes, file_type, lang)
+
+
+def _paddle_ocr_impl(file_bytes: bytes, file_type: str, lang: str = "en") -> list[dict]:
+    """Synchronous OCR — called via run_in_executor; never call directly from async code."""
     file_type = file_type.lower().strip(".")
     is_pdf = (file_type == "pdf")
 

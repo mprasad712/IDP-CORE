@@ -302,28 +302,39 @@ async def _hook_detect(session, document_id: UUID, file_bytes: bytes, file_type:
         flow.step("detect_elements", "warn", f"skipped ({e})")
 
 
-async def _hook_classify(session, document_id: UUID, base_agent, merged_text: str, cfg, flow: "FlowLog") -> None:
+async def _hook_classify(session, document_id: UUID, base_agent, merged_text: str, cfg, flow: "FlowLog") -> bool:
     """B29 document classification -> idp_document_classifications; may auto-select a Named Config.
 
     Mutates ``cfg`` in place (field_config_id + extraction_mode) when auto-select fires.
+    Returns True if the document should be skipped (type not in the user-selected doc_types list).
     """
     if not cfg.classify_enabled:
-        return
+        return False
     try:
         from agentcore.services.idp.classification import classify_and_persist
     except ImportError:
         flow.step("classify", "warn", "classification not available yet")
-        return
+        return False
     try:
         org_id = getattr(base_agent, "org_id", None)
+        doc_types = getattr(cfg, "classify_doc_types", None) or None
         # Isolated session: classify_and_persist commits internally; a failure must not poison
         # the main pipeline session (it would otherwise crash extraction/finalize).
         async with session_scope() as hook_session:
             result = await classify_and_persist(
                 hook_session, document_id, merged_text, org_id,
-                auto_select=cfg.classify_auto_select, threshold=cfg.classify_threshold,
+                auto_select=cfg.classify_auto_select,
+                threshold=cfg.classify_threshold,
+                doc_types=doc_types,
             )
         result = result if isinstance(result, dict) else {}
+
+        # Hard-skip gate: classification returned a skip signal (type not in selected types)
+        if result.get("skip"):
+            flow.step("classify", "skip",
+                      f"type={result.get('predicted_type')!r} not in selected types — document skipped")
+            return True
+
         sel = result.get("selected_config_id")
         if sel and cfg.classify_auto_select:
             cfg.field_config_id = sel if isinstance(sel, UUID) else UUID(str(sel))
@@ -335,6 +346,7 @@ async def _hook_classify(session, document_id: UUID, base_agent, merged_text: st
                       f"type={result.get('predicted_type')} conf={result.get('confidence')}")
     except Exception as e:
         flow.step("classify", "warn", f"skipped ({e})")
+    return False
 
 
 async def _hook_math_reconcile(extracted, llm, job, cfg, flow: "FlowLog"):
@@ -466,19 +478,23 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             f"page_select={cfg.page_selection_mode}, features=[{', '.join(_features) or 'none'}]",
         )
 
+        logger.info(f"[pipeline] {document_id}: fetching file from storage ({agent_scope}/{file_name})")
         file_bytes = await storage.get_file(agent_scope, file_name)
         file_type = (doc.file_type or "").lower().lstrip(".")
+        logger.info(f"[pipeline] {document_id}: file fetched ({len(file_bytes)} bytes, type={file_type})")
 
         # 1. extension gate
         if cfg.allowed_extensions and file_type not in cfg.allowed_extensions and cfg.skip_unmatched:
             raise PipelineError(f"file type '{file_type}' not allowed by this agent")
 
         # 2. detect digital/scanned (per page)
+        logger.info(f"[pipeline] {document_id}: classifying document (digital/scanned)")
         original_bytes = file_bytes
         overall_kind, page_status = text_layer.classify_document(
             original_bytes, file_type, min_text_length=cfg.min_text_length
         )
         flow.step("detect", "ok", f"{overall_kind} ({len(page_status)} page(s))", page_status=page_status)
+        logger.info(f"[pipeline] {document_id}: detected as {overall_kind} ({len(page_status)} pages)")
 
         digital_pages = {int(p) for p, k in page_status.items() if k == text_layer.DIGITAL}
         scanned_pages = {int(p) for p, k in page_status.items() if k == text_layer.SCANNED}
@@ -572,10 +588,24 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         else:
             flow.step("text", "warn", "no text extracted from the document")
 
+        logger.info(f"[pipeline] {document_id}: starting classification (classify_enabled={cfg.classify_enabled})")
         # HOOK: B29 classification — may set cfg.predicted_type + auto-select a Named Config
         # (mutates cfg.field_config_id / cfg.extraction_mode) before extraction runs.
-        await _hook_classify(session, document_id, base_agent, merged_text, cfg, flow)
+        # Returns True when doc_types filter is active and document type is not in selected list.
+        classify_skip = await _hook_classify(session, document_id, base_agent, merged_text, cfg, flow)
+        if classify_skip:
+            doc.status = "skipped"
+            doc.processing_completed_at = _utcnow()
+            job.status = "completed"
+            job.completed_at = _utcnow()
+            job.steps_completed = flow.steps_ok
+            job.log = flow.events
+            session.add(doc)
+            session.add(job)
+            await session.commit()
+            return
 
+        logger.info(f"[pipeline] {document_id}: starting extraction (mode={cfg.extraction_mode})")
         # 5. extract (text modes; multimodal parked)
         if cfg.multimodal_requested:
             flow.step("extract", "warn", "multimodal parked -> using text extraction")  # MULTIMODAL HOOK (PARKED)

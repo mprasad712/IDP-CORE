@@ -1,7 +1,11 @@
+import io
+import mimetypes
 from datetime import datetime, timezone
+from loguru import logger
 from typing import Annotated
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Response
+from fastapi.responses import StreamingResponse
 from fastapi_pagination import Params, Page
 from fastapi_pagination.ext.sqlmodel import apaginate
 from sqlmodel import select, or_, and_
@@ -18,6 +22,7 @@ from agentcore.services.database.models.idp.config import IdpAgent, IdpReviewSes
 from agentcore.services.database.models.agent.model import Agent
 from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
 from agentcore.services.auth.permissions import normalize_role
+from agentcore.services.deps import get_storage_service
 
 router = APIRouter(prefix="/processed-docs", tags=["IDP Processed Documents"])
 
@@ -150,12 +155,19 @@ async def list_processed_docs(
     role = normalize_role(getattr(current_user, "role", None))
     org_ids = await _get_scope_memberships(session, current_user.id)
 
-    # Base query joining IdpDocument -> IdpAgent -> Agent to enforce scoping
+    # Base query joining IdpDocument -> IdpAgent -> Agent to enforce scoping.
+    # Only include docs from agents whose canvas has the "Processed Docs Output" node wired up
+    # (stored as extra->>'has_processed_docs_output' = 'true' on the IdpAgent row).
     stmt = select(IdpDocument)
     if role != "root":
         stmt = stmt.join(IdpAgent, IdpDocument.agent_id == IdpAgent.id)
         stmt = stmt.join(Agent, IdpAgent.agent_id == Agent.id)
         stmt = stmt.where(Agent.org_id.in_(list(org_ids)))
+        stmt = stmt.where(IdpAgent.extra["has_processed_docs_output"].astext == "true")
+    else:
+        # root sees all — but still scope to agents with the output node wired up
+        stmt = stmt.join(IdpAgent, IdpDocument.agent_id == IdpAgent.id)
+        stmt = stmt.where(IdpAgent.extra["has_processed_docs_output"].astext == "true")
 
     # Apply query filters
     if status_filter:
@@ -221,6 +233,76 @@ async def get_processed_doc(
     detail.line_items = line_items
     detail.error_message = last_job.error_message if last_job else None
     return detail
+
+
+def _storage_parts(file_path: str) -> tuple[str, str]:
+    """Split '{scope}/{name}' → (scope, name). Uses the scope from file_path, not doc.agent_id,
+    because the file was saved under this exact scope at upload/split time."""
+    if "/" in file_path:
+        scope, name = file_path.split("/", 1)
+        return scope, name
+    return "", file_path
+
+
+@router.get("/{id}/file")
+async def get_processed_doc_file(
+    *,
+    session: DbSession,
+    id: UUID,
+    current_user: CurrentActiveUser,
+):
+    """Stream the raw document file (PDF, image, etc.) for inline preview.
+
+    Falls back to the parent document's file when a split child document's own
+    page-range PDF is not found in storage (child page files may not be persisted
+    on all deployment configurations).
+    """
+    doc = await session.get(IdpDocument, id)
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if not await _can_access_document(session, current_user, doc):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    storage = get_storage_service()
+
+    async def _fetch(d: IdpDocument) -> bytes | None:
+        scope, fname = _storage_parts(d.file_path)
+        # Use scope from file_path (set at upload time) — more reliable than str(d.agent_id)
+        # which could drift if the agent config was ever remapped.
+        agent_scope = scope or str(d.agent_id)
+        try:
+            return await storage.get_file(agent_scope, fname)
+        except Exception as exc:
+            logger.warning(
+                f"[processed-docs/file] doc={d.id} scope={agent_scope!r} file={fname!r} → {exc}"
+            )
+            return None
+
+    file_bytes = await _fetch(doc)
+    serving_doc = doc
+
+    # If the document's own file is missing and it's a split child, try the parent.
+    if file_bytes is None and doc.parent_document_id is not None:
+        parent = await session.get(IdpDocument, doc.parent_document_id)
+        if parent:
+            file_bytes = await _fetch(parent)
+            if file_bytes is not None:
+                serving_doc = parent
+
+    if file_bytes is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found in storage")
+
+    mime_type = (
+        serving_doc.mime_type
+        or mimetypes.guess_type(serving_doc.original_filename)[0]
+        or "application/octet-stream"
+    )
+    return StreamingResponse(
+        io.BytesIO(file_bytes),
+        media_type=mime_type,
+        headers={"Content-Disposition": f'inline; filename="{serving_doc.original_filename}"'},
+    )
 
 
 @router.patch("/{id}/fields", response_model=ProcessedDocDetailRead)
