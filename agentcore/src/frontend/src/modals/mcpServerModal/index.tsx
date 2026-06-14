@@ -519,7 +519,7 @@ export default function AddMcpServerModal({
 
   useEffect(() => {
     if (!open) return;
-    if ((normalizedRole === "developer" || normalizedRole === "department_admin") && visibilityOptions.departments.length > 0) {
+    if ((normalizedRole === "idp_configurator" || normalizedRole === "department_admin") && visibilityOptions.departments.length > 0) {
       const firstDept = visibilityOptions.departments[0];
       if (!deptId) setDeptId(firstDept.id);
       if (!orgId) setOrgId(firstDept.org_id);
@@ -783,7 +783,7 @@ export default function AddMcpServerModal({
                         value={orgId}
                         onChange={(event) => setOrgId(event.target.value)}
                         className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                        disabled={isPending || normalizedRole === "developer" || normalizedRole === "department_admin"}
+                        disabled={isPending || normalizedRole === "idp_configurator" || normalizedRole === "department_admin"}
                       >
                         <option value="">Select organization</option>
                         {visibilityOptions.organizations.map((org) => (
@@ -851,7 +851,7 @@ export default function AddMcpServerModal({
                             value={deptId}
                             onChange={(event) => setDeptId(event.target.value)}
                             className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                            disabled={isPending || normalizedRole === "developer" || normalizedRole === "department_admin"}
+                            disabled={isPending || normalizedRole === "idp_configurator" || normalizedRole === "department_admin"}
                           >
                             <option value="">Select department</option>
                             {departmentsForSelectedOrg.map((dept) => (

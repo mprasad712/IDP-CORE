@@ -17,7 +17,7 @@ from loguru import logger
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from agentcore.services.database.models.idp.config import IdpAgent, IdpFieldConfiguration
+from agentcore.services.database.models.idp.config import IdpAgent, IdpAgentRule, IdpFieldConfiguration
 
 # Node display names on the canvas (components/IDP/*, components/models/registry_model.py)
 _N_EXTRACTOR = "AI Field Extractor"
@@ -29,6 +29,9 @@ _N_DETECTOR = "Document Type Detector"
 _N_CLASSIFIER = "Document Classifier"
 _N_DETECTION = "Visual Element Detection"
 _N_MATH = "Math Reconcile"
+_N_CONFIDENCE_ROUTER = "Confidence Router"
+_N_CHUNKING = "Chunking Strategy"
+_N_RULES = "Rules / Conditions"
 # Visual Element Detection node toggles -> the element types the backend detector ACTUALLY
 # emits (signature, checkbox, qr, barcode). Stamps/logos/handwriting are not yet detected by
 # the backend, so those node toggles are intentionally NOT mapped — mapping them would put a
@@ -79,6 +82,7 @@ class ResolvedPipelineConfig:
     classify_enabled: bool = False
     classify_auto_select: bool = True
     classify_threshold: float = 0.7
+    classify_doc_types: list[str] = field(default_factory=list)
     detect_enabled: bool = False
     detect_enabled_types: set[str] | None = None
     math_reconcile_enabled: bool = False
@@ -313,11 +317,23 @@ async def resolve_pipeline_config(
     classifier_node = _find_node(data, _N_CLASSIFIER)
     detection_node = _find_node(data, _N_DETECTION)
     math_node = _find_node(data, _N_MATH)
+    confidence_router_node = _find_node(data, _N_CONFIDENCE_ROUTER)
 
     classify_enabled = classifier_node is not None or _as_bool(extra.get("classify_enabled"), False)
+    # classify_threshold: min confidence for classification acceptance (DocumentClassifier node)
     classify_threshold = _to_float(
         _field(classifier_node, "confidence_threshold") if classifier_node else extra.get("classify_threshold"), 0.7
     )
+    # classify_doc_types: if non-empty, classifier filters against only these types; non-matches are skipped
+    raw_doc_types = _field(classifier_node, "document_types") if classifier_node else None
+    classify_doc_types: list[str] = (
+        [t for t in raw_doc_types if isinstance(t, str) and t.strip()]
+        if isinstance(raw_doc_types, list) else []
+    )
+
+    # ConfidenceRouter threshold overrides the extra/default confidence_threshold
+    if confidence_router_node:
+        confidence_threshold = _to_float(_field(confidence_router_node, "threshold"), confidence_threshold)
 
     detect_enabled = detection_node is not None or _as_bool(extra.get("detect_enabled"), False)
     if detection_node is not None:
@@ -342,6 +358,8 @@ async def resolve_pipeline_config(
     math_reconcile_tolerance = _to_float(
         _field(math_node, "tolerance") if math_node else extra.get("math_reconcile_tolerance"), 0.01
     )
+    # NOTE: long_doc_max_tokens + long_doc_overlap_tokens are already resolved from the Chunking
+    # Strategy node in the "Chunking settings" block above; no recomputation needed here.
 
     return ResolvedPipelineConfig(
         model_id=model_id,
@@ -368,6 +386,7 @@ async def resolve_pipeline_config(
         classify_enabled=classify_enabled,
         classify_auto_select=_as_bool(extra.get("classify_auto_select"), True),
         classify_threshold=classify_threshold,
+        classify_doc_types=classify_doc_types,
         detect_enabled=detect_enabled,
         detect_enabled_types=detect_enabled_types,
         math_reconcile_enabled=math_reconcile_enabled,
@@ -404,6 +423,66 @@ def _idp_extraction_mode(graph_mode: str | None) -> str:
     return "dynamic_prompting"
 
 
+async def _sync_canvas_rules(session: AsyncSession, data: dict | None, idp_agent_id: UUID) -> None:
+    """Replace all IdpAgentRule rows with the conditions from the 'Rules / Conditions' canvas node.
+
+    The canvas is treated as the authoritative source of rules. If the node is absent, all
+    existing rules are still deleted (clean slate). Errors are caught so a rules-sync failure
+    never breaks the agent save.
+    """
+    try:
+        existing_rules = (
+            await session.exec(select(IdpAgentRule).where(IdpAgentRule.idp_agent_id == idp_agent_id))
+        ).all()
+        for r in existing_rules:
+            await session.delete(r)
+
+        rules_node = _find_node(data, _N_RULES)
+        if rules_node:
+            combinator = str(_field(rules_node, "logic_operator") or "AND").upper()
+            if combinator not in ("AND", "OR"):
+                combinator = "AND"
+            raw_conditions = _field(rules_node, "conditions") or []
+            if not isinstance(raw_conditions, list):
+                raw_conditions = []
+
+            for i, cond in enumerate(raw_conditions):
+                if not isinstance(cond, dict):
+                    continue
+                canvas_field = str(cond.get("field", "")).strip()
+                op = str(cond.get("op", "eq")).strip()
+                val = str(cond.get("value", "")).strip()
+
+                if canvas_field in ("confidence", "overall_confidence"):
+                    ctype = "confidence_overall"
+                    db_field = None
+                else:
+                    ctype = "field_value_numeric"
+                    db_field = canvas_field
+
+                session.add(
+                    IdpAgentRule(
+                        idp_agent_id=idp_agent_id,
+                        rule_group=1,
+                        condition_type=ctype,
+                        field_name=db_field,
+                        operator=op,
+                        value=val,
+                        combinator=combinator,
+                        action="auto_approve",
+                        display_order=i,
+                    )
+                )
+
+        await session.commit()
+    except Exception as e:
+        logger.warning(f"[agent_config] canvas rules sync failed (non-fatal): {e}")
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+
+
 async def sync_idp_agent_from_graph(session: AsyncSession, base_agent, user_id) -> None:
     """Create or sync the IdpAgent row for an agent whose graph contains IDP nodes, so a
     builder-built agent becomes processable without a manual DB insert.
@@ -417,27 +496,37 @@ async def sync_idp_agent_from_graph(session: AsyncSession, base_agent, user_id) 
 
     extractor = _find_node(data, _N_EXTRACTOR)
     mode = _idp_extraction_mode(_field(extractor, "extraction_mode"))
+    has_processed_docs_output = _find_node(data, "Processed Docs Output") is not None
+    agent_extra = {"has_processed_docs_output": has_processed_docs_output}
 
     # Query WITHOUT the deleted_at filter: agent_id is UNIQUE across ALL rows (incl. soft-deleted),
     # so a deleted_at-only filter could miss a soft-deleted row and then INSERT a duplicate
     # (IntegrityError). If a soft-deleted row exists, reactivate it instead.
     existing = (await session.exec(select(IdpAgent).where(IdpAgent.agent_id == base_agent.id))).first()
     if existing is None:
-        session.add(
-            IdpAgent(
-                agent_id=base_agent.id,
-                extraction_mode=mode,
-                default_rule_action="pending_review",
-                is_active=True,
-                created_by=user_id,
-                updated_by=user_id,
-            )
+        new_agent = IdpAgent(
+            agent_id=base_agent.id,
+            extraction_mode=mode,
+            default_rule_action="pending_review",
+            is_active=True,
+            extra=agent_extra,
+            created_by=user_id,
+            updated_by=user_id,
         )
+        session.add(new_agent)
+        await session.commit()
+        await session.refresh(new_agent)
+        idp_agent = new_agent
     else:
         existing.extraction_mode = mode
         existing.is_active = True
         existing.deleted_at = None  # reactivate if it had been soft-deleted (agent still has IDP nodes)
         existing.updated_by = user_id
         existing.updated_at = datetime.now(timezone.utc)
+        existing.extra = {**(existing.extra or {}), **agent_extra}
         session.add(existing)
-    await session.commit()
+        await session.commit()
+        idp_agent = existing
+
+    # Sync canvas Rules / Conditions node → idp_agent_rules table
+    await _sync_canvas_rules(session, data, idp_agent.id)

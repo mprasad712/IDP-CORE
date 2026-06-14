@@ -20,9 +20,9 @@ from agentcore.services.database.models.user_organization_membership.model impor
 ACTIVE_ORG_STATUSES = {"accepted", "active"}
 ACTIVE_DEPT_STATUS = "active"
 
-DEPT_ADMIN_VISIBLE_ROLES = {"business_user", "developer"}
-SUPER_ADMIN_VISIBLE_ROLES = {"department_admin", "business_user", "developer"}
-ROOT_VISIBLE_ROLES = {"super_admin", "department_admin", "business_user", "developer"}
+DEPT_ADMIN_VISIBLE_ROLES = {"doc_reviewer", "idp_configurator"}
+SUPER_ADMIN_VISIBLE_ROLES = {"department_admin", "doc_reviewer", "idp_configurator"}
+ROOT_VISIBLE_ROLES = {"super_admin", "department_admin", "doc_reviewer", "idp_configurator"}
 
 
 class ObservabilityScopeError(ValueError):
@@ -190,7 +190,7 @@ async def resolve_observability_scope(
     target_dept_ids: set[UUID] = set()
     target_org_ids: set[UUID] = set()
 
-    if role in {"business_user", "developer", "consumer"}:
+    if role in {"doc_reviewer", "idp_configurator", "doc_submitter"}:
         target_dept_ids = dept_ids
         if selected_dept_id and selected_dept_id in dept_ids:
             target_dept_ids = {selected_dept_id}
@@ -256,7 +256,7 @@ async def resolve_observability_scope(
                     role_names=SUPER_ADMIN_VISIBLE_ROLES,
                 )
 
-    elif role in {"root", "leader_executive"}:
+    elif role in {"root", "idp_auditor"}:
         if enforce_filter_for_admin and selected_org_id is None and selected_dept_id is None:
             raise ObservabilityScopeError("org_id or dept_id is required for root observability.")
         if selected_department:
@@ -302,7 +302,7 @@ async def resolve_observability_scope(
     # because super_admin trace writes land in the `<org>-admin-observability`
     # project (see resolve_write_langfuse_binding). Department bindings are
     # still included so admin reads can see per-dept data too.
-    if role in {"root", "super_admin", "leader_executive"} and target_org_ids and trace_scope != "dept":
+    if role in {"root", "super_admin", "idp_auditor"} and target_org_ids and trace_scope != "dept":
         bindings.extend(await _active_org_admin_bindings(session, target_org_ids))
     if target_dept_ids:
         bindings.extend(await _active_department_bindings(session, target_dept_ids))

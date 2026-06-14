@@ -42,7 +42,6 @@ const NoInputView: React.FC<NoInputViewProps> = ({
   const [result, setResult] = useState<any>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { run: uploadAndProcess } = useUploadAndProcess();
 
@@ -55,7 +54,18 @@ const NoInputView: React.FC<NoInputViewProps> = ({
 
   useEffect(() => () => stopPolling(), []);
 
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollCountRef = useRef(0);
+  const MAX_POLLS = 240; // 240 × 2500 ms = 10 minutes
+
   const pollForResult = async (documentId: string) => {
+    pollCountRef.current += 1;
+    if (pollCountRef.current > MAX_POLLS) {
+      setState("error");
+      setErrorMsg("Processing timed out — check the backend logs for details");
+      setErrorData({ title: "Processing timed out", list: ["The document has been processing for over 10 minutes. Check the backend logs."] });
+      return;
+    }
     try {
       const res = await api.get(
         `${getURL("IDP_PROCESSED_DOCS")}/${documentId}`,
@@ -67,6 +77,8 @@ const NoInputView: React.FC<NoInputViewProps> = ({
         "auto_approved",
         "reviewed",
         "failed",
+        "skipped",
+        "split",
       ];
       if (terminal.includes(doc.status)) {
         if (doc.status === "failed") {
@@ -74,6 +86,10 @@ const NoInputView: React.FC<NoInputViewProps> = ({
           setState("error");
           setErrorMsg(msg);
           setErrorData({ title: "Processing failed", list: [msg] });
+        } else if (doc.status === "skipped") {
+          setState("error");
+          setErrorMsg("Document type not in selected types — document was skipped");
+          setErrorData({ title: "Document skipped", list: ["The document type was not in the configured list and was skipped."] });
         } else {
           setResult(doc);
           setState("done");
@@ -92,6 +108,7 @@ const NoInputView: React.FC<NoInputViewProps> = ({
     try {
       setState("uploading");
       setErrorMsg("");
+      pollCountRef.current = 0;
       const processResult = await uploadAndProcess(currentAgentId, file);
       setState("processing");
       pollForResult(String(processResult.document_id));

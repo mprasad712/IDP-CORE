@@ -34,12 +34,12 @@ class Department(SQLModel, table=True):  # type: ignore[call-arg]
     created_by: UUID = Field(foreign_key="user.id", nullable=False)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
-        sa_column=Column(DateTime(), nullable=False),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
     )
     updated_by: UUID | None = Field(default=None, foreign_key="user.id", nullable=True)
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
-        sa_column=Column(DateTime(), nullable=False),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
     )
 
     __table_args__ = (

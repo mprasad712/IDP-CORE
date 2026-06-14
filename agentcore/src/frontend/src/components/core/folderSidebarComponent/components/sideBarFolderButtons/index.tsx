@@ -542,6 +542,13 @@ const SideBarFoldersButtonsComponent = ({
                 </SidebarMenuButton>
               </SidebarMenuItem>
 
+              <SidebarMenuItem>
+                <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-upload")} onClick={() => _navigate("/idp-upload")} className={navBtn}>
+                  <ForwardedIconComponent name="UploadCloud" className="h-4 w-4 flex-shrink-0" />
+                  {t("Document Upload")}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
               {/* ─ System ─ */}
               {(can("view_platform_configs") || can("view_help_support_page")) && (
                 <SectionLabel label="System" />

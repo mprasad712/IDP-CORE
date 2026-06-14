@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel
-from sqlalchemy import JSON, Column, DateTime
+from sqlalchemy import JSON, Column, DateTime  # noqa: F401 (DateTime used in sa_column)
 from sqlmodel import Field, Relationship, SQLModel
 
 from agentcore.schema.serialize import UUIDstr
@@ -31,14 +31,14 @@ class User(SQLModel, table=True):  # type: ignore[call-arg]
     profile_image: str | None = Field(default=None, nullable=True)
     is_active: bool = Field(default=False)
     is_superuser: bool = Field(default=False)
-    role: str = Field(default="developer", max_length=50)
+    role: str = Field(default="doc_submitter", max_length=50)
     creator_email: str | None = Field(default=None, nullable=True)
     creator_role: str | None = Field(default=None, nullable=True, max_length=50)
     department_admin_email: str | None = Field(default=None, nullable=True)
     department_name: str | None = Field(default=None, nullable=True)
-    create_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    last_login_at: datetime | None = Field(default=None, nullable=True)
+    create_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False, server_default="now()"))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False, server_default="now()"))
+    last_login_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     deleted_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     store_api_key: str | None = Field(default=None, nullable=True)
     department_name: str | None = Field(default=None, nullable=True, max_length=255, index=True)
@@ -69,7 +69,7 @@ class UserCreate(SQLModel):
     display_name: str | None = None
     password: str | None = None
     is_active: bool | None = None
-    role: str = Field(default="developer", max_length=50)
+    role: str = Field(default="doc_submitter", max_length=50)
     department_admin_email: str | None = None
     department_name: str | None = None
     department_id: UUID | None = None

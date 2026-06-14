@@ -243,7 +243,7 @@ async def create_project(
 
         if new_project.org_id is None and org_ids:
             new_project.org_id = sorted(org_ids, key=str)[0]
-        if user_role in {"department_admin", "developer", "business_user"} and not dept_ids:
+        if user_role in {"department_admin", "idp_configurator", "doc_reviewer"} and not dept_ids:
             raise HTTPException(status_code=400, detail="No active department mapping found for user.")
         if new_project.dept_id is None and dept_ids:
             new_project.dept_id = sorted(dept_ids, key=str)[0]
@@ -420,7 +420,7 @@ async def read_projects(
                 department_name = dept_map.get(creator_id) if creator_id else None
                 organization_name = org_map.get(creator_id) if creator_id else None
 
-                if role in {"developer", "business_user"}:
+                if role in {"idp_configurator", "doc_reviewer"}:
                     created_by_email = None
                     department_name = None
                     organization_name = None
@@ -507,7 +507,7 @@ async def read_project(
                 Agent.deleted_at.is_(None),
             )
             current_role = normalize_role(getattr(current_user, "role", None))
-            if current_role in {"developer", "business_user"}:
+            if current_role in {"idp_configurator", "doc_reviewer"}:
                 stmt = stmt.where(Agent.user_id == current_user.id)
             elif current_role == "department_admin":
                 _, dept_ids = await _get_scope_memberships(session, current_user.id)
@@ -541,7 +541,7 @@ async def read_project(
 
     current_role = normalize_role(getattr(current_user, "role", None))
     agents_in_scope = [agent for agent in project.agents if agent.deleted_at is None]
-    if current_role in {"developer", "business_user"}:
+    if current_role in {"idp_configurator", "doc_reviewer"}:
         agents_in_scope = [agent for agent in agents_in_scope if agent.user_id == current_user.id]
     elif current_role == "department_admin":
         _, dept_ids = await _get_scope_memberships(session, current_user.id)

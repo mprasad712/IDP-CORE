@@ -2,8 +2,8 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import String, Text, UniqueConstraint
-from sqlmodel import Field, SQLModel, Column, JSON
+from sqlalchemy import Column, DateTime, String, Text, UniqueConstraint
+from sqlmodel import Field, SQLModel, JSON
 
 
 class DatasetBase(SQLModel):
@@ -28,8 +28,8 @@ class Dataset(DatasetBase, table=True):
     user_id: UUID = Field(foreign_key="user.id", index=True, nullable=False)
     org_id: UUID | None = Field(default=None, foreign_key="organization.id", index=True, nullable=True)
     dept_id: UUID | None = Field(default=None, foreign_key="department.id", index=True, nullable=True)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
 
     def to_response(self, *, item_count: int = 0, created_by: str | None = None) -> dict:
         return {

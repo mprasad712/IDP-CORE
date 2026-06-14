@@ -4,8 +4,6 @@ import {
   Trash2,
   Eye,
   ChevronLeft,
-  ZoomIn,
-  ZoomOut,
   Maximize2,
   FileText,
   CheckCircle2,
@@ -15,10 +13,9 @@ import {
   X,
   Plus,
   RotateCcw,
-  ChevronUp,
-  ChevronDown,
 } from "lucide-react";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -51,6 +48,7 @@ import {
   type ProcessedDoc as ApiProcessedDoc,
   type ProcessedDocDetail,
 } from "@/controllers/API/queries/idp";
+import { api } from "@/controllers/API/api";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -74,6 +72,7 @@ interface ProcessedDoc {
   sourceAgent: string;
   dateProcessed: string;
   documentType: string;
+  fileType: string;
   overallConfidence: number;
   status: DocStatus;
   headerFields: ExtractedField[];
@@ -99,6 +98,7 @@ function listDocToPage(d: ApiProcessedDoc): ProcessedDoc {
     sourceAgent: d.agent_id.slice(0, 8),
     dateProcessed: (d.processing_completed_at ?? d.created_at ?? "").slice(0, 10),
     documentType: d.predicted_type ?? d.file_type ?? "—",
+    fileType: (d.file_type ?? "").toLowerCase().replace(/^\./, ""),
     overallConfidence: Math.round((d.overall_confidence ?? 0) * 100),
     status: mapApiStatus(d.status),
     headerFields: [],
@@ -136,6 +136,7 @@ const SEED_DOCS: ProcessedDoc[] = [
     sourceAgent: "Invoice Processor",
     dateProcessed: "2026-06-04 09:12",
     documentType: "Invoice",
+    fileType: "pdf",
     overallConfidence: 92,
     status: "auto_approved",
     headerFields: [
@@ -158,6 +159,7 @@ const SEED_DOCS: ProcessedDoc[] = [
     sourceAgent: "KYC Extractor",
     dateProcessed: "2026-06-04 09:45",
     documentType: "PAN Card",
+    fileType: "png",
     overallConfidence: 61,
     status: "pending",
     headerFields: [
@@ -175,6 +177,7 @@ const SEED_DOCS: ProcessedDoc[] = [
     sourceAgent: "Receipt Scanner",
     dateProcessed: "2026-06-03 17:20",
     documentType: "Receipt",
+    fileType: "jpg",
     overallConfidence: 88,
     status: "reviewed",
     reviewer: "jane.doe@pwc.com",
@@ -238,60 +241,150 @@ function StatusChip({ status }: { status: DocStatus }) {
 
 // ─── Document Viewer ──────────────────────────────────────────────────────────
 
+const IMAGE_TYPES = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif"]);
+const PDF_TYPES   = new Set(["pdf"]);
+
 function DocumentViewer({ doc }: { doc: ProcessedDoc }) {
-  const [zoom, setZoom] = useState(100);
+  const ft = doc.fileType.toLowerCase();
+  const isSeedDoc = ["1", "2", "3"].includes(doc.id);
+
+  // Fetch the file via the authenticated axios client to avoid credential errors
+  // when using a raw <iframe src> or <img src> (those requests don't carry auth headers).
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [fetchError, setFetchError] = useState(false);
+
+  useEffect(() => {
+    if (isSeedDoc) return;
+    let revoked = false;
+    setFetchError(false);
+    setBlobUrl(null);
+    api
+      .get(`/api/v1/idp/processed-docs/${doc.id}/file`, { responseType: "blob" })
+      .then((res) => {
+        if (revoked) return;
+        const url = URL.createObjectURL(res.data as Blob);
+        setBlobUrl(url);
+      })
+      .catch(() => {
+        if (!revoked) setFetchError(true);
+      });
+    return () => {
+      revoked = true;
+      setBlobUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; });
+    };
+  }, [doc.id, isSeedDoc]);
+
+  const handleDownload = () => {
+    if (!blobUrl) return;
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = doc.name;
+    a.click();
+  };
+
+  const toolbar = (
+    <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/5 bg-[#111]/60 backdrop-blur-sm flex-shrink-0">
+      <span className="text-xs font-medium text-white/60 truncate max-w-[200px]">{doc.name}</span>
+      <div className="flex items-center gap-0.5">
+        {blobUrl && (
+          <>
+            <button
+              onClick={handleDownload}
+              className="p-1.5 rounded text-white/40 hover:text-white/80 hover:bg-white/5 transition-colors"
+              title="Download"
+            >
+              <Download className="h-3.5 w-3.5" />
+            </button>
+            <a
+              href={blobUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="p-1.5 rounded text-white/40 hover:text-white/80 hover:bg-white/5 transition-colors"
+              title="Open in new tab"
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+            </a>
+          </>
+        )}
+      </div>
+    </div>
+  );
+
+  if (isSeedDoc) {
+    return (
+      <div className="flex flex-col h-full bg-[#1a1a1a]">
+        {toolbar}
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-white/30">
+          <FileText className="h-12 w-12" />
+          <p className="text-xs tracking-wide">Sample document — no file stored</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!blobUrl && !fetchError) {
+    return (
+      <div className="flex flex-col h-full bg-[#1a1a1a]">
+        {toolbar}
+        <div className="flex-1 flex items-center justify-center">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-white/60" />
+        </div>
+      </div>
+    );
+  }
+
+  if (fetchError) {
+    return (
+      <div className="flex flex-col h-full bg-[#1a1a1a]">
+        {toolbar}
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-white/40">
+          <FileText className="h-10 w-10 text-white/20" />
+          <p className="text-xs">Could not load document</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (PDF_TYPES.has(ft)) {
+    return (
+      <div className="flex flex-col h-full bg-[#1a1a1a]">
+        {toolbar}
+        <iframe
+          src={blobUrl!}
+          className="flex-1 w-full border-0"
+          title={doc.name}
+        />
+      </div>
+    );
+  }
+
+  if (IMAGE_TYPES.has(ft)) {
+    return (
+      <div className="flex flex-col h-full bg-[#1a1a1a]">
+        {toolbar}
+        <div className="flex-1 flex items-center justify-center p-6 overflow-auto min-h-0">
+          <img
+            src={blobUrl!}
+            alt={doc.name}
+            className="max-w-full max-h-full object-contain shadow-2xl rounded-sm"
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full bg-[#1a1a1a]">
-      {/* toolbar */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/5 bg-[#111]/60 backdrop-blur-sm flex-shrink-0">
-        <span className="text-xs font-medium text-white/60 truncate max-w-[200px]">{doc.name}</span>
-        <div className="flex items-center gap-0.5">
-          <button
-            onClick={() => setZoom((z) => Math.max(40, z - 10))}
-            className="p-1.5 rounded text-white/40 hover:text-white/80 hover:bg-white/5 transition-colors"
-          >
-            <ZoomOut className="h-3.5 w-3.5" />
-          </button>
-          <span className="text-xs text-white/50 w-10 text-center tabular-nums">{zoom}%</span>
-          <button
-            onClick={() => setZoom((z) => Math.min(200, z + 10))}
-            className="p-1.5 rounded text-white/40 hover:text-white/80 hover:bg-white/5 transition-colors"
-          >
-            <ZoomIn className="h-3.5 w-3.5" />
-          </button>
-          <div className="w-px h-4 bg-white/10 mx-1" />
-          <button className="p-1.5 rounded text-white/40 hover:text-white/80 hover:bg-white/5 transition-colors">
-            <Maximize2 className="h-3.5 w-3.5" />
-          </button>
-          <button className="p-1.5 rounded text-white/40 hover:text-white/80 hover:bg-white/5 transition-colors">
-            <Download className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      </div>
-
-      {/* viewer — fills all remaining height */}
-      <div className="flex-1 flex items-center justify-center p-6 overflow-auto min-h-0">
-        <div
-          className="relative bg-white shadow-2xl rounded-sm flex items-center justify-center transition-all duration-150 ease-out"
-          style={{
-            width: `${zoom}%`,
-            maxWidth: "640px",
-            aspectRatio: "1 / 1.414",
-          }}
+      {toolbar}
+      <div className="flex-1 flex flex-col items-center justify-center gap-4 text-white/50">
+        <FileText className="h-12 w-12 text-white/20" />
+        <p className="text-sm font-medium">{doc.name}</p>
+        <button
+          onClick={handleDownload}
+          className="px-4 py-2 rounded-lg bg-white/10 hover:bg-white/15 text-white/70 hover:text-white text-sm transition-colors flex items-center gap-2"
         >
-          {/* watermark / placeholder */}
-          <div className="absolute inset-0 flex flex-col items-center justify-center select-none">
-            <FileText className="h-12 w-12 text-gray-200" />
-            <p className="mt-2 text-[10px] text-gray-300 tracking-wide">Document preview</p>
-          </div>
-          {/* subtle page lines */}
-          <div className="absolute inset-x-8 top-10 space-y-3 pointer-events-none">
-            {Array.from({ length: 14 }).map((_, i) => (
-              <div key={i} className="h-px bg-gray-100" />
-            ))}
-          </div>
-        </div>
+          <Download className="h-4 w-4" /> Download file
+        </button>
       </div>
     </div>
   );
@@ -313,11 +406,31 @@ function DocDetailView({
   const [notes, setNotes]         = useState("");
   const isReadOnly = doc.status === "auto_approved" || doc.status === "reviewed";
 
-  const updateField = (key: string, value: string) =>
-    setFields((prev) => prev.map((f) => f.key === key ? { ...f, value, changed: f.value !== value } : f));
+  // Sync local state when the detail data arrives after initial render.
+  // useState only uses the prop value on mount; subsequent prop updates are ignored
+  // unless we explicitly sync here. We only overwrite when the incoming data is
+  // richer (non-empty) so in-progress user edits are never discarded.
+  const userHasEdited = useRef(false);
+  useEffect(() => {
+    if (!userHasEdited.current && doc.headerFields.length > 0) {
+      setFields(doc.headerFields);
+    }
+  }, [doc.headerFields.length]);
+  useEffect(() => {
+    if (!userHasEdited.current && doc.lineItems.length > 0) {
+      setLineItems(doc.lineItems);
+    }
+  }, [doc.lineItems.length]);
 
-  const updateCell = (id: string, col: string, value: string) =>
+  const updateField = (key: string, value: string) => {
+    userHasEdited.current = true;
+    setFields((prev) => prev.map((f) => f.key === key ? { ...f, value, changed: f.value !== value } : f));
+  };
+
+  const updateCell = (id: string, col: string, value: string) => {
+    userHasEdited.current = true;
     setLineItems((prev) => prev.map((r) => r.id === id ? { ...r, [col]: value } : r));
+  };
 
   const addRow = () => {
     const empty: LineItem = { id: `r${Date.now()}` };
@@ -608,10 +721,19 @@ function DocTable({
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function ProcessedDocsPage() {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
   const [search, setSearch]         = useState("");
   const [activeTab, setActiveTab]   = useState<DocStatus>("pending");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filterDocType, setFilterDocType] = useState("all");
+
+  // Open a specific document when navigated here with ?doc=<id>
+  useEffect(() => {
+    const docId = searchParams.get("doc");
+    if (docId) setSelectedId(docId);
+  }, []);
 
   // Live data from the IDP backend, plus Manas's demo docs (SEED_DOCS) kept as samples.
   const { data: docsPage } = useGetProcessedDocs({ size: 100 });
@@ -620,7 +742,7 @@ export default function ProcessedDocsPage() {
     [docsPage],
   );
   // Extracted fields/line-items come from the detail endpoint, fetched on select.
-  const { data: detail } = useGetProcessedDoc({ id: selectedId ?? "" });
+  const { data: detail, isLoading: isLoadingDetail } = useGetProcessedDoc({ id: selectedId ?? "" });
   const selectedDoc = useMemo(
     () => (selectedId ? enrichWithDetail(docs.find((d) => d.id === selectedId), detail) : null),
     [selectedId, docs, detail],
@@ -657,19 +779,39 @@ export default function ProcessedDocsPage() {
   };
 
   // ── Split-view (detail) ──
-  if (selectedDoc) {
+  if (selectedId) {
+    const backBar = (
+      <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b bg-muted/5">
+        <button
+          onClick={() => { setSelectedId(null); navigate("/processed-docs", { replace: true }); }}
+          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ChevronLeft className="h-4 w-4" />
+          Back to list
+        </button>
+      </div>
+    );
+
+    // Show a skeleton while the detail API call is in-flight so the user never
+    // sees the view open with empty fields and then populate a moment later.
+    if (isLoadingDetail || !selectedDoc) {
+      return (
+        <div className="flex flex-col h-full bg-background overflow-hidden">
+          {backBar}
+          <div className="flex-1 flex items-center justify-center">
+            <div className="flex flex-col items-center gap-3 text-muted-foreground">
+              <div className="h-6 w-6 animate-spin rounded-full border-2 border-[#D04A02] border-t-transparent" />
+              <p className="text-sm">Loading document…</p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="flex flex-col h-full bg-background overflow-hidden">
         {/* back bar */}
-        <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b bg-muted/5">
-          <button
-            onClick={() => setSelectedId(null)}
-            className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <ChevronLeft className="h-4 w-4" />
-            Back to list
-          </button>
-        </div>
+        {backBar}
         <div className="flex-1 overflow-hidden">
           <DocDetailView
             doc={selectedDoc}

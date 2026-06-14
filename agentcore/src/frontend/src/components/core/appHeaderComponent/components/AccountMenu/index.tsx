@@ -46,7 +46,7 @@ export const AccountMenu = () => {
   const normalizedRole = (role ?? "").toLowerCase();
   const displayRole = role ? role.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) : t("N/A");
   const showOrganization = role !== "root";
-  const showDepartment = ["department_admin", "developer", "business_user"].includes(normalizedRole);
+  const showDepartment = ["department_admin", "idp_configurator", "doc_reviewer"].includes(normalizedRole);
   const initialsSource = displayName.replace(/\s+/g, "");
   const initials = (initialsSource.slice(0, 2) || t("US")).toUpperCase();
 

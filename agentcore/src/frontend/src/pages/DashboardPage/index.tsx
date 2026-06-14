@@ -19,6 +19,10 @@ import {
   DollarSign,
   BarChart2,
   AlertTriangle,
+  FileText,
+  CheckSquare,
+  Upload,
+  Eye,
 } from "lucide-react";
 import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -66,7 +70,13 @@ type SectionId =
   | "experience"
   | "roi"
   | "maturity"
-  | "risk";
+  | "risk"
+  | "idp_pipeline"
+  | "idp_review"
+  | "idp_approval"
+  | "idp_submission"
+  | "idp_quality"
+  | "idp_analytics";
 
 type SectionKpi = {
   name: string;
@@ -231,75 +241,147 @@ const sections: SectionConfig[] = [
   },
 ];
 
-const departmentSections: SectionConfig[] = [
-  {
-    id: "usage",
-    label: "Department Usage",
-    headline: "Department Usage KPIs",
-    description: "Active agents and response performance across your department.",
-    kpis: [
-      { name: "Active Agents in Dept (UAT)", value: "0" },
-      { name: "Active Agents in Dept (PROD)", value: "0" },
-      { name: "Avg Response Time", value: "0ms", scope: "global" },
-    ],
-    charts: [
-      { title: "Response Time Trend", subtitle: "Avg response time over time", type: "area", data: [], scope: "global" },
-    ],
-  },
-  {
-    id: "approval",
-    label: "Approval & Governance",
-    headline: "Approval & Governance KPIs",
-    description: "Pending approval queue depth, rejection rates, and average approval time.",
-    kpis: [
-      { name: "Pending Approvals", value: "0" },
-      { name: "Rejection Rate", value: "0%" },
-      { name: "Avg Approval Time", value: "0min" },
-    ],
-    charts: [
-      {
-        title: "Pending Approvals",
-        subtitle: "Queue trend",
-        type: "area",
-        data: [],
-      },
-    ],
-  },
-  {
-    id: "hitl",
-    label: "HITL Governance",
-    headline: "HITL Governance KPIs",
-    description: "Human-in-the-loop invocation frequency, response time benchmarks, and escalation patterns.",
-    kpis: [
-      { name: "Agents with HITL", value: "0" },
-      { name: "HITL Invocation Rate", value: "0%" },
-      { name: "Avg HITL Response Time", value: "0min" },
-    ],
-    charts: [
-      {
-        title: "Invocation Rate",
-        subtitle: "Daily trend",
-        type: "area",
-        data: [],
-      },
-      {
-        title: "Response Time",
-        subtitle: "Minutes by day",
-        type: "bar",
-        data: [],
-      },
-    ],
-  },
-  
+// ── IDP-specific section configs ───────────────────────────────────────────
+
+const idpPipelineSection: SectionConfig = {
+  id: "idp_pipeline",
+  label: "IDP Pipeline Overview",
+  headline: "IDP Processing Pipeline",
+  description: "Documents processed, success rates, pipeline throughput, and active field configurations.",
+  kpis: [
+    { name: "Docs Processed (30d)", value: "0" },
+    { name: "Processing Success Rate", value: "0%" },
+    { name: "Docs Pending Review", value: "0" },
+    { name: "Docs Pending Approval", value: "0" },
+    { name: "Active Field Configs", value: "0" },
+    { name: "Avg Processing Time", value: "0s" },
+  ],
+  charts: [
+    { title: "Daily Throughput", subtitle: "Documents processed per day", type: "area", data: [] },
+  ],
+};
+
+const idpReviewSection: SectionConfig = {
+  id: "idp_review",
+  label: "Review Queue",
+  headline: "Document Review KPIs",
+  description: "HITL review queue status, documents reviewed, and correction activity.",
+  kpis: [
+    { name: "Docs Pending Review", value: "0" },
+    { name: "Reviewed Today", value: "0" },
+    { name: "Reviewed This Week", value: "0" },
+    { name: "Avg Review Time", value: "0min" },
+    { name: "Correction Rate", value: "0%" },
+  ],
+  charts: [
+    { title: "Review Activity", subtitle: "Documents reviewed per day", type: "area", data: [] },
+  ],
+};
+
+const idpApprovalSection: SectionConfig = {
+  id: "idp_approval",
+  label: "Approval Queue",
+  headline: "Document Approval KPIs",
+  description: "Pending approvals, approval rates, and document output pipeline status.",
+  kpis: [
+    { name: "Pending Approval", value: "0" },
+    { name: "Approved Today", value: "0" },
+    { name: "Rejected Today", value: "0" },
+    { name: "Approval Rate", value: "0%" },
+    { name: "Avg Approval Time", value: "0min" },
+  ],
+  charts: [
+    { title: "Approval Activity", subtitle: "Documents approved per day", type: "area", data: [] },
+    {
+      title: "Status Distribution",
+      subtitle: "Current document statuses",
+      type: "donut",
+      data: [
+        { label: "Pending", value: 0 },
+        { label: "Approved", value: 0 },
+        { label: "Rejected", value: 0 },
+      ],
+    },
+  ],
+};
+
+const idpSubmissionSection: SectionConfig = {
+  id: "idp_submission",
+  label: "My Submissions",
+  headline: "Document Submission Tracker",
+  description: "Status of documents you have submitted for IDP processing.",
+  kpis: [
+    { name: "Total Submitted", value: "0" },
+    { name: "Processing", value: "0" },
+    { name: "Under Review", value: "0" },
+    { name: "Approved", value: "0" },
+    { name: "Failed / Skipped", value: "0" },
+  ],
+  charts: [
+    { title: "Submission Activity", subtitle: "Documents submitted per day", type: "area", data: [] },
+    {
+      title: "Status Breakdown",
+      subtitle: "Current statuses of my documents",
+      type: "donut",
+      data: [
+        { label: "Processing", value: 0 },
+        { label: "Under Review", value: 0 },
+        { label: "Approved", value: 0 },
+        { label: "Failed", value: 0 },
+      ],
+    },
+  ],
+};
+
+const idpQualitySection: SectionConfig = {
+  id: "idp_quality",
+  label: "Extraction Quality",
+  headline: "Field Config Quality KPIs",
+  description: "Extraction accuracy, correction rates, and field configuration performance across your configs.",
+  kpis: [
+    { name: "Active Field Configs", value: "0" },
+    { name: "Avg Extraction Accuracy", value: "0%" },
+    { name: "Docs Processed (30d)", value: "0" },
+    { name: "Avg Correction Rate", value: "0%" },
+    { name: "Failed Extractions", value: "0" },
+  ],
+  charts: [
+    { title: "Processing Volume", subtitle: "Docs processed through your configs (30d)", type: "area", data: [] },
+  ],
+};
+
+const idpAnalyticsSection: SectionConfig = {
+  id: "idp_analytics",
+  label: "IDP Analytics",
+  headline: "IDP Analytics & Audit",
+  description: "Platform-wide IDP throughput, SLA compliance, cost per document, and processing trends.",
+  kpis: [
+    { name: "Total Docs Processed", value: "0" },
+    { name: "Processing Success Rate", value: "0%" },
+    { name: "SLA Compliance", value: "0%" },
+    { name: "Avg Cost per Document", value: "$0.00" },
+    { name: "Docs Processed (30d)", value: "0" },
+    { name: "Processing Error Rate", value: "0%" },
+  ],
+  charts: [
+    { title: "Processing Throughput", subtitle: "Documents processed per day", type: "area", data: [] },
+    { title: "Cost per Document Trend", subtitle: "Avg cost P95 per document", type: "area", data: [] },
+  ],
+};
+
+const getDepartmentSections = (): SectionConfig[] => [
+  idpPipelineSection,
+  idpReviewSection,
+  idpApprovalSection,
 ];
 
-const developerSections: SectionConfig[] = [
-  
+const getDeveloperSections = (): SectionConfig[] => [
+  idpQualitySection,
   {
     id: "performance",
-    label: "Performance",
-    headline: "Performance KPIs",
-    description: "Agent response latency profiles - P95, and P99 percentiles to surface tail latency regressions.",
+    label: "Pipeline Latency",
+    headline: "IDP Processing Latency KPIs",
+    description: "Processing latency profiles — P95 and P99 percentiles to surface slow extraction runs.",
     kpis: [
       { name: "Avg Agent Latency", value: "0ms", scope: "global" },
       { name: "Latency P95", value: "0ms", scope: "global" },
@@ -319,59 +401,23 @@ const developerSections: SectionConfig[] = [
       },
     ],
   },
-  
 ];
 
-const businessSections: SectionConfig[] = [
-  
-  {
-    id: "experience",
-    label: "Experience",
-    headline: "Experience KPIs",
-    description: "End-user experience signals - response speed, satisfaction scores, and escalation frequency to human agents.",
-    kpis: [
-      { name: "Avg Response Time", value: "0ms", scope: "global" },
-      { name: "Avg Session Duration", value: "0ms" },
-      { name: "User Satisfaction Score", value: "0" },
-      { name: "Escalation to Human", value: "0" },
-    ],
-    charts: [
-      { title: "Response Time", subtitle: "Daily trend", type: "area", data: [], scope: "global" },
-    ],
-  },
-];
+const getBusinessSections = (): SectionConfig[] => [idpReviewSection];
 
-const rootSections: SectionConfig[] = [
+const allSections: SectionConfig[] = [...sections, idpPipelineSection];
 
-  {
-    id: "maturity",
-    label: "AI Maturity Indicators",
-    headline: "AI Maturity Indicators",
-    description: "Governance capability - adoption guardrails, RAG, and HITL coverage as signals of AI maturity.",
-    kpis: [
-      { name: "% Agents with Guardrails", value: "0%" },
-      { name: "% Agents with RAG", value: "0%" },
-      { name: "% Agents with HITL", value: "0%" },
-    ],
-    charts: [],
-  },
-  {
-    id: "cost",
-    label: "ROI & Financial Health",
-    headline: "ROI & Financial Health",
-    description: "95th percentile cost per agent run over time — highlights expensive outlier runs.",
-    kpis: [],
-    charts: [
-      {
-        title: "Cost P95 Trend",
-        subtitle: "Daily P95 cost per run",
-        type: "area",
-        data: [],
-      },
-    ],
-  },
+// ── Leader / Auditor sections ───────────────────────────────────────────────
 
-];
+const rootSections: SectionConfig[] = [idpAnalyticsSection];
+
+// ── Document Approver sections ──────────────────────────────────────────────
+
+const documentApproverSections: SectionConfig[] = [idpApprovalSection];
+
+// ── Document Submitter (consumer) sections ──────────────────────────────────
+
+const consumerSections: SectionConfig[] = [idpSubmissionSection];
 
 // --- Style constants -------------------------------------------------------
 
@@ -393,7 +439,13 @@ const sectionThemes: Record<SectionId, { badge: string; accent: string; border: 
   experience:  { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <Star className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
   roi:         { badge: "bg-sky-100 text-sky-700",         accent: "#0ea5e9", border: "border-l-sky-500",     headerBg: "bg-sky-50/60 dark:bg-sky-950/20",     iconBg: "bg-sky-100 dark:bg-sky-900/30",     icon: <DollarSign className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
   maturity:    { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <BarChart2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
-  risk:        { badge: "bg-rose-100 text-rose-700",       accent: "#f43f5e", border: "border-l-rose-500",    headerBg: "bg-rose-50/60 dark:bg-rose-950/20",     iconBg: "bg-rose-100 dark:bg-rose-900/30",     icon: <AlertTriangle className="h-4 w-4 text-rose-600 dark:text-rose-400" /> },
+  risk:         { badge: "bg-rose-100 text-rose-700",       accent: "#f43f5e", border: "border-l-rose-500",    headerBg: "bg-rose-50/60 dark:bg-rose-950/20",     iconBg: "bg-rose-100 dark:bg-rose-900/30",     icon: <AlertTriangle className="h-4 w-4 text-rose-600 dark:text-rose-400" /> },
+  idp_pipeline: { badge: "bg-sky-100 text-sky-700",         accent: "#0ea5e9", border: "border-l-sky-500",     headerBg: "bg-sky-50/60 dark:bg-sky-950/20",     iconBg: "bg-sky-100 dark:bg-sky-900/30",     icon: <FileText className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
+  idp_review:   { badge: "bg-amber-100 text-amber-700",     accent: "#f59e0b", border: "border-l-amber-500",   headerBg: "bg-amber-50/60 dark:bg-amber-950/20",   iconBg: "bg-amber-100 dark:bg-amber-900/30",   icon: <Eye className="h-4 w-4 text-amber-600 dark:text-amber-400" /> },
+  idp_approval: { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <CheckSquare className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
+  idp_submission:{ badge: "bg-violet-100 text-violet-700",  accent: "#8b5cf6", border: "border-l-violet-500",  headerBg: "bg-violet-50/60 dark:bg-violet-950/20", iconBg: "bg-violet-100 dark:bg-violet-900/30", icon: <Upload className="h-4 w-4 text-violet-600 dark:text-violet-400" /> },
+  idp_quality:  { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <Microscope className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
+  idp_analytics:{ badge: "bg-sky-100 text-sky-700",         accent: "#0ea5e9", border: "border-l-sky-500",     headerBg: "bg-sky-50/60 dark:bg-sky-950/20",     iconBg: "bg-sky-100 dark:bg-sky-900/30",     icon: <BarChart2 className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
 };
 
 // --- Tooltips -------------------------------------------------------------
@@ -792,12 +844,14 @@ export default function DashboardAdmin(): JSX.Element {
   const { t } = useTranslation();
   const { role, userData } = useContext(AuthContext);
   const normalizedRole = (role ?? "").toLowerCase().trim().replace(/\s+/g, "_");
-  const isDepartmentAdmin = normalizedRole === "department_admin";
-  const isDeveloper       = normalizedRole === "developer";
-  const isBusinessUser    = normalizedRole === "business_user";
-  const isRootAdmin       = normalizedRole === "root";
-  const isSuperAdmin      = normalizedRole === "super_admin";
-  const isLeaderExecutive = normalizedRole === "leader_executive";
+  const isDepartmentAdmin   = normalizedRole === "department_admin";
+  const isDeveloper         = normalizedRole === "idp_configurator";
+  const isBusinessUser      = normalizedRole === "doc_reviewer";
+  const isRootAdmin         = normalizedRole === "root";
+  const isSuperAdmin        = normalizedRole === "super_admin";
+  const isLeaderExecutive   = normalizedRole === "idp_auditor";
+  const isDocumentApprover  = normalizedRole === "doc_approver";
+  const isConsumer          = normalizedRole === "doc_submitter";
 
   // ── Region selector (root admin only) ──────────────────────────────────
   const regions = useRegionStore((s) => s.regions);
@@ -858,6 +912,21 @@ export default function DashboardAdmin(): JSX.Element {
   const [costP95Range, setCostP95Range]                   = useState<"30d" | "90d">("30d");
   const [costP95TrendSeries, setCostP95TrendSeries]       = useState<PendingSeriesPoint[] | null>(null);
 
+  // IDP section state
+  const [idpPipelineKpis, setIdpPipelineKpis]             = useState<SectionKpi[] | null>(null);
+  const [idpPipelineSeries, setIdpPipelineSeries]         = useState<PendingSeriesPoint[] | null>(null);
+  const [idpReviewKpis, setIdpReviewKpis]                 = useState<SectionKpi[] | null>(null);
+  const [idpReviewSeries, setIdpReviewSeries]             = useState<PendingSeriesPoint[] | null>(null);
+  const [idpApprovalKpis, setIdpApprovalKpis]             = useState<SectionKpi[] | null>(null);
+  const [idpApprovalSeries, setIdpApprovalSeries]         = useState<PendingSeriesPoint[] | null>(null);
+  const [idpSubmissionKpis, setIdpSubmissionKpis]         = useState<SectionKpi[] | null>(null);
+  const [idpSubmissionSeries, setIdpSubmissionSeries]     = useState<PendingSeriesPoint[] | null>(null);
+  const [idpQualityKpis, setIdpQualityKpis]               = useState<SectionKpi[] | null>(null);
+  const [idpQualitySeries, setIdpQualitySeries]           = useState<PendingSeriesPoint[] | null>(null);
+  const [idpAnalyticsKpis, setIdpAnalyticsKpis]           = useState<SectionKpi[] | null>(null);
+  const [idpAnalyticsThroughputSeries, setIdpAnalyticsThroughputSeries] = useState<PendingSeriesPoint[] | null>(null);
+  const [idpAnalyticsCostSeries, setIdpAnalyticsCostSeries]             = useState<PendingSeriesPoint[] | null>(null);
+
   // Fallbacks
   const lifecycleKpiFallback:   SectionKpi[] = [{ name: "Agents in UAT", value: "0" }, { name: "UAT to PROD Conversion Rate", value: "0%" }, { name: "Deprecated Agent Count", value: "0" }];
   const governanceKpiFallback:  SectionKpi[] = [{ name: "Guardrail Violation Rate", value: "0%" }, { name: "Escalation to Human Review", value: "0" }, { name: "% Agents Without Guardrails", value: "0%" }, { name: "Policy Breach Attempts", value: "0" }];
@@ -871,6 +940,12 @@ export default function DashboardAdmin(): JSX.Element {
   const costKpiFallback:        SectionKpi[] = [{ name: "Total Cost", value: "$0.00" }, { name: "Avg Cost Per Run", value: "$0.00" }];
   const devPerformanceFallback: SectionKpi[] = [{ name: "Avg Agent Latency", value: "0ms" }, { name: "Latency P95", value: "0ms" }, { name: "Latency P99", value: "0ms" }];
   const businessExperienceFallback:SectionKpi[]=[{ name: "Avg Response Time", value: "0ms" }, { name: "Avg Session Duration", value: "0ms" }, { name: "Escalation to Human", value: "0" }, { name: "User Satisfaction Score", value: "0" }];
+  const idpPipelineFallback:   SectionKpi[] = [{ name: "Docs Processed (30d)", value: "0" }, { name: "Processing Success Rate", value: "0%" }, { name: "Docs Pending Review", value: "0" }, { name: "Docs Pending Approval", value: "0" }, { name: "Active Field Configs", value: "0" }, { name: "Avg Processing Time", value: "0s" }];
+  const idpReviewFallback:     SectionKpi[] = [{ name: "Docs Pending Review", value: "0" }, { name: "Reviewed Today", value: "0" }, { name: "Reviewed This Week", value: "0" }, { name: "Avg Review Time", value: "0min" }, { name: "Correction Rate", value: "0%" }];
+  const idpApprovalFallback:   SectionKpi[] = [{ name: "Pending Approval", value: "0" }, { name: "Approved Today", value: "0" }, { name: "Rejected Today", value: "0" }, { name: "Approval Rate", value: "0%" }, { name: "Avg Approval Time", value: "0min" }];
+  const idpSubmissionFallback: SectionKpi[] = [{ name: "Total Submitted", value: "0" }, { name: "Processing", value: "0" }, { name: "Under Review", value: "0" }, { name: "Approved", value: "0" }, { name: "Failed / Skipped", value: "0" }];
+  const idpQualityFallback:    SectionKpi[] = [{ name: "Active Field Configs", value: "0" }, { name: "Avg Extraction Accuracy", value: "0%" }, { name: "Docs Processed (30d)", value: "0" }, { name: "Avg Correction Rate", value: "0%" }, { name: "Failed Extractions", value: "0" }];
+  const idpAnalyticsFallback:  SectionKpi[] = [{ name: "Total Docs Processed", value: "0" }, { name: "Processing Success Rate", value: "0%" }, { name: "SLA Compliance", value: "0%" }, { name: "Avg Cost per Document", value: "$0.00" }, { name: "Docs Processed (30d)", value: "0" }, { name: "Processing Error Rate", value: "0%" }];
   const approvalRangeOptions = [{ value: "7d", label: "Last 7 days" }, { value: "30d", label: "Last 30 days" }, { value: "12w", label: "Last 12 weeks" }];
 
   useEffect(() => { const id = setInterval(() => setRefreshTick((t) => t + 1), 15000); return () => clearInterval(id); }, []);
@@ -1026,6 +1101,98 @@ export default function DashboardAdmin(): JSX.Element {
       .catch(() => setCostTrendSeries([]));
   }, [costRange, isSuperAdmin, isRootAdmin, refreshTick, userData?.organization_id, selectedRegionCode, tzOffsetMinutes]);
 
+  // ── IDP API calls ───────────────────────────────────────────────────────
+
+  const _idpActive = isDepartmentAdmin || isSuperAdmin || isRootAdmin;
+  useEffect(() => {
+    if (!_idpActive) return;
+    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-pipeline")
+      .then((r) => setIdpPipelineKpis(r.data?.kpis?.map((k) => ({ name: k.label, value: k.unit ? `${k.value}${k.unit}` : `${k.value}` })) ?? idpPipelineFallback))
+      .catch(() => setIdpPipelineKpis(idpPipelineFallback));
+  }, [_idpActive, refreshTick]);
+
+  useEffect(() => {
+    if (!_idpActive) return;
+    api.get<PendingSeriesResponse>("/api/dashboard/sections/idp-pipeline/throughput-series", { params: { range: "30d", tz_offset_minutes: tzOffsetMinutes } })
+      .then((r) => setIdpPipelineSeries(r.data?.series ?? []))
+      .catch(() => setIdpPipelineSeries([]));
+  }, [_idpActive, refreshTick, tzOffsetMinutes]);
+
+  const _reviewActive = isDepartmentAdmin || isBusinessUser;
+  useEffect(() => {
+    if (!_reviewActive) return;
+    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-review-queue")
+      .then((r) => setIdpReviewKpis(r.data?.kpis?.map((k) => ({ name: k.label, value: k.unit ? `${k.value}${k.unit}` : `${k.value}` })) ?? idpReviewFallback))
+      .catch(() => setIdpReviewKpis(idpReviewFallback));
+  }, [_reviewActive, refreshTick]);
+
+  useEffect(() => {
+    if (!_reviewActive) return;
+    api.get<PendingSeriesResponse>("/api/dashboard/sections/idp-review-queue/activity-series", { params: { range: "7d", tz_offset_minutes: tzOffsetMinutes } })
+      .then((r) => setIdpReviewSeries(r.data?.series ?? []))
+      .catch(() => setIdpReviewSeries([]));
+  }, [_reviewActive, refreshTick, tzOffsetMinutes]);
+
+  const _approvalActive = isDepartmentAdmin || isDocumentApprover;
+  useEffect(() => {
+    if (!_approvalActive) return;
+    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-approval-queue")
+      .then((r) => setIdpApprovalKpis(r.data?.kpis?.map((k) => ({ name: k.label, value: k.unit ? `${k.value}${k.unit}` : `${k.value}` })) ?? idpApprovalFallback))
+      .catch(() => setIdpApprovalKpis(idpApprovalFallback));
+  }, [_approvalActive, refreshTick]);
+
+  useEffect(() => {
+    if (!_approvalActive) return;
+    api.get<PendingSeriesResponse>("/api/dashboard/sections/idp-approval-queue/activity-series", { params: { range: "7d", tz_offset_minutes: tzOffsetMinutes } })
+      .then((r) => setIdpApprovalSeries(r.data?.series ?? []))
+      .catch(() => setIdpApprovalSeries([]));
+  }, [_approvalActive, refreshTick, tzOffsetMinutes]);
+
+  useEffect(() => {
+    if (!isConsumer) return;
+    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-my-submissions")
+      .then((r) => setIdpSubmissionKpis(r.data?.kpis?.map((k) => ({ name: k.label, value: k.unit ? `${k.value}${k.unit}` : `${k.value}` })) ?? idpSubmissionFallback))
+      .catch(() => setIdpSubmissionKpis(idpSubmissionFallback));
+  }, [isConsumer, refreshTick]);
+
+  useEffect(() => {
+    if (!isConsumer) return;
+    api.get<PendingSeriesResponse>("/api/dashboard/sections/idp-my-submissions/activity-series", { params: { range: "7d", tz_offset_minutes: tzOffsetMinutes } })
+      .then((r) => setIdpSubmissionSeries(r.data?.series ?? []))
+      .catch(() => setIdpSubmissionSeries([]));
+  }, [isConsumer, refreshTick, tzOffsetMinutes]);
+
+  useEffect(() => {
+    if (!isDeveloper) return;
+    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-field-quality")
+      .then((r) => setIdpQualityKpis(r.data?.kpis?.map((k) => ({ name: k.label, value: k.unit ? `${k.value}${k.unit}` : `${k.value}` })) ?? idpQualityFallback))
+      .catch(() => setIdpQualityKpis(idpQualityFallback));
+  }, [isDeveloper, refreshTick]);
+
+  useEffect(() => {
+    if (!isDeveloper) return;
+    api.get<PendingSeriesResponse>("/api/dashboard/sections/idp-field-quality/volume-series", { params: { range: "30d", tz_offset_minutes: tzOffsetMinutes } })
+      .then((r) => setIdpQualitySeries(r.data?.series ?? []))
+      .catch(() => setIdpQualitySeries([]));
+  }, [isDeveloper, refreshTick, tzOffsetMinutes]);
+
+  useEffect(() => {
+    if (!isLeaderExecutive) return;
+    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-analytics")
+      .then((r) => setIdpAnalyticsKpis(r.data?.kpis?.map((k) => ({ name: k.label, value: k.unit === "$" ? `$${k.value}` : k.unit ? `${k.value}${k.unit}` : `${k.value}` })) ?? idpAnalyticsFallback))
+      .catch(() => setIdpAnalyticsKpis(idpAnalyticsFallback));
+  }, [isLeaderExecutive, refreshTick]);
+
+  useEffect(() => {
+    if (!isLeaderExecutive) return;
+    api.get<PendingSeriesResponse>("/api/dashboard/sections/idp-analytics/throughput-series", { params: { range: "30d", tz_offset_minutes: tzOffsetMinutes } })
+      .then((r) => setIdpAnalyticsThroughputSeries(r.data?.series ?? []))
+      .catch(() => setIdpAnalyticsThroughputSeries([]));
+    api.get<PendingSeriesResponse>("/api/dashboard/sections/idp-analytics/cost-series", { params: { range: "30d", tz_offset_minutes: tzOffsetMinutes } })
+      .then((r) => setIdpAnalyticsCostSeries(r.data?.series ?? []))
+      .catch(() => setIdpAnalyticsCostSeries([]));
+  }, [isLeaderExecutive, refreshTick, tzOffsetMinutes]);
+
   // -- Chart data helpers ------------------------------------------------
 
   const mkDateSeries = (series: PendingSeriesPoint[] | null, days: number) => {
@@ -1060,9 +1227,31 @@ export default function DashboardAdmin(): JSX.Element {
   const costP95ChartData = useMemo(() => mkDateSeries(costP95TrendSeries, cP95Days), [costP95TrendSeries, cP95Days]);
   const devLatData       = useMemo(() => devLatencySeries ?? [], [devLatencySeries]);
 
+  const idpPipelineChartData   = useMemo(() => mkDateSeries(idpPipelineSeries, 30), [idpPipelineSeries]);
+  const idpReviewChartData     = useMemo(() => mkDateSeries(idpReviewSeries, 7), [idpReviewSeries]);
+  const idpApprovalChartData   = useMemo(() => mkDateSeries(idpApprovalSeries, 7), [idpApprovalSeries]);
+  const idpSubmissionChartData = useMemo(() => mkDateSeries(idpSubmissionSeries, 7), [idpSubmissionSeries]);
+  const idpQualityChartData    = useMemo(() => mkDateSeries(idpQualitySeries, 30), [idpQualitySeries]);
+  const idpAnalyticsThroughputData = useMemo(() => mkDateSeries(idpAnalyticsThroughputSeries, 30), [idpAnalyticsThroughputSeries]);
+  const idpAnalyticsCostData   = useMemo(() => mkDateSeries(idpAnalyticsCostSeries, 30), [idpAnalyticsCostSeries]);
+
   // -- Resolve KPIs + charts for each section ----------------------------
 
-  const sectionsToRender = isDepartmentAdmin ? departmentSections : isDeveloper ? developerSections : isBusinessUser ? businessSections : isLeaderExecutive ? rootSections : isRootAdmin ? rootSections.filter((s) => s.id !== "cost") : sections;
+  const sectionsToRender = isDepartmentAdmin
+    ? getDepartmentSections()
+    : isDeveloper
+      ? getDeveloperSections()
+      : isBusinessUser
+        ? getBusinessSections()
+        : isDocumentApprover
+          ? documentApproverSections
+          : isConsumer
+            ? consumerSections
+            : isLeaderExecutive
+              ? rootSections
+              : isRootAdmin
+                ? allSections
+                : allSections;
 
   const resolveSection = (section: SectionConfig): { kpis: SectionKpi[]; charts: SectionChart[] } => {
     let kpis = [...section.kpis];
@@ -1077,14 +1266,18 @@ export default function DashboardAdmin(): JSX.Element {
     if (isSuperAdmin && section.id === "governance") applyOverride(governanceKpis);
     if (isSuperAdmin && section.id === "platform") applyOverride(platformKpis);
     if (isSuperAdmin && section.id === "cost") applyOverride(costKpis);
-    if (isDepartmentAdmin && section.id === "usage") applyOverride(deptUsageKpis);
-    if (isDepartmentAdmin && section.id === "approval") applyOverride(deptApprovalKpis);
-    if (isDepartmentAdmin && section.id === "hitl") applyOverride(deptHitlKpis);
     if (isDeveloper && section.id === "code") applyOverride(devCodeKpis);
     if (isDeveloper && section.id === "performance") applyOverride(devPerformanceKpis);
     if ((isRootAdmin || isLeaderExecutive) && section.id === "maturity") applyOverride(rootMaturityKpis);
     if (isBusinessUser && section.id === "maturity") applyOverride(businessMaturityKpis);
     if (isBusinessUser && section.id === "experience") applyOverride(businessExperienceKpis);
+    // IDP sections
+    if (section.id === "idp_pipeline") applyOverride(idpPipelineKpis ?? idpPipelineFallback);
+    if (section.id === "idp_review") applyOverride(idpReviewKpis ?? idpReviewFallback);
+    if (section.id === "idp_approval") applyOverride(idpApprovalKpis ?? idpApprovalFallback);
+    if (section.id === "idp_submission") applyOverride(idpSubmissionKpis ?? idpSubmissionFallback);
+    if (section.id === "idp_quality") applyOverride(idpQualityKpis ?? idpQualityFallback);
+    if (section.id === "idp_analytics") applyOverride(idpAnalyticsKpis ?? idpAnalyticsFallback);
 
     const charts = section.charts.map((chart) => {
       if (section.id === "platform") {
@@ -1102,6 +1295,14 @@ export default function DashboardAdmin(): JSX.Element {
       }
       if (section.id === "performance" && chart.title === "API Latency P95 vs P99") return { ...chart, data: devLatData };
       if (section.id === "experience" && chart.title === "Response Time") return { ...chart, data: bizRtChartData };
+      // IDP section charts
+      if (section.id === "idp_pipeline" && chart.title === "Daily Throughput") return { ...chart, data: idpPipelineChartData };
+      if (section.id === "idp_review" && chart.title === "Review Activity") return { ...chart, data: idpReviewChartData };
+      if (section.id === "idp_approval" && chart.title === "Approval Activity") return { ...chart, data: idpApprovalChartData };
+      if (section.id === "idp_submission" && chart.title === "Submission Activity") return { ...chart, data: idpSubmissionChartData };
+      if (section.id === "idp_quality" && chart.title === "Processing Volume") return { ...chart, data: idpQualityChartData };
+      if (section.id === "idp_analytics" && chart.title === "Processing Throughput") return { ...chart, data: idpAnalyticsThroughputData };
+      if (section.id === "idp_analytics" && chart.title === "Cost per Document Trend") return { ...chart, data: idpAnalyticsCostData };
       return chart;
     });
 
@@ -1109,14 +1310,20 @@ export default function DashboardAdmin(): JSX.Element {
   };
 
   const headerSubtitle = isDepartmentAdmin
-    ? "Department Admin - Operational Governance"
+    ? "IDP Administrator - Pipeline & Review Governance"
     : isDeveloper
-      ? "Developer - Build & Optimize"
+      ? "IDP Configurator - Extraction Quality & Latency"
       : isBusinessUser
-        ? "Business User - Productivity & Experience"
-        : isRootAdmin
-          ? "Executive - Strategic Oversight"
-          : "Super Admin - Full Organization View";
+        ? "Document Reviewer - Review Queue"
+        : isDocumentApprover
+          ? "Document Approver - Approval Queue"
+          : isConsumer
+            ? "Document Submitter - My Submissions"
+            : isLeaderExecutive
+              ? "Auditor / Executive - IDP Analytics"
+              : isRootAdmin
+                ? "System Administrator - Platform & IDP Overview"
+                : "Platform Administrator - Full Organization View";
 
   const approvalRangeSelector = (
     <Select value={approvalRange} onValueChange={(v) => setApprovalRange(v as "7d" | "30d" | "12w")}>

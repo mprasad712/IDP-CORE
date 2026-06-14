@@ -77,7 +77,7 @@ export default function FolderCardsView({
   const ROLE_ALIASES: Record<string, string> = {
     super_admin: "super_admin",
     department_admin: "department_admin",
-    business_user: "business_user",
+    doc_reviewer: "doc_reviewer",
     root: "root",
   };
   const rawNormalized = (role || "").toLowerCase().trim().replace(/\s+/g, "_");

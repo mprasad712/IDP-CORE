@@ -178,7 +178,7 @@ export default function RequestModelModal({
   useEffect(() => {
     if (!open) return;
     if (
-      (normalizedRole === "developer" || normalizedRole === "department_admin") &&
+      (normalizedRole === "idp_configurator" || normalizedRole === "department_admin") &&
       visibilityOptions.departments.length > 0
     ) {
       const firstDept = visibilityOptions.departments[0];

@@ -1,6 +1,6 @@
 """Seed global IDP field configuration templates.
 
-Seeds 12 global field configuration templates (org_id=NULL, is_template=TRUE)
+Seeds 10 global field configuration templates (org_id=NULL, is_template=TRUE)
 that mirror the TEMPLATE_CATALOGUE defined in the frontend.
 Idempotent: each template is inserted only if no global template with that name exists.
 
@@ -100,24 +100,6 @@ TEMPLATES: list[dict] = [
         ],
     },
     {
-        "name": "Receipt",
-        "description": "Point-of-sale or payment receipt.",
-        "headers": [
-            ("merchant_name",    "text",   True,  1),
-            ("merchant_address", "text",   False, 2),
-            ("transaction_date", "date",   True,  3),
-            ("transaction_time", "text",   False, 4),
-            ("total_amount",     "number", True,  5),
-            ("payment_method",   "text",   False, 6),
-            ("receipt_number",   "text",   False, 7),
-        ],
-        "line_items": [
-            ("item",     "text",   True,  1),
-            ("quantity", "number", False, 2),
-            ("price",    "number", True,  3),
-        ],
-    },
-    {
         "name": "Contract",
         "description": "Legal contract with parties, dates and clauses.",
         "headers": [
@@ -131,27 +113,6 @@ TEMPLATES: list[dict] = [
             ("signature_present", "boolean", False, 8),
         ],
         "line_items": [],
-    },
-    {
-        "name": "Bank Statement",
-        "description": "Bank account transactions for a given period.",
-        "headers": [
-            ("bank_name",       "text",   True,  1),
-            ("account_number",  "text",   True,  2),
-            ("account_holder",  "text",   True,  3),
-            ("statement_from",  "date",   True,  4),
-            ("statement_to",    "date",   True,  5),
-            ("opening_balance", "number", False, 6),
-            ("closing_balance", "number", True,  7),
-            ("currency",        "text",   False, 8),
-        ],
-        "line_items": [
-            ("date",        "date",   True,  1),
-            ("description", "text",   True,  2),
-            ("debit",       "number", False, 3),
-            ("credit",      "number", False, 4),
-            ("balance",     "number", True,  5),
-        ],
     },
     {
         "name": "Pay Slip",

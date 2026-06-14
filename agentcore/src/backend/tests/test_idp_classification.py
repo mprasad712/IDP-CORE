@@ -53,7 +53,7 @@ async def _setup_test_agent_and_doc(session, model_id):
         password="testpassword",
         is_active=True,
         is_superuser=False,
-        role="developer",
+        role="idp_configurator",
     )
     session.add(user)
     await session.flush()

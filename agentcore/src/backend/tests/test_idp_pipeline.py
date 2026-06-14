@@ -194,7 +194,7 @@ async def test_pipeline_routing_auto_approve(monkeypatch):
 
     # high-confidence result + auto_approve policy => auto_approved
     _patch_extraction(monkeypatch, result={
-        "headers": {"f": {"value": "x", "confidence": 0.99}}, "line_items": [],
+        "headers": {"f": {"value": "INV-001", "confidence": 0.99}}, "line_items": [],
     })
     async with session_scope() as session:
         agent_id, doc_id = await _setup_document(
@@ -844,7 +844,7 @@ async def test_pipeline_fires_classification_hook(monkeypatch):
 
     _patch_extraction(monkeypatch)
 
-    async def fake_classify(session, document_id, merged_text, org_id, *, auto_select, threshold):
+    async def fake_classify(session, document_id, merged_text, org_id, *, auto_select, threshold, doc_types=None):
         session.add(IdpDocumentClassification(
             document_id=document_id, predicted_type="Invoice", confidence=0.95, is_selected=False,
         ))
