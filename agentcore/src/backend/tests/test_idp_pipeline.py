@@ -502,7 +502,7 @@ async def test_process_endpoint(monkeypatch):
     from fastapi.testclient import TestClient
     from agentcore.main import create_app
     from agentcore.services.auth.utils import get_current_active_user
-    from agentcore.api.idp import idp_rbac
+    from agentcore.api.idp import idp_rbac, _idp_submit_rbac
     from agentcore.api.idp import documents as documents_api
     from agentcore.services.database.models.idp.documents import IdpProcessingJob
     from agentcore.services.deps import session_scope
@@ -524,6 +524,7 @@ async def test_process_endpoint(monkeypatch):
     app = create_app()
     app.dependency_overrides[get_current_active_user] = mock_user
     app.dependency_overrides[idp_rbac] = mock_user
+    app.dependency_overrides[_idp_submit_rbac] = mock_user
     client = TestClient(app)
     try:
         r = client.post(f"/api/v1/idp/documents/{doc_id}/process")

@@ -7,7 +7,7 @@ from sqlmodel import select
 from agentcore.main import create_app
 from agentcore.services.deps import session_scope, get_storage_service
 from agentcore.services.auth.utils import get_current_active_user
-from agentcore.api.idp import idp_rbac
+from agentcore.api.idp import idp_rbac, _idp_submit_rbac
 from agentcore.services.database.models.user.model import User
 from agentcore.services.database.models.organization.model import Organization
 from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
@@ -39,10 +39,11 @@ async def setup_test_data():
         developer_role = (await session.exec(select(Role).where(Role.name == "idp_configurator"))).first()
 
         # Create user
+        unique_suffix = uuid4().hex[:8]
         user = User(
             id=uuid4(),
-            username="doc_test_user@test.com",
-            email="doc_test_user@test.com",
+            username=f"doc_test_user_{unique_suffix}@test.com",
+            email=f"doc_test_user_{unique_suffix}@test.com",
             password="testpassword",
             is_active=True,
             is_superuser=False,
@@ -54,7 +55,7 @@ async def setup_test_data():
         # Create organization
         org = Organization(
             id=uuid4(),
-            name="Document Test Org",
+            name=f"Document Test Org {unique_suffix}",
             owner_user_id=user.id,
             created_by=user.id,
         )
@@ -153,6 +154,7 @@ async def test_document_upload_flow(setup_test_data):
     app = create_app()
     app.dependency_overrides[get_current_active_user] = get_mock_user
     app.dependency_overrides[idp_rbac] = get_mock_user
+    app.dependency_overrides[_idp_submit_rbac] = get_mock_user
 
     class MockStorageService:
         async def save_file(self, agent_id: str, file_name: str, data: bytes) -> None:
