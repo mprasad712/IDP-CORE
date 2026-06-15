@@ -627,43 +627,9 @@ export const IDP_NODES: IDPData = {
     },
 
 
-    Multimodal: {
-      display_name: "Multimodal",
-      description: "Vision LLM reads the document image directly without requiring an OCR step.",
-      icon: "Layers",
-      documentation: "",
-      beta: false,
-      legacy: false,
-      official: true,
-      priority: 2,
-      base_classes: ["Data"],
-      field_order: ["document", "model_name", "prompt"],
-      template: {
-        document: {
-          _input_type: "MessageInput",
-          advanced: false,
-          display_name: "Document Image",
-          dynamic: false,
-          info: "Raw document image (PDF, PNG, JPG) passed directly to the vision model.",
-          input_types: ["Message"],
-          list: false,
-          name: "document",
-          placeholder: "",
-          required: true,
-          show: true,
-          type: "other",
-          value: "",
-        },
-        model_name: strField("model_name", "Vision LLM Model", "gpt-4o", "Vision-capable model for extraction.", false, true),
-        prompt: promptField(
-          "prompt",
-          "Extraction Instruction",
-          "",
-          "Instruction sent to the vision model describing what to extract.",
-        ),
-      },
-      outputs: [output("extracted_data", "Extracted Data", ["Data"])],
-    },
+    // Multimodal node hidden — the backend currently parks multimodal extraction (downgrades to
+    // text), so exposing a "Vision LLM" node would mislead users. Re-add the node definition here
+    // when the vision extraction path is actually implemented in the pipeline.
   },
 
   // ── Rules ─────────────────────────────────────────────────────────────────
@@ -902,7 +868,10 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 0,
       base_classes: ["Message", "Data"],
-      field_order: ["document", "detect_signatures", "detect_stamps", "detect_checkboxes", "detect_qr", "detect_logos", "detect_handwriting"],
+      // Only the element types the backend actually detects are exposed (signature / checkbox /
+      // QR-barcode). Stamps, logos and handwriting are not yet implemented, so their toggles are
+      // removed to avoid promising unsupported detection.
+      field_order: ["document", "detect_signatures", "detect_checkboxes", "detect_qr"],
       template: {
         document: {
           _input_type: "MessageInput",
@@ -920,11 +889,9 @@ export const IDP_NODES: IDPData = {
           value: "",
         },
         detect_signatures: boolField("detect_signatures", "Detect Signatures", true),
-        detect_stamps: boolField("detect_stamps", "Detect Stamps / Seals", true),
         detect_checkboxes: boolField("detect_checkboxes", "Detect Checkboxes", true),
         detect_qr: boolField("detect_qr", "Detect QR / Barcodes", true),
-        detect_logos: boolField("detect_logos", "Detect Logos", false, "", true),
-        detect_handwriting: boolField("detect_handwriting", "Detect Handwriting", false, "", true),
+        // detect_stamps / detect_logos / detect_handwriting removed — not supported by the backend detector.
       },
       outputs: [
         output("document_with_annotations", "Document + Annotations", ["Message"]),

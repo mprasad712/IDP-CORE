@@ -90,11 +90,11 @@ class FlowLog:
 
 
 # ── flow-log io payload helpers (bounded, for the per-component input/output trace the UI renders) ──
-_IO_TEXT_SAMPLE = 800   # max chars of any text sample stored in the log
-_IO_VALUE_SAMPLE = 200  # max chars of a single header/cell value stored in the log
-_IO_MAX_ROWS = 3        # max sample line-item rows stored in the log
-_IO_MAX_HEADERS = 30    # max header name->value pairs stored in the log
-_IO_MAX_COLS = 30       # max columns per sampled line-item row stored in the log
+_IO_TEXT_SAMPLE = 2000  # max chars of any text sample stored in the log
+_IO_VALUE_SAMPLE = 400  # max chars of a single header/cell value stored in the log
+_IO_MAX_ROWS = 12       # max sample line-item rows stored in the log
+_IO_MAX_HEADERS = 60    # max header name->value pairs stored in the log
+_IO_MAX_COLS = 40       # max columns per sampled line-item row stored in the log
 
 
 def _clip(text: Any, n: int = _IO_TEXT_SAMPLE) -> str:
@@ -427,14 +427,23 @@ async def _hook_classify(session, document_id: UUID, base_agent, merged_text: st
             return True
 
         sel = result.get("selected_config_id")
+        _classify_io = {"output": {
+            "predicted_type": result.get("predicted_type"),
+            "confidence": result.get("confidence"),
+            "candidates": result.get("candidates"),
+            "selected_config_id": str(sel) if sel else None,
+            "auto_selected": bool(sel and cfg.classify_auto_select),
+        }}
         if sel and cfg.classify_auto_select:
             cfg.field_config_id = sel if isinstance(sel, UUID) else UUID(str(sel))
             cfg.extraction_mode = MODE_NAMED
             flow.step("classify", "ok",
-                      f"type={result.get('predicted_type')} conf={result.get('confidence')} -> auto-selected config")
+                      f"type={result.get('predicted_type')} conf={result.get('confidence')} -> auto-selected config",
+                      io=_classify_io)
         else:
             flow.step("classify", "ok",
-                      f"type={result.get('predicted_type')} conf={result.get('confidence')}")
+                      f"type={result.get('predicted_type')} conf={result.get('confidence')}",
+                      io=_classify_io)
     except Exception as e:
         flow.step("classify", "warn", f"skipped ({e})")
     return False
@@ -573,6 +582,22 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             + (f" (config={cfg.config_name})" if cfg.config_name else "")
             + f", model={str(cfg.model_id)[:8]}…, ocr_lang={cfg.ocr_lang}, "
             f"page_select={cfg.page_selection_mode}, features=[{', '.join(_features) or 'none'}]",
+            io={"output": {
+                "extraction_mode": cfg.extraction_mode,
+                "config_name": cfg.config_name,
+                "field_config_id": str(cfg.field_config_id) if cfg.field_config_id else None,
+                "model_id": str(cfg.model_id) if cfg.model_id else None,
+                "ocr_lang": cfg.ocr_lang,
+                "page_selection": cfg.page_selection_mode,
+                "features_enabled": _features,
+                "classify": {"enabled": cfg.classify_enabled, "auto_select": cfg.classify_auto_select,
+                             "threshold": cfg.classify_threshold} if cfg.classify_enabled else None,
+                "long_doc": {"max_tokens": cfg.long_doc_max_tokens, "overlap": cfg.long_doc_overlap_tokens},
+                "rules": {"operator": cfg.rules_operator, "count": len(cfg.canvas_rules),
+                          "conditions": cfg.canvas_rules} if cfg.canvas_rules else None,
+                "default_rule_action": cfg.default_rule_action,
+                "confidence_threshold": cfg.confidence_threshold,
+            }},
         )
 
         logger.info(f"[pipeline] {document_id}: fetching file from storage ({agent_scope}/{file_name})")
@@ -803,7 +828,9 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             f"+ {n_line} line-item row(s); overall confidence={overall_conf:.2f} → saved to "
             f"idp_extracted_headers/idp_extracted_line_items",
             io={
-                "input": {"mode": cfg.extraction_mode, "chars": len(merged_text), "text_sample": _clip(merged_text)},
+                "input": {"mode": cfg.extraction_mode, "config_name": cfg.config_name,
+                          "field_config_id": str(cfg.field_config_id) if cfg.field_config_id else None,
+                          "chars": len(merged_text), "text_sample": _clip(merged_text)},
                 "output": {
                     "headers": _io_headers(_ex),
                     "line_item_rows": n_line,

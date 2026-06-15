@@ -1,7 +1,6 @@
 import {
   Search,
   Download,
-  Trash2,
   Eye,
   ChevronLeft,
   Maximize2,
@@ -11,8 +10,9 @@ import {
   AlertCircle,
   MinusCircle,
   X,
-  Plus,
   RotateCcw,
+  Info,
+  ListTree,
 } from "lucide-react";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -45,10 +45,14 @@ import { cn } from "@/utils/utils";
 import {
   useGetProcessedDocs,
   useGetProcessedDoc,
+  usePatchProcessedDocFields,
+  usePostProcessedDocReview,
   type ProcessedDoc as ApiProcessedDoc,
   type ProcessedDocDetail,
+  type FieldUpdateItem,
 } from "@/controllers/API/queries/idp";
 import { api } from "@/controllers/API/api";
+import { ProcessingTrace } from "@/components/core/idpProcessingTrace";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -59,6 +63,9 @@ interface ExtractedField {
   value: string;
   confidence: number;
   changed?: boolean;
+  fieldId?: string;   // idp_extracted_headers.id — needed to PATCH the reviewed value
+  reasoning?: string | null;                       // model's evidence/why for this value
+  source?: Record<string, unknown> | null;         // {page_number, bounding_box} where it was found
 }
 
 interface LineItem {
@@ -80,6 +87,8 @@ interface ProcessedDoc {
   lineItemColumns: string[];
   reviewer?: string;
   reviewedAt?: string;
+  // rowId -> (columnName -> idp_extracted_line_items.id), so edited cells can be PATCHed.
+  cellIds?: Record<string, Record<string, string>>;
 }
 
 // ─── API → page adapters ──────────────────────────────────────────────────────
@@ -117,14 +126,58 @@ function enrichWithDetail(
     key: h.field_name,
     value: h.reviewed_value ?? h.extracted_value ?? "",
     confidence: Math.round((h.confidence_score ?? 0) * 100),
+    fieldId: h.id,
+    reasoning: h.reasoning_trace,
+    source: h.source_location,
   }));
   const cols = Array.from(new Set(detail.line_items.map((li) => li.column_name)));
   const rows: Record<number, LineItem> = {};
+  const cellIds: Record<string, Record<string, string>> = {};
   detail.line_items.forEach((li) => {
-    rows[li.row_index] = rows[li.row_index] ?? ({ id: String(li.row_index) } as LineItem);
+    const rowId = String(li.row_index);
+    rows[li.row_index] = rows[li.row_index] ?? ({ id: rowId } as LineItem);
     rows[li.row_index][li.column_name] = li.reviewed_value ?? li.extracted_value ?? "";
+    (cellIds[rowId] = cellIds[rowId] ?? {})[li.column_name] = li.id;
   });
-  return { ...base, headerFields, lineItems: Object.values(rows), lineItemColumns: cols };
+  return { ...base, headerFields, lineItems: Object.values(rows), lineItemColumns: cols, cellIds };
+}
+
+// ─── CSV export (client-side; no backend export endpoint) ──────────────────────
+
+function _csvEscape(v: unknown): string {
+  return `"${String(v ?? "").replace(/"/g, '""')}"`;
+}
+
+/** Download a summary CSV of the given processed docs (filename, agent, date, type, confidence, status). */
+function exportDocsToCsv(rows: ProcessedDoc[], filename: string): void {
+  const header = ["Document", "Agent", "Date", "Type", "Confidence", "Status"];
+  const lines = [header.join(",")];
+  rows.forEach((d) => {
+    lines.push(
+      [d.name, d.sourceAgent, d.dateProcessed, d.documentType, `${d.overallConfidence}%`, d.status]
+        .map(_csvEscape)
+        .join(","),
+    );
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Build the reasoning + source-location tooltip text for a field (audit/evidence trail). */
+function evidenceTitle(f: ExtractedField): string {
+  const parts: string[] = [];
+  if (f.reasoning) parts.push(`Why: ${f.reasoning}`);
+  const src = f.source as { page_number?: number; bounding_box?: unknown } | null | undefined;
+  if (src?.page_number != null) {
+    const bbox = Array.isArray(src.bounding_box) ? "  ·  located on page" : "";
+    parts.push(`Source: page ${src.page_number}${bbox}`);
+  }
+  return parts.join("\n");
 }
 
 // ─── Seed data ────────────────────────────────────────────────────────────────
@@ -404,7 +457,16 @@ function DocDetailView({
   const [fields, setFields]       = useState<ExtractedField[]>(doc.headerFields);
   const [lineItems, setLineItems] = useState<LineItem[]>(doc.lineItems);
   const [notes, setNotes]         = useState("");
+  const [saving, setSaving]       = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [showTrace, setShowTrace] = useState(false);
   const isReadOnly = doc.status === "auto_approved" || doc.status === "reviewed";
+
+  // Persistence: PATCH edited field values, then POST the review (records reviewer + timestamp,
+  // moves the doc to the Reviewed tab). The hooks invalidate the queries on success so the list
+  // and detail refetch automatically.
+  const patchFields = usePatchProcessedDocFields(doc.id);
+  const postReview  = usePostProcessedDocReview(doc.id);
 
   // Sync local state when the detail data arrives after initial render.
   // useState only uses the prop value on mount; subsequent prop updates are ignored
@@ -432,21 +494,45 @@ function DocDetailView({
     setLineItems((prev) => prev.map((r) => r.id === id ? { ...r, [col]: value } : r));
   };
 
-  const addRow = () => {
-    const empty: LineItem = { id: `r${Date.now()}` };
-    doc.lineItemColumns.forEach((col) => { empty[col] = ""; });
-    setLineItems((prev) => [...prev, empty]);
-  };
 
-  const handleSave = () => {
-    onSave({
-      ...doc,
-      headerFields: fields,
-      lineItems,
-      status: "reviewed",
-      reviewer: "me",
-      reviewedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
-    });
+  const handleSave = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      // Build the field-update payload from the DB ids carried through enrichWithDetail.
+      // (Add Row / row-delete are disabled for backend docs — there are no create/delete
+      // line-item endpoints — so only existing cells are edited, and every cell id resolves.)
+      const headers: FieldUpdateItem[] = fields
+        .filter((f) => f.fieldId)
+        .map((f) => ({ id: f.fieldId as string, value: f.value === "" ? null : f.value }));
+      const line_items: FieldUpdateItem[] = [];
+      lineItems.forEach((row) => {
+        const ids = doc.cellIds?.[row.id];
+        if (!ids) return;
+        doc.lineItemColumns.forEach((col) => {
+          const cellId = ids[col];
+          if (cellId) line_items.push({ id: cellId, value: (row[col] ?? "") === "" ? null : row[col] });
+        });
+      });
+      if (headers.length || line_items.length) {
+        await patchFields.mutateAsync({ headers, line_items });
+      }
+      await postReview.mutateAsync({ notes: notes || null });
+      // Only on success: reflect the review locally + close (the hooks already refetched).
+      onSave({
+        ...doc,
+        headerFields: fields,
+        lineItems,
+        status: "reviewed",
+        reviewer: "me",
+        reviewedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
+      });
+    } catch (e) {
+      console.error("[ProcessedDocs] save review failed", e);
+      setSaveError("Could not save the review — nothing was persisted. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -514,7 +600,14 @@ function DocDetailView({
                       className="h-7 text-sm bg-transparent border-transparent hover:border-input focus:border-[#D04A02] transition-colors px-2"
                     />
                   )}
-                  <ConfidencePill score={f.confidence} />
+                  <div className="flex items-center gap-1.5 justify-end">
+                    {(f.reasoning || f.source) && (
+                      <span title={evidenceTitle(f)} className="text-muted-foreground/40 hover:text-foreground cursor-help" aria-label={`Extraction evidence — ${evidenceTitle(f)}`}>
+                        <Info className="h-3.5 w-3.5" />
+                      </span>
+                    )}
+                    <ConfidencePill score={f.confidence} />
+                  </div>
                 </div>
               ))}
             </div>
@@ -533,7 +626,6 @@ function DocDetailView({
                       {doc.lineItemColumns.map((col) => (
                         <TableHead key={col} className="text-[11px] font-semibold uppercase tracking-wide py-2">{col}</TableHead>
                       ))}
-                      {!isReadOnly && <TableHead className="w-8" />}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -552,33 +644,31 @@ function DocDetailView({
                             )}
                           </TableCell>
                         ))}
-                        {!isReadOnly && (
-                          <TableCell className="py-2">
-                            <button
-                              onClick={() => setLineItems((p) => p.filter((r) => r.id !== row.id))}
-                              className="text-muted-foreground/40 hover:text-destructive transition-colors"
-                            >
-                              <X className="h-3.5 w-3.5" />
-                            </button>
-                          </TableCell>
-                        )}
                       </TableRow>
                     ))}
                   </TableBody>
                 </Table>
               </div>
-              {!isReadOnly && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={addRow}
-                  className="mt-2 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-                >
-                  <Plus className="h-3.5 w-3.5" /> Add Row
-                </Button>
-              )}
+              {/* Add Row / row-delete removed: editing existing cell values persists via PATCH,
+                  but there is no backend endpoint to create or delete line-item rows yet. */}
             </section>
           )}
+
+          {/* Processing trace — the complete per-component cycle (input → output) for this document. */}
+          <section>
+            <button
+              onClick={() => setShowTrace((v) => !v)}
+              className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 hover:text-foreground transition-colors"
+            >
+              <ListTree className="h-3.5 w-3.5" />
+              {showTrace ? "Hide" : "View"} Processing Logs
+            </button>
+            {showTrace && (
+              <div className="mt-2 rounded-xl border bg-muted/5 overflow-hidden">
+                <ProcessingTrace docId={doc.id} />
+              </div>
+            )}
+          </section>
 
           {/* Review actions */}
           {!isReadOnly && (
@@ -595,10 +685,14 @@ function DocDetailView({
               />
               <Button
                 onClick={handleSave}
-                className="bg-[#D04A02] hover:bg-[#B84000] text-white gap-2 rounded-lg font-medium"
+                disabled={saving}
+                className="bg-[#D04A02] hover:bg-[#B84000] text-white gap-2 rounded-lg font-medium disabled:opacity-60"
               >
-                <CheckCircle2 className="h-4 w-4" /> Save Review
+                <CheckCircle2 className="h-4 w-4" /> {saving ? "Saving…" : "Save Review"}
               </Button>
+              {saveError && (
+                <p className="text-xs text-destructive mt-1">{saveError}</p>
+              )}
             </section>
           )}
 
@@ -695,19 +789,13 @@ function DocTable({
                     <Eye className="h-3.5 w-3.5" />
                   </button>
                   <button
-                    title="Export"
-                    onClick={(e) => e.stopPropagation()}
+                    title="Export CSV"
+                    onClick={(e) => { e.stopPropagation(); exportDocsToCsv([doc], `${doc.name || "document"}.csv`); }}
                     className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                   >
                     <Download className="h-3.5 w-3.5" />
                   </button>
-                  <button
-                    title="Delete"
-                    onClick={(e) => e.stopPropagation()}
-                    className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-destructive transition-colors"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  {/* Delete hidden: no backend DELETE endpoint for processed docs yet. */}
                 </div>
               </TableCell>
             </TableRow>
@@ -735,10 +823,11 @@ export default function ProcessedDocsPage() {
     if (docId) setSelectedId(docId);
   }, []);
 
-  // Live data from the IDP backend, plus Manas's demo docs (SEED_DOCS) kept as samples.
+  // Live data from the IDP backend only. (Demo SEED_DOCS removed so review queues / counts /
+  // tabs / search reflect real documents, not samples. SEED_DOCS definition kept but unused.)
   const { data: docsPage } = useGetProcessedDocs({ size: 100 });
   const docs: ProcessedDoc[] = useMemo(
-    () => [...(docsPage?.items ?? []).map(listDocToPage), ...SEED_DOCS],
+    () => [...(docsPage?.items ?? []).map(listDocToPage) /*, ...SEED_DOCS */],
     [docsPage],
   );
   // Extracted fields/line-items come from the detail endpoint, fetched on select.
@@ -842,8 +931,9 @@ export default function ProcessedDocsPage() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem>Export as CSV</DropdownMenuItem>
-            <DropdownMenuItem>Export as Excel</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => exportDocsToCsv(docs, "processed-docs.csv")}>
+              Export as CSV
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
