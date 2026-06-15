@@ -102,7 +102,13 @@ class ResolvedPipelineConfig:
 
 # ───────────────────────── graph helpers ─────────────────────────
 def _nodes(data: dict | None) -> list[dict]:
-    return (data or {}).get("nodes", []) if isinstance(data, dict) else []
+    nodes = (data or {}).get("nodes", []) if isinstance(data, dict) else []
+    return nodes if isinstance(nodes, list) else []  # tolerate {"nodes": None}
+
+
+def _edges(data: dict | None) -> list[dict]:
+    edges = (data or {}).get("edges", []) if isinstance(data, dict) else []
+    return edges if isinstance(edges, list) else []
 
 
 def _find_node(data: dict | None, display_name: str) -> dict | None:
@@ -110,6 +116,14 @@ def _find_node(data: dict | None, display_name: str) -> dict | None:
         if (node.get("data", {}).get("node", {}) or {}).get("display_name") == display_name:
             return node
     return None
+
+
+def _find_nodes(data: dict | None, display_name: str) -> list[dict]:
+    """All nodes with the given display_name (a graph may hold several, e.g. one LLM node per consumer)."""
+    return [
+        node for node in _nodes(data)
+        if (node.get("data", {}).get("node", {}) or {}).get("display_name") == display_name
+    ]
 
 
 def _field(node: dict | None, name: str, default=None):
@@ -122,18 +136,56 @@ def _field(node: dict | None, name: str, default=None):
     return default
 
 
-def _resolve_model_id_from_graph(data: dict | None) -> str | None:
-    """Read the model registry UUID from the 'Large Language Model' node.
+def _llm_node_model_uuid(node: dict | None) -> str | None:
+    """Parse a validated model registry UUID from an LLM node's ``registry_model`` field.
 
-    The ``registry_model`` value is formatted ``"display | model_name | uuid"``.
-    """
-    node = _find_node(data, _N_MODEL)
+    Format ``"display | model_name | uuid"``. Returns the canonical UUID string, or None if the
+    field is empty / malformed / the third part is not a real UUID (so the caller keeps scanning)."""
     raw = _field(node, "registry_model")
     if not raw or not isinstance(raw, str):
         return None
     parts = [p.strip() for p in raw.split("|")]
-    if len(parts) >= 3 and parts[2]:
-        return parts[2]
+    if len(parts) < 3 or not parts[2]:
+        return None
+    try:
+        return str(UUID(parts[2]))
+    except (ValueError, TypeError):
+        return None
+
+
+def _resolve_model_id_from_graph(data: dict | None) -> str | None:
+    """Resolve the model registry UUID for the extraction run.
+
+    A graph (e.g. the universal pipeline) may have SEVERAL 'Large Language Model' nodes — one
+    feeding the classifier, one the extractor — possibly with different models, and the user may
+    have filled only some. Resolve in priority order:
+      1. the LLM node EDGE-CONNECTED to the AI Field Extractor (the model that actually drives
+         extraction) — correct even when nodes carry different models;
+      2. else the first LLM node that carries a valid model uuid (handles the common single-model
+         case where only one of the duplicate nodes was filled).
+    """
+    llm_nodes = _find_nodes(data, _N_MODEL)
+    if not llm_nodes:
+        return None
+
+    # 1. Prefer the LLM wired into the extractor node.
+    extractor = _find_node(data, _N_EXTRACTOR)
+    extractor_id = extractor.get("id") if extractor else None
+    if extractor_id:
+        llm_by_id = {n.get("id"): n for n in llm_nodes}
+        for edge in _edges(data):
+            if not isinstance(edge, dict):
+                continue
+            if edge.get("target") == extractor_id and edge.get("source") in llm_by_id:
+                mid = _llm_node_model_uuid(llm_by_id[edge.get("source")])
+                if mid:
+                    return mid
+
+    # 2. Fallback: first LLM node with a valid model.
+    for node in llm_nodes:
+        mid = _llm_node_model_uuid(node)
+        if mid:
+            return mid
     return None
 
 
@@ -213,12 +265,23 @@ async def resolve_pipeline_config(
     prompt = _field(extractor, "prompt") or idp_agent.dynamic_prompt
     config_name = _field(extractor, "config_name")
 
+    # If the extractor node exposes NO explicit extraction_mode but a Field Configuration IS
+    # selected on it, treat the run as named-config. Some node templates (e.g. the universal
+    # pipeline) have a config_name field but no extraction_mode dropdown — without this, a chosen
+    # config would be silently ignored and the run would fall back to a generic dynamic prompt.
+    if mode == MODE_DYNAMIC and not graph_mode and config_name:
+        mode = MODE_NAMED
+
     # resolve named-config -> field_config_id (graph name first, else idp_agent column).
     # Deterministic when several configs share a name: prefer the agent's org (unique by the
     # (org_id, name) constraint), else the NEWEST active config of that name — never an arbitrary
     # .first() over unordered rows.
     field_config_id: UUID | None = idp_agent.field_config_id
     if mode == MODE_NAMED and config_name:
+        # The graph's config_name takes precedence over idp_agent.field_config_id: resolve it
+        # fresh, and on a MISS leave field_config_id = None (so the pipeline fails clearly with
+        # "no field configuration resolved") rather than silently using a stale/wrong config.
+        field_config_id = None
         try:
             base_q = select(IdpFieldConfiguration).where(
                 IdpFieldConfiguration.name == config_name,
@@ -247,6 +310,8 @@ async def resolve_pipeline_config(
                 ).first()
             if row:
                 field_config_id = row.id
+            else:
+                logger.warning(f"[agent_config] named config '{config_name}' not found / not active")
         except Exception as e:  # pragma: no cover - defensive
             logger.warning(f"[agent_config] config_name lookup failed: {e}")
 

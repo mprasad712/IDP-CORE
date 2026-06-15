@@ -420,7 +420,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
     ],
 }
 
-PERMISSION_VERSION = "v25"  # bump when permissions change (v25: IDP-native role key renames — doc_submitter, doc_reviewer, doc_approver, idp_auditor, idp_configurator)
+PERMISSION_VERSION = "v26"  # bump when permissions change (v26: invalidate stale IDP role caches after the idp_b24 role-redesign grants — super_admin/department_admin gained submit_documents/approve_documents/view_idp_analytics; v25: IDP-native role key renames — doc_submitter, doc_reviewer, doc_approver, idp_auditor, idp_configurator)
 
 
 class PermissionCacheService:

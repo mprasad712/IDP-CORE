@@ -1384,3 +1384,91 @@ async def test_named_config_resolution_never_leaks_another_orgs_config():
             if usr:
                 await session.delete(usr)
             await session.commit()
+
+
+def test_resolve_model_id_scans_all_llm_nodes():
+    """A graph with several 'Large Language Model' nodes (the universal pipeline has 2-3, one per
+    consumer) must resolve the model from ANY node that carries one — not only the first node,
+    which may be empty. (Universal-agent blocker fix.)"""
+    from agentcore.services.idp.agent_config import _resolve_model_id_from_graph
+
+    mid = str(uuid4())
+    data = {
+        "nodes": [
+            _node("Large Language Model", {"registry_model": ""}),                      # first: empty
+            _node("Large Language Model", {"registry_model": f"Groq | llama-3.3 | {mid}"}),  # second: filled
+        ],
+        "edges": [],
+    }
+    assert _resolve_model_id_from_graph(data) == mid
+    # No LLM node carries a model -> None.
+    empty = {"nodes": [_node("Large Language Model", {"registry_model": ""})], "edges": []}
+    assert _resolve_model_id_from_graph(empty) is None
+    # A malformed (non-UUID) third part is skipped, not returned.
+    bad = {"nodes": [_node("Large Language Model", {"registry_model": "G | m | not-a-uuid"})], "edges": []}
+    assert _resolve_model_id_from_graph(bad) is None
+    # {"nodes": None} must not raise.
+    assert _resolve_model_id_from_graph({"nodes": None, "edges": None}) is None
+
+
+def test_resolve_model_id_prefers_edge_connected_llm():
+    """With multiple LLM nodes carrying DIFFERENT models, resolve the one EDGE-CONNECTED to the
+    extractor (the model that actually drives extraction), not merely the first node."""
+    from agentcore.services.idp.agent_config import _resolve_model_id_from_graph
+
+    model_a, model_b = str(uuid4()), str(uuid4())
+
+    def _llm(node_id, mid):
+        return {"id": node_id, "type": "genericNode",
+                "data": {"node": {"display_name": "Large Language Model",
+                                  "template": {"registry_model": {"value": f"G | m | {mid}"}}}}}
+
+    ext = {"id": "ext1", "type": "genericNode",
+           "data": {"node": {"display_name": "AI Field Extractor", "template": {"config_name": {"value": ""}}}}}
+    data = {
+        "nodes": [_llm("llmA", model_a), _llm("llmB", model_b), ext],   # A is first by order
+        "edges": [{"source": "llmB", "target": "ext1"}],                # ...but B feeds the extractor
+    }
+    assert _resolve_model_id_from_graph(data) == model_b   # edge-connected wins over node order
+
+
+@pytest.mark.anyio
+async def test_named_config_inferred_when_config_name_set_without_mode():
+    """An AI Field Extractor node that has a Field Configuration selected but NO extraction_mode
+    field (the universal pipeline node) must resolve to named_config — a chosen config is never
+    silently ignored. (Universal-agent blocker fix.)"""
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent, IdpFieldConfiguration, IdpFieldConfigHeader
+    from agentcore.services.deps import session_scope
+
+    name = f"InferTest-{uuid4().hex[:8]}"
+    config_id = uuid4()
+    async with session_scope() as session:
+        session.add(IdpFieldConfiguration(id=config_id, name=name, is_active=True, is_template=False))
+        await session.flush()
+        session.add(IdpFieldConfigHeader(id=uuid4(), config_id=config_id, field_name="total", field_type="number", display_order=0))
+        await session.commit()
+
+    try:
+        # extractor node carries ONLY config_name (no extraction_mode key) — exactly the universal template.
+        graph = {
+            "nodes": [
+                _node("AI Field Extractor", {"config_name": name}),
+                _node("Large Language Model", {"registry_model": f"Groq | m | {uuid4()}"}),
+            ],
+            "edges": [],
+        }
+        # IdpAgent default mode is dynamic — the node's config selection must still win.
+        idp_agent = IdpAgent(id=uuid4(), agent_id=uuid4(), extraction_mode="dynamic_prompting")
+        base_agent = Agent(id=uuid4(), name="x", data=graph)
+
+        async with session_scope() as session:
+            cfg = await resolve_pipeline_config(session, idp_agent, base_agent)
+        assert cfg.extraction_mode == "named_config"      # inferred from config_name
+        assert cfg.field_config_id == config_id           # config actually resolved
+    finally:
+        async with session_scope() as session:
+            row = await session.get(IdpFieldConfiguration, config_id)
+            if row:
+                await session.delete(row)
+            await session.commit()

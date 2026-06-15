@@ -232,3 +232,32 @@ async def test_rules_crud_flow(setup_test_data):
     # Verify deleted
     response = client.get(f"/api/v1/idp/rules/{rule_id}")
     assert response.status_code == 404
+
+
+# ── Pure-function tests (no DB) for robust numeric rule parsing ──
+
+def test_rules_to_number_handles_money_and_formatting():
+    """Numeric rule comparisons must tolerate currency symbols, thousands separators, % and text."""
+    from agentcore.services.idp.rules_engine import _to_number
+    assert _to_number("1,200.00") == 1200.0
+    assert _to_number("$50.00") == 50.0
+    assert _to_number("₹ 19.80") == 19.8
+    assert _to_number("12.5%") == 12.5
+    assert _to_number("USD 1,000") == 1000.0
+    assert _to_number(129.8) == 129.8
+    # Identifier-like / non-numeric values must be REJECTED (not coerced to a bogus number).
+    for bad in (None, "", "abc", "-", "1-2", "INV-123", "N/A", "50-", "12-31-2024", True):
+        try:
+            _to_number(bad)
+            assert False, f"expected ValueError for {bad!r}"
+        except (ValueError, TypeError):
+            pass
+
+
+def test_rules_numeric_compare_with_currency():
+    """`calculated_total > 0` style rules must pass on real money strings like '$1,200.00'."""
+    from agentcore.services.idp.rules_engine import _compare_values
+    assert _compare_values("1,200.00", "1000", ">", "numeric") is True
+    assert _compare_values("$129.80", "0", ">", "numeric") is True
+    assert _compare_values("19.80", "19.80", "==", "numeric") is True
+    assert _compare_values("$5.00", "10", ">", "numeric") is False

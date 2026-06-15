@@ -52,15 +52,35 @@ def test_deskew_image():
     assert corrected.shape == img_skewed.shape
 
 def test_detect_rotation_angle():
-    # 1. Test horizontal text layout (upright -> 0 degrees)
+    # Horizontal layout -> correction is 0 or 180 (180 only resolvable when OCR is available).
     img_horiz = create_rotated_text_image(is_vertical=False)
-    angle_horiz = detect_rotation_angle(img_horiz)
-    assert angle_horiz == 0
+    assert detect_rotation_angle(img_horiz) in (0, 180)
 
-    # 2. Test vertical text layout (rotated -> 90 degrees)
+    # Vertical layout -> correction is 90 or 270.
     img_vert = create_rotated_text_image(is_vertical=True)
-    angle_vert = detect_rotation_angle(img_vert)
-    assert angle_vert == 90
+    assert detect_rotation_angle(img_vert) in (90, 270)
+
+
+def test_detect_rotation_angle_ocr_disambiguates_flip(monkeypatch):
+    """When OCR is available, the 0-vs-180 flip is resolved by whichever orientation reads better.
+    Here we simulate OCR that scores the 180-rotated page highest -> the page was upside-down."""
+    from agentcore.services.idp import pre_processing
+
+    img_horiz = create_rotated_text_image(is_vertical=False)   # coarse -> candidates {0, 180}
+    real_rotate = pre_processing.rotate_image
+    angle_by_id = {id(img_horiz): 0}   # the unrotated (angle 0) image
+
+    def rotate_track(image, angle):
+        out = real_rotate(image, angle)
+        angle_by_id[id(out)] = angle
+        return out
+
+    def fake_score(image):
+        return 9.0 if angle_by_id.get(id(image)) == 180 else 1.0   # 180 reads best
+
+    monkeypatch.setattr(pre_processing, "rotate_image", rotate_track)
+    monkeypatch.setattr(pre_processing, "_ocr_text_score", fake_score)
+    assert pre_processing.detect_rotation_angle(img_horiz) == 180
 
 def test_rotate_image():
     img = np.ones((100, 200, 3), dtype=np.uint8) * 255
