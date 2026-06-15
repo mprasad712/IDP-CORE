@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import mimetypes
@@ -7,6 +8,8 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 from loguru import logger
 from langchain_core.messages import SystemMessage, HumanMessage
+
+_LLM_TIMEOUT = 120  # seconds — fail fast rather than hang forever
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from agentcore.services.database.models.idp.config import (
@@ -14,7 +17,10 @@ from agentcore.services.database.models.idp.config import (
     IdpFieldConfigHeader,
     IdpFieldConfigLineItem,
 )
-from agentcore.services.idp.prompt_templates import build_extraction_messages
+from agentcore.services.idp.prompt_templates import (
+    build_extraction_messages,
+    build_compact_extraction_messages,
+)
 
 # ──────────────────────────────────────────────────────────────────────
 # Pydantic Schemas for Structured Output
@@ -82,27 +88,34 @@ SYSTEM_PROMPT = (
     "Conform strictly to the StructuredExtractionResult schema. Return ONLY valid JSON."
 )
 
-# Compact prompt: asks for FLAT values only (no per-field confidence/reasoning). The verbose
-# schema above forces value+confidence+reasoning for every one of N columns on every row, which
-# overflows the model's output token limit on multi-row invoices → truncated/invalid JSON →
-# dropped line items. The compact output is ~half the tokens; we re-attach a uniform default
-# confidence in post-processing (`_expand_extraction`).
+# Compact prompt: asks for {value, confidence} per field — no reasoning text.
+# Reasoning was the token-overflow culprit on multi-row invoices (each reasoning string
+# could be 100-200 chars × N fields × M rows = output limit exceeded → truncated JSON →
+# dropped line items). Dropping reasoning and keeping only a float per field adds ~12 tokens
+# per field — negligible — while giving real model-generated confidence instead of a flat 0.85.
 COMPACT_SYSTEM_PROMPT = (
     "You are an expert document data extractor.\n"
-    "Extract the requested fields from the document text and return ONLY a JSON object of this shape:\n"
-    '{"headers": {"field_name": "value", ...}, "line_items": [{"column_name": "value", ...}, ...]}\n\n'
+    "Extract the requested fields from the document text and return ONLY a valid JSON object.\n\n"
+    "Output shape:\n"
+    '{"headers": {"field_name": {"value": "extracted string or null", "confidence": 0.95}, ...},\n'
+    ' "line_items": [{"col_name": {"value": "extracted string or null", "confidence": 0.87}, ...}, ...]}\n\n'
     "Rules:\n"
-    "- 'headers' are single document-level fields (invoice number, date, vendor, totals).\n"
-    "- 'line_items' is a list of rows; each row is a flat object of column_name -> value.\n"
-    "- Include ONLY fields/columns you actually find. Omit anything not present (do NOT invent values).\n"
-    "- Dates as YYYY-MM-DD; numbers as plain strings. Values must be strings or null.\n"
-    "- Do NOT include confidence or reasoning. Return ONLY valid JSON, no prose, no code fences."
+    "- 'headers': single document-level fields (invoice number, date, vendor, totals, etc.).\n"
+    "- 'line_items': list of rows; each row is a flat object of column_name -> {value, confidence}.\n"
+    "- 'confidence' MUST be a genuine float 0.0–1.0 reflecting extraction certainty. "
+    "Use the full range — NOT binary:\n"
+    "    0.90–1.00 = value stated verbatim and unambiguous in the document\n"
+    "    0.70–0.89 = clearly present but requires minor inference (e.g. format conversion)\n"
+    "    0.40–0.69 = partially present, ambiguous, or derived from context\n"
+    "    0.00–0.39 = absent, guessed, or very uncertain\n"
+    "- If a field is not present in the document: return null value with confidence 0.0.\n"
+    "- Dates as YYYY-MM-DD; numbers as plain strings without currency symbols. Values must be strings or null.\n"
+    "- Do NOT include reasoning text. Return ONLY valid JSON, no prose, no markdown fences."
 )
 
-# Uniform confidence assigned to any field the model returns in compact mode (it returns no
-# real per-field score). Fields that are absent/empty get 0.0, so a document missing fields has
-# a lower overall average and routes to HITL review.
-_DEFAULT_FIELD_CONFIDENCE = 0.85
+# Fallback used only when the model returns a plain scalar instead of {value,confidence}.
+# This path should now be rare since the prompt explicitly requests the object form.
+_DEFAULT_FIELD_CONFIDENCE = 0.75
 
 
 def _strip_code_fences(text: str) -> str:
@@ -211,7 +224,7 @@ async def extract_dynamic(
             HumanMessage(content=user_content),
         ]
         try:
-            response = await llm_model.ainvoke(messages)
+            response = await asyncio.wait_for(llm_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
             raw_content = response.content if hasattr(response, "content") else str(response)
             parsed = json.loads(_strip_code_fences(raw_content))
             return _expand_extraction(parsed)
@@ -229,7 +242,7 @@ async def extract_dynamic(
     if hasattr(llm_model, "with_structured_output"):
         try:
             structured_model = llm_model.with_structured_output(StructuredExtractionResult)
-            result = await structured_model.ainvoke(messages)
+            result = await asyncio.wait_for(structured_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
             if isinstance(result, StructuredExtractionResult):
                 if not result.headers and not result.line_items:
                     raise ValueError("Structured output returned empty headers and line items")
@@ -242,7 +255,7 @@ async def extract_dynamic(
             logger.warning(f"[LLM] with_structured_output failed: {e}. Falling back to raw JSON parsing.")
 
     # Fallback: raw JSON parsing
-    response = await llm_model.ainvoke(messages)
+    response = await asyncio.wait_for(llm_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
     raw_content = response.content if hasattr(response, "content") else str(response)
 
     raw_content = raw_content.strip()
@@ -292,30 +305,24 @@ async def extract_dynamic(
     return {"headers": clean_headers, "line_items": clean_line_items}
 
 
-async def _invoke_llm(system: str, user: str, llm_model: Any) -> Dict[str, Any]:
-    """Invoke the LLM with system+user messages, return normalised extraction dict."""
+async def _compact_invoke(system: str, user: str, llm_model: Any) -> Dict[str, Any]:
+    """Invoke the LLM with a compact (flat-JSON) system+user prompt and expand to the canonical shape.
+
+    Plain ``ainvoke`` (NOT ``with_structured_output``): the verbose per-cell schema overflows the
+    output-token budget on multi-row tables and drops ``line_items``. The model returns flat
+    ``{"headers": {...}, "line_items": [{...}]}``; ``_expand_extraction`` re-attaches a uniform
+    default confidence. On unparseable JSON, return an empty result + error (the pipeline treats a
+    zero-field/error extraction as fatal/partial, matching ``extract_dynamic``'s compact path).
+    """
     messages = [SystemMessage(content=system), HumanMessage(content=user)]
-
-    # Try structured output first (works on tool-calling capable models)
-    if hasattr(llm_model, "with_structured_output"):
-        try:
-            result = await llm_model.with_structured_output(StructuredExtractionResult).ainvoke(messages)
-            if isinstance(result, StructuredExtractionResult):
-                if not result.headers and not result.line_items:
-                    raise ValueError("Structured output returned empty headers and line items")
-                return _expand_extraction(result.model_dump())
-            if isinstance(result, dict):
-                if not result.get("headers") and not result.get("line_items"):
-                    raise ValueError("Structured output returned empty headers and line items")
-                return _expand_extraction(result)
-        except Exception as e:
-            logger.warning(f"[LLM] with_structured_output failed: {e}. Falling back to raw JSON parsing.")
-
-    # Fallback: raw invocation + JSON parse
-    response = await llm_model.ainvoke(messages)
-    raw_content = response.content if hasattr(response, "content") else str(response)
-    parsed = json.loads(_strip_code_fences(raw_content))
-    return _expand_extraction(parsed)
+    try:
+        response = await llm_model.ainvoke(messages)
+        raw_content = response.content if hasattr(response, "content") else str(response)
+        parsed = json.loads(_strip_code_fences(raw_content))
+        return _expand_extraction(parsed)
+    except Exception as e:
+        logger.error(f"[Extraction] compact named-config parsing failed: {e}")
+        return {"headers": {}, "line_items": [], "error": f"Extraction parsing failed: {str(e)}"}
 
 
 async def extract_named_config(
@@ -345,11 +352,12 @@ async def extract_named_config(
     )
     line_items = (await session.exec(lines_stmt)).all()
 
-    # 3. Build prompt from general template, inserting field names + DB prompts
-    system_prompt, user_prompt = build_extraction_messages(headers, line_items, ocr_text)
+    # 3. Build a COMPACT prompt (flat values, field names + DB prompts as hints). The verbose
+    #    per-cell value+confidence+reasoning schema truncates line_items on multi-row tables.
+    system_prompt, user_prompt = build_compact_extraction_messages(headers, line_items, ocr_text)
 
-    # 4. Invoke LLM directly with the template-built messages
-    raw_result = await _invoke_llm(system_prompt, user_prompt, llm_model)
+    # 4. Invoke the LLM with plain ainvoke; _expand_extraction re-attaches uniform confidence.
+    raw_result = await _compact_invoke(system_prompt, user_prompt, llm_model)
 
     # 5. Filter/Align the output to strictly match the requested configuration fields
     # (Removes hallucinations and maps missing properties with nulls/defaults)
@@ -517,8 +525,7 @@ async def extract_multimodal(
                 raise ValueError("Parsed output is not a JSON object.")
             parsed.setdefault("headers", {})
             parsed.setdefault("line_items", [])
-            # Reuse the same normalisation helper from _invoke_llm path
-            # (build a temporary messages-style response to reuse logic)
+            # Normalise the verbose multimodal response into the canonical shape.
             clean_h: Dict[str, Any] = {}
             for k, v in parsed["headers"].items():
                 if isinstance(v, dict):
@@ -629,6 +636,111 @@ def _normalize_line_items(rows: Any) -> List[Dict[str, Any]]:
     return normalized
 
 
+def _ocr_evidence(
+    extracted_value: str,
+    ocr_tokens: List[Dict[str, Any]],
+    llm_conf: float,
+) -> tuple:
+    """Return (source_location, confidence_score) from OCR evidence.
+
+    LLMs always over-report confidence (0.9+ for everything they found, 0.0 for
+    what they missed) so their self-score is essentially binary.  Real confidence
+    comes from how clearly the extracted value appears in the raw OCR output:
+
+      0.88–1.00  exact single-token match           — value found verbatim, clear OCR
+      0.70–0.87  substring / near-exact match       — found with minor formatting diff
+      0.52–0.69  value in concatenated token stream — found but split across tokens
+      0.25–0.51  word-level overlap only            — partially matched, possible error
+      0.10–0.35  value not in OCR (inferred)        — model calculated / reformatted
+      0.00        null / missing field
+    """
+    if not extracted_value or not extracted_value.strip():
+        return None, 0.0
+
+    val = extracted_value.strip().lower()
+    if not val:
+        return None, 0.0
+
+    if not ocr_tokens:
+        # No OCR tokens (e.g. pure digital PDF path without token export).
+        # Dampen the LLM score — it's still overconfident but better than 0.
+        return None, round(min(llm_conf * 0.80, 0.75), 3)
+
+    # Pre-build the full document text for multi-token substring checks.
+    all_text = " ".join(str(t.get("text", "")).strip() for t in ocr_tokens).lower()
+    avg_ocr_conf = (
+        sum(float(t.get("confidence", 1.0)) for t in ocr_tokens) / len(ocr_tokens)
+    )
+
+    source_loc: dict | None = None
+    best_score = 0.0
+    val_words = val.split()
+
+    for token in ocr_tokens:
+        tok_text = str(token.get("text", "")).strip().lower()
+        if not tok_text:
+            continue
+        ocr_conf = float(token.get("confidence", 1.0))
+
+        # ── Exact single-token match ──
+        if val == tok_text:
+            score = 0.88 + ocr_conf * 0.12          # 0.88 – 1.00
+            if score > best_score:
+                best_score = score
+                source_loc = {
+                    "page_number": token.get("page_number", 1),
+                    "bounding_box": token.get("bounding_box"),
+                    "confidence": ocr_conf,
+                }
+            continue
+
+        # ── Substring match (value in token text or token in value) ──
+        if val in tok_text or tok_text in val:
+            shorter = min(len(val), len(tok_text))
+            longer  = max(len(val), len(tok_text))
+            ratio   = shorter / longer if longer else 0.0
+            score   = (0.70 + ratio * 0.17) * ocr_conf   # 0.70 – 0.87 × ocr_conf
+            if score > best_score:
+                best_score = score
+                if source_loc is None:
+                    source_loc = {
+                        "page_number": token.get("page_number", 1),
+                        "bounding_box": token.get("bounding_box"),
+                        "confidence": ocr_conf,
+                    }
+            continue
+
+        # ── Word-level overlap (multi-word values like "Acme Supplies Ltd") ──
+        tok_words = set(tok_text.split())
+        overlap   = set(val_words) & tok_words
+        if overlap:
+            overlap_ratio = len(overlap) / max(len(val_words), len(tok_words))
+            score = overlap_ratio * 0.50 * ocr_conf   # 0.00 – 0.50
+            if score > best_score:
+                best_score = score
+                if source_loc is None:
+                    source_loc = {
+                        "page_number": token.get("page_number", 1),
+                        "bounding_box": token.get("bounding_box"),
+                        "confidence": ocr_conf,
+                    }
+
+    # ── Multi-token concatenation check ──
+    # Catches values split across adjacent tokens (e.g. "14,200.00" → "14," + "200.00")
+    if best_score < 0.52 and val in all_text:
+        score = 0.52 + avg_ocr_conf * 0.17           # 0.52 – 0.69
+        best_score = max(best_score, score)
+
+    if best_score > 0.0:
+        return source_loc, round(min(best_score, 1.0), 3)
+
+    # ── Not found in OCR at all ──
+    # The model inferred, calculated, or reformatted this value.
+    # Use a heavily dampened LLM score so it stays clearly below verified fields.
+    inferred_score = round(min(llm_conf * 0.38, 0.35), 3)
+    return source_loc, inferred_score
+
+
 async def save_extraction_results(
     session: AsyncSession,
     document_id: UUID,
@@ -636,11 +748,11 @@ async def save_extraction_results(
     extraction_result: Dict[str, Any],
     ocr_tokens: Optional[List[Dict[str, Any]]] = None
 ) -> float:
-    """Save the structured extraction results to the database and compute/update confidence.
-    
-    Persists data to idp_extracted_headers and idp_extracted_line_items,
-    maps source locations (bounding boxes) using OCR tokens, and
-    calculates/updates the overall document confidence.
+    """Persist extraction results and compute OCR-evidence-based field confidence.
+
+    Confidence is derived from how clearly each extracted value appears in the raw
+    OCR token stream (see _ocr_evidence), NOT from LLM self-reporting which is
+    systematically overconfident (always ~0.9 for found fields, 0.0 for missing ones).
     """
     from sqlalchemy import delete
     from agentcore.services.database.models.idp.documents import (
@@ -649,33 +761,24 @@ async def save_extraction_results(
         IdpDocument
     )
 
-    # 1. Clean up existing extraction records for this job to ensure idempotency
+    # 1. Delete stale records so re-processing is idempotent.
     await session.execute(delete(IdpExtractedHeader).where(IdpExtractedHeader.job_id == job_id))
     await session.execute(delete(IdpExtractedLineItem).where(IdpExtractedLineItem.job_id == job_id))
 
-    confidences = []
-    
-    # 2. Save headers
+    confidences: List[float] = []
+
+    # 2. Save header fields.
     headers_dict = extraction_result.get("headers", {})
     for field_name, field_data in headers_dict.items():
         val = field_data.get("value")
         extracted_val = str(val) if val is not None else None
-        conf = float(field_data.get("confidence", 0.0))
+        llm_conf = float(field_data.get("confidence", 0.0))
         reasoning = field_data.get("reasoning")
-        
-        # Resolve source location using ocr_tokens matching
-        source_loc = None
-        if ocr_tokens and extracted_val:
-            val_lower = extracted_val.strip().lower()
-            for token in ocr_tokens:
-                tok_text = str(token.get("text", "")).strip().lower()
-                if val_lower in tok_text or tok_text in val_lower:
-                    source_loc = {
-                        "page_number": token.get("page_number", 1),
-                        "bounding_box": token.get("bounding_box"),
-                        "confidence": token.get("confidence", 1.0)
-                    }
-                    break
+
+        if extracted_val is None:
+            conf, source_loc = 0.0, None
+        else:
+            source_loc, conf = _ocr_evidence(extracted_val, ocr_tokens or [], llm_conf)
 
         header_rec = IdpExtractedHeader(
             id=uuid4(),
@@ -686,36 +789,30 @@ async def save_extraction_results(
             confidence_score=conf,
             reasoning_trace=reasoning,
             source_location=source_loc,
-            is_reviewed=False
+            is_reviewed=False,
         )
         session.add(header_rec)
-        confidences.append(conf)
+        # Only extracted fields count toward overall confidence.
+        # Null/missing fields are stored with conf=0.0 for the UI but excluded
+        # from the average so they don't dilute the score of what WAS found.
+        if extracted_val is not None:
+            confidences.append(conf)
 
-    # 3. Save line items (normalized so flat/nested LLM shapes both persist)
+    # 3. Save line items (handles both flat and nested LLM output shapes).
     line_items_list = _normalize_line_items(extraction_result.get("line_items", []))
     for row in line_items_list:
         row_idx = row.get("row_index", 0)
-        cols = row.get("columns", [])
-        for col in cols:
+        for col in row.get("columns", []):
             col_name = col.get("column_name")
             val = col.get("value")
             extracted_val = str(val) if val is not None else None
-            conf = float(col.get("confidence", 0.0))
+            llm_conf = float(col.get("confidence", 0.0))
             reasoning = col.get("reasoning")
-            
-            # Resolve source location
-            source_loc = None
-            if ocr_tokens and extracted_val:
-                val_lower = extracted_val.strip().lower()
-                for token in ocr_tokens:
-                    tok_text = str(token.get("text", "")).strip().lower()
-                    if val_lower in tok_text or tok_text in val_lower:
-                        source_loc = {
-                            "page_number": token.get("page_number", 1),
-                            "bounding_box": token.get("bounding_box"),
-                            "confidence": token.get("confidence", 1.0)
-                        }
-                        break
+
+            if extracted_val is None:
+                conf, source_loc = 0.0, None
+            else:
+                source_loc, conf = _ocr_evidence(extracted_val, ocr_tokens or [], llm_conf)
 
             line_rec = IdpExtractedLineItem(
                 id=uuid4(),
@@ -727,16 +824,17 @@ async def save_extraction_results(
                 confidence_score=conf,
                 reasoning_trace=reasoning,
                 source_location=source_loc,
-                is_reviewed=False
+                is_reviewed=False,
             )
             session.add(line_rec)
-            confidences.append(conf)
+            if extracted_val is not None:
+                confidences.append(conf)
 
-    # 4. Calculate overall weighted average confidence.
-    # No fields extracted => zero confidence (route to human review), NOT 1.0.
+    # 4. Overall confidence = mean of all field scores.
+    # No fields extracted → 0.0 (routes to HITL review rather than silent auto-approve).
     overall_conf = sum(confidences) / len(confidences) if confidences else 0.0
 
-    # 5. Update IdpDocument overall confidence
+    # 5. Persist overall confidence on the document row.
     doc = await session.get(IdpDocument, document_id)
     if doc:
         doc.overall_confidence = overall_conf

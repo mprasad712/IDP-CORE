@@ -230,7 +230,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       if (connector.visibility === "private") return isDeptScopedForUser(connector);
       return false;
     }
-    if (role === "developer" || role === "business_user") {
+    if (role === "idp_configurator" || role === "doc_reviewer") {
       return connector.visibility === "private" && connector.created_by_id === userId;
     }
     return false;
@@ -254,7 +254,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       if (connector.visibility === "private") return isDeptScopedForUser(connector);
       return false;
     }
-    if (role === "developer" || role === "business_user") {
+    if (role === "idp_configurator" || role === "doc_reviewer") {
       return connector.visibility === "private" && connector.created_by_id === userId;
     }
     return false;
@@ -360,7 +360,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       if (form.public_scope === "organization") {
         orgId =
           orgId ||
-          ((role === "developer" || role === "department_admin")
+          ((role === "idp_configurator" || role === "department_admin")
             ? visibilityOptions.organizations[0]?.id || null
             : null);
         deptId = null;
@@ -415,7 +415,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
   useEffect(() => {
     if (form.visibility !== "public") return;
     const isOrgLockedRole =
-      role === "developer" || role === "department_admin" || role === "business_user";
+      role === "idp_configurator" || role === "department_admin" || role === "doc_reviewer";
     if (
       form.public_scope === "organization" &&
       isOrgLockedRole &&
@@ -545,7 +545,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       public_scope: form.visibility === "public" ? form.public_scope : null,
       org_id:
         form.org_id ||
-        ((role === "developer" || role === "department_admin" || role === "business_user") &&
+        ((role === "idp_configurator" || role === "department_admin" || role === "doc_reviewer") &&
         form.visibility === "public" &&
         form.public_scope === "organization"
           ? userDeptOrgId || visibilityOptions.organizations[0]?.id
@@ -645,7 +645,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       if (form.public_scope === "organization") {
         const effectiveOrgId =
           form.org_id ||
-          ((role === "developer" || role === "department_admin" || role === "business_user")
+          ((role === "idp_configurator" || role === "department_admin" || role === "doc_reviewer")
             ? userDeptOrgId || visibilityOptions.organizations[0]?.id
             : "");
         if (!effectiveOrgId) return true;
@@ -1368,7 +1368,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                       <select
                         value={form.org_id}
                         onChange={(e) => setForm({ ...form, org_id: e.target.value })}
-                        disabled={role === "developer" || role === "department_admin"}
+                        disabled={role === "idp_configurator" || role === "department_admin"}
                         className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-80"
                       >
                         <option value="">{t("Select organization")}</option>

@@ -72,8 +72,8 @@ class McpRegistry(SQLModel, table=True):
 
     created_by: str | None = Field(default=None, nullable=True)
     created_by_id: UUID | None = Field(default=None, foreign_key="user.id", nullable=True, index=True)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
 
     __table_args__ = (
         ForeignKeyConstraint(

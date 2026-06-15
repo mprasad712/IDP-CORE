@@ -341,7 +341,7 @@ async def _enforce_creation_scope(
     shared_user_ids: list[str] = []
     org_ids, dept_pairs = await _get_scope_memberships(session, current_user.id)
 
-    if user_role not in {"root", "super_admin", "department_admin", "developer", "business_user"}:
+    if user_role not in {"root", "super_admin", "department_admin", "idp_configurator", "doc_reviewer"}:
         raise HTTPException(status_code=403, detail="Your role is not allowed to manage MCP servers")
 
     if visibility == "private":
@@ -359,7 +359,7 @@ async def _enforce_creation_scope(
                 payload.org_id = sorted(org_ids, key=str)[0]
                 payload.dept_id = None
         elif payload.org_id and payload.dept_id:
-            if user_role in {"department_admin", "developer", "business_user"}:
+            if user_role in {"department_admin", "idp_configurator", "doc_reviewer"}:
                 if not any(payload.org_id == org_id and payload.dept_id == dept_id for org_id, dept_id in dept_pairs):
                     raise HTTPException(
                         status_code=403,
@@ -369,7 +369,7 @@ async def _enforce_creation_scope(
             current_org_id, current_dept_id = sorted(dept_pairs, key=lambda x: (str(x[0]), str(x[1])))[0]
             payload.org_id = current_org_id
             payload.dept_id = current_dept_id
-        elif user_role in {"developer", "business_user", "department_admin"}:
+        elif user_role in {"idp_configurator", "doc_reviewer", "department_admin"}:
             raise HTTPException(status_code=403, detail="No active department scope found")
     else:
         if public_scope is None:
@@ -576,7 +576,7 @@ def _can_delete_mcp(
 
     normalized_roles = _normalize_role_variants(getattr(current_user, "role", ""))
     user_id = str(current_user.id)
-    if normalized_roles.intersection({"developer", "business_user"}):
+    if normalized_roles.intersection({"idp_configurator", "doc_reviewer"}):
         return False
     if normalized_roles.intersection({"super_admin", "superadmin"}):
         return bool(row.org_id and row.org_id in org_ids)
@@ -930,8 +930,8 @@ async def request_mcp_server(
     await _require_mcp_permission(current_user, "view_mcp_page")
     await _require_mcp_permission(current_user, "request_new_mcp")
     role = normalize_role(str(current_user.role))
-    if role not in {"developer", "business_user"}:
-        raise HTTPException(status_code=403, detail="Only developer/business_user can create MCP requests")
+    if role not in {"idp_configurator", "doc_reviewer"}:
+        raise HTTPException(status_code=403, detail="Only idp_configurator/doc_reviewer can create MCP requests")
 
     visibility, public_scope, public_dept_ids, shared_user_ids = await _enforce_creation_scope(session, current_user, body)
     await _ensure_mcp_name_available(session, body.server_name)
@@ -1095,7 +1095,7 @@ async def update_mcp_server(
 
     if body.visibility == "private" and body.dept_id is None:
         current_role = normalize_role(str(current_user.role))
-        if current_role in {"department_admin", "developer", "business_user"} and dept_pairs:
+        if current_role in {"department_admin", "idp_configurator", "doc_reviewer"} and dept_pairs:
             current_org_id, current_dept_id = sorted(dept_pairs, key=lambda x: (str(x[0]), str(x[1])))[0]
             if body.org_id is None:
                 body.org_id = current_org_id

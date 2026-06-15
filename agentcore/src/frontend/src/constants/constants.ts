@@ -600,7 +600,7 @@ export const CONTROL_NEW_USER = {
   username: "",
   is_active: false,
   is_superuser: false,
-  role: "business_user",
+  role: "doc_reviewer",
   department_admin_email: "",
   department_name: "",
   organization_name: "",

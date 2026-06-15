@@ -37,7 +37,7 @@ async def setup_test_data():
     """Sets up user, organization, base agent, field config, document, job, and extraction details."""
     async with session_scope() as session:
         # Resolve developer role
-        developer_role = (await session.exec(select(Role).where(Role.name == "developer"))).first()
+        developer_role = (await session.exec(select(Role).where(Role.name == "idp_configurator"))).first()
 
         # Create user
         unique_suffix = uuid4().hex[:8]
@@ -48,7 +48,7 @@ async def setup_test_data():
             password="testpassword",
             is_active=True,
             is_superuser=False,
-            role="developer",
+            role="idp_configurator",
         )
         session.add(user)
         await session.flush()

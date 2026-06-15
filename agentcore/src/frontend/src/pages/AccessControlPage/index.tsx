@@ -190,11 +190,12 @@ EXCEL_PERMISSION_STRUCTURE.forEach((page) => {
 
 const ROLE_DISPLAY_ORDER = [
   "super_admin",
-  "leader_executive",
+  "idp_auditor",
   "department_admin",
-  "developer",
-  "business_user",
-  "consumer",
+  "idp_configurator",
+  "doc_reviewer",
+  "doc_submitter",
+  "doc_approver",
 ] as const;
 
 const ROLE_PERMISSION_ALIASES: Record<string, string[]> = {

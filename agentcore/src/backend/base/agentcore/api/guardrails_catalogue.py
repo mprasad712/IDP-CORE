@@ -191,7 +191,7 @@ async def _enforce_creation_scope(
     public_dept_ids = _string_ids(getattr(payload, "public_dept_ids", None))
     org_ids, dept_pairs = await _get_scope_memberships(session, current_user.id)
 
-    if user_role not in {"root", "super_admin", "department_admin", "developer", "business_user"}:
+    if user_role not in {"root", "super_admin", "department_admin", "idp_configurator", "doc_reviewer"}:
         raise HTTPException(status_code=403, detail="Your role is not allowed to create guardrails")
 
     if visibility == "private":
@@ -206,7 +206,7 @@ async def _enforce_creation_scope(
                 raise HTTPException(status_code=403, detail="No active organization scope found")
             payload.org_id = current_org_id
             payload.dept_id = None
-        elif user_role in {"department_admin", "developer", "business_user"}:
+        elif user_role in {"department_admin", "idp_configurator", "doc_reviewer"}:
             current_org_id, current_dept_id = _first_membership_scope(org_ids, dept_pairs)
             if not current_org_id or not current_dept_id:
                 raise HTTPException(status_code=403, detail="No active department scope found")
@@ -341,7 +341,7 @@ def _can_edit_guardrail(
             return bool(dept_candidates.intersection(dept_id_set))
         return False
 
-    if role in {"developer", "business_user"}:
+    if role in {"idp_configurator", "doc_reviewer"}:
         return (row.get("visibility") or "private").strip().lower() == "private" and str(row.get("created_by")) == str(current_user.id)
 
     return False
@@ -383,7 +383,7 @@ def _can_delete_guardrail(
             return bool(dept_candidates.intersection(dept_id_set))
         return False
 
-    if role in {"developer", "business_user"}:
+    if role in {"idp_configurator", "doc_reviewer"}:
         return (row.get("visibility") or "private").strip().lower() == "private" and str(row.get("created_by")) == user_id
 
     return False

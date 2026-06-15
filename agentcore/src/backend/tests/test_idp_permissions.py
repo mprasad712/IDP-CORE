@@ -35,7 +35,7 @@ def _stub_permissions(monkeypatch, perms):
 @pytest.mark.anyio
 async def test_read_requires_view_idp(monkeypatch):
     _stub_permissions(monkeypatch, ["view_idp"])
-    user = SimpleNamespace(role="developer")
+    user = SimpleNamespace(role="idp_configurator")
 
     # GET is a read -> allowed with view_idp
     assert await idp_rbac(SimpleNamespace(method="GET"), user) is user
@@ -61,7 +61,7 @@ async def test_write_requires_manage_idp(monkeypatch):
 @pytest.mark.anyio
 async def test_no_idp_permission_is_denied(monkeypatch):
     _stub_permissions(monkeypatch, [])
-    user = SimpleNamespace(role="consumer")
+    user = SimpleNamespace(role="doc_submitter")
 
     with pytest.raises(HTTPException) as exc:
         await idp_rbac(SimpleNamespace(method="GET"), user)
@@ -76,6 +76,6 @@ async def test_seeded_permissions_resolve_for_roles():
     super_admin = set(await _get_permissions_for_role_db("super_admin"))
     assert {"view_idp", "manage_idp", "review_docs", "admin_idp"} <= super_admin
 
-    developer = set(await _get_permissions_for_role_db("developer"))
+    developer = set(await _get_permissions_for_role_db("idp_configurator"))
     assert {"view_idp", "manage_idp", "review_docs"} <= developer
     assert "admin_idp" not in developer

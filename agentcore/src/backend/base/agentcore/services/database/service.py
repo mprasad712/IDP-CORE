@@ -126,11 +126,29 @@ class DatabaseService(Service):
             else:
                 logger.error(f"Invalid poolclass '{poolclass_key}' specified. Using default pool class.")
 
-        return create_async_engine(
+        engine = create_async_engine(
             self.database_url,
             connect_args=self._get_connect_args(),
             **kwargs,
         )
+
+        # On every pool checkout, issue ROLLBACK so that any connection
+        # returned in an aborted PostgreSQL transaction state
+        # (InFailedSQLTransactionError) is reset before the next request
+        # touches it.  The checkout event fires inside the greenlet context
+        # that SQLAlchemy sets up for async engines, so await_only() works
+        # here — unlike pool_pre_ping=True which triggers MissingGreenlet
+        # with asyncpg 0.29+.
+        @event.listens_for(engine.sync_engine, "checkout")
+        def _reset_on_checkout(dbapi_conn, _conn_record, _conn_proxy):
+            try:
+                cursor = dbapi_conn.cursor()
+                cursor.execute("ROLLBACK")
+                cursor.close()
+            except Exception:
+                raise exc.DisconnectionError()
+
+        return engine
 
     @retry(wait=wait_fixed(2), stop=stop_after_attempt(10))
     def _create_engine_with_retry(self) -> AsyncEngine:
@@ -162,12 +180,21 @@ class DatabaseService(Service):
             yield NoopSession()
         else:
             async with AsyncSession(self.engine, expire_on_commit=False) as session:
-                # Start of Selection
                 try:
                     yield session
                 except exc.SQLAlchemyError as db_exc:
                     logger.error(f"Database error during session scope: {db_exc}")
                     await session.rollback()
+                    raise
+                except BaseException:
+                    # Non-SQLAlchemy exceptions (HTTPException, CancelledError, etc.) can
+                    # still leave the connection in a failed PostgreSQL transaction state if
+                    # a prior DB statement aborted. Roll back unconditionally so the
+                    # connection is clean before it returns to the pool.
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
                     raise
 
     @staticmethod

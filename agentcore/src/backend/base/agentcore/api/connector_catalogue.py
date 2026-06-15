@@ -429,7 +429,7 @@ async def _enforce_creation_scope(
     org_ids, dept_pairs = await _get_scope_memberships(session, current_user.id)
     dept_ids = {dept_id for _, dept_id in dept_pairs}
 
-    if user_role not in {"root", "super_admin", "department_admin", "developer", "business_user"}:
+    if user_role not in {"root", "super_admin", "department_admin", "idp_configurator", "doc_reviewer"}:
         raise HTTPException(status_code=403, detail="Your role is not allowed to create connectors")
 
     if visibility == "private":
@@ -443,7 +443,7 @@ async def _enforce_creation_scope(
                 raise HTTPException(status_code=403, detail="No active organization scope found")
             payload.org_id = sorted(org_ids, key=str)[0]
             payload.dept_id = None
-        elif user_role in {"department_admin", "developer", "business_user"}:
+        elif user_role in {"department_admin", "idp_configurator", "doc_reviewer"}:
             if not dept_pairs:
                 raise HTTPException(status_code=403, detail="No active department scope found")
             current_org_id, current_dept_id = sorted(dept_pairs, key=lambda x: (str(x[0]), str(x[1])))[0]
@@ -580,7 +580,7 @@ def _can_edit_connector(
             return bool(dept_candidates.intersection(dept_ids))
         return False
 
-    if role in {"developer", "business_user"}:
+    if role in {"idp_configurator", "doc_reviewer"}:
         return (
             _normalize_visibility(getattr(row, "visibility", "private")) == "private"
             and str(getattr(row, "created_by", "")) == str(current_user.id)
@@ -627,7 +627,7 @@ def _can_delete_connector(
             return bool(dept_candidates.intersection(dept_ids))
         return False
 
-    if role in {"developer", "business_user"}:
+    if role in {"idp_configurator", "doc_reviewer"}:
         return _normalize_visibility(getattr(row, "visibility", "private")) == "private" and str(getattr(row, "created_by", "")) == user_id
 
     return False

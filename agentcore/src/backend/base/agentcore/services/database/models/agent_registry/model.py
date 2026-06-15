@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel
-from sqlalchemy import JSON, Column, Enum as SQLEnum, Float, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy import JSON, Column, DateTime, Enum as SQLEnum, Float, Index, Integer, Text, UniqueConstraint, text
 from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
@@ -94,18 +94,9 @@ class AgentRegistryBase(SQLModel):
         ),
     )
     listed_by: UUID = Field(foreign_key="user.id", nullable=False, index=True)
-    listed_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
+    listed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
 
 
 class AgentRegistry(AgentRegistryBase, table=True):  # type: ignore[call-arg]
@@ -159,14 +150,8 @@ class AgentRegistryRating(SQLModel, table=True):  # type: ignore[call-arg]
         sa_column=Column(Text, nullable=True),
         description="Optional review text",
     )
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
 
     __table_args__ = (
         UniqueConstraint("registry_id", "user_id", name="uq_registry_rating_user"),

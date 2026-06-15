@@ -89,6 +89,42 @@ class FlowLog:
         return head + "\n" + "\n".join(self.lines) + "\n"
 
 
+# ── flow-log io payload helpers (bounded, for the per-component input/output trace the UI renders) ──
+_IO_TEXT_SAMPLE = 800   # max chars of any text sample stored in the log
+_IO_VALUE_SAMPLE = 200  # max chars of a single header/cell value stored in the log
+_IO_MAX_ROWS = 3        # max sample line-item rows stored in the log
+_IO_MAX_HEADERS = 30    # max header name->value pairs stored in the log
+_IO_MAX_COLS = 30       # max columns per sampled line-item row stored in the log
+
+
+def _clip(text: Any, n: int = _IO_TEXT_SAMPLE) -> str:
+    """Return at most ``n`` chars of ``text`` (plus an ellipsis marker if truncated)."""
+    s = "" if text is None else str(text)
+    return s if len(s) <= n else s[:n] + f"…(+{len(s) - n} chars)"
+
+
+def _io_value(v: Any):
+    """Clip a single header/cell value for the log (None stays None; everything else bounded str)."""
+    return None if v is None else _clip(v, _IO_VALUE_SAMPLE)
+
+
+def _io_headers(extracted: dict) -> dict:
+    """A compact {name: value} view of extracted headers, capped at _IO_MAX_HEADERS and per-value."""
+    out: dict = {}
+    for name, h in list((extracted.get("headers") or {}).items())[:_IO_MAX_HEADERS]:
+        out[str(name)] = _io_value(h.get("value") if isinstance(h, dict) else h)
+    return out
+
+
+def _io_sample_rows(extracted: dict) -> list:
+    """First _IO_MAX_ROWS line-item rows as flat {column: value} dicts (bounded rows/cols/values)."""
+    rows = []
+    for row in (extracted.get("line_items") or [])[:_IO_MAX_ROWS]:
+        cols = (row.get("columns", []) if isinstance(row, dict) else [])[:_IO_MAX_COLS]
+        rows.append({c.get("column_name"): _io_value(c.get("value")) for c in cols if isinstance(c, dict)})
+    return rows
+
+
 # ─────────────────────────────── helpers ───────────────────────────────
 async def _build_llm(session, model_id: str):
     """Build a MicroserviceChatModel for a registry model UUID (validated)."""
@@ -242,7 +278,10 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
             new_status = "auto_approved"
         else:
             new_status = "pending_review"
-        flow.step("route", "ok", f"{new_status} (no rules; threshold={cfg.confidence_threshold})")
+        flow.step("route", "ok", f"{new_status} (no rules; threshold={cfg.confidence_threshold})",
+                  io={"input": {"overall_conf": round(float(overall_conf), 4), "rules_count": 0,
+                               "threshold": cfg.confidence_threshold, "default_action": cfg.default_rule_action},
+                      "output": {"decision": new_status}})
         return new_status
 
     # Re-query the just-saved fields + any detected visual elements for the rule conditions.
@@ -279,6 +318,8 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
         "route", "ok",
         f"{new_status} via rules (matched_group={matched}, failed={failed}, "
         f"{len(rules)} rule(s))",
+        io={"input": {"overall_conf": round(float(overall_conf), 4), "rules_count": len(rules)},
+            "output": {"decision": new_status, "matched_group": matched, "failed_conditions": failed}},
     )
     return new_status
 
@@ -352,28 +393,39 @@ async def _hook_detect(session, document_id: UUID, file_bytes: bytes, file_type:
         flow.step("detect_elements", "warn", f"skipped ({e})")
 
 
-async def _hook_classify(session, document_id: UUID, base_agent, merged_text: str, cfg, flow: "FlowLog") -> None:
+async def _hook_classify(session, document_id: UUID, base_agent, merged_text: str, cfg, flow: "FlowLog") -> bool:
     """B29 document classification -> idp_document_classifications; may auto-select a Named Config.
 
     Mutates ``cfg`` in place (field_config_id + extraction_mode) when auto-select fires.
+    Returns True if the document should be skipped (type not in the user-selected doc_types list).
     """
     if not cfg.classify_enabled:
-        return
+        return False
     try:
         from agentcore.services.idp.classification import classify_and_persist
     except ImportError:
         flow.step("classify", "warn", "classification not available yet")
-        return
+        return False
     try:
         org_id = getattr(base_agent, "org_id", None)
+        doc_types = getattr(cfg, "classify_doc_types", None) or None
         # Isolated session: classify_and_persist commits internally; a failure must not poison
         # the main pipeline session (it would otherwise crash extraction/finalize).
         async with session_scope() as hook_session:
             result = await classify_and_persist(
                 hook_session, document_id, merged_text, org_id,
-                auto_select=cfg.classify_auto_select, threshold=cfg.classify_threshold,
+                auto_select=cfg.classify_auto_select,
+                threshold=cfg.classify_threshold,
+                doc_types=doc_types,
             )
         result = result if isinstance(result, dict) else {}
+
+        # Hard-skip gate: classification returned a skip signal (type not in selected types)
+        if result.get("skip"):
+            flow.step("classify", "skip",
+                      f"type={result.get('predicted_type')!r} not in selected types — document skipped")
+            return True
+
         sel = result.get("selected_config_id")
         if sel and cfg.classify_auto_select:
             cfg.field_config_id = sel if isinstance(sel, UUID) else UUID(str(sel))
@@ -385,6 +437,7 @@ async def _hook_classify(session, document_id: UUID, base_agent, merged_text: st
                       f"type={result.get('predicted_type')} conf={result.get('confidence')}")
     except Exception as e:
         flow.step("classify", "warn", f"skipped ({e})")
+    return False
 
 
 async def _hook_math_reconcile(extracted, llm, job, cfg, flow: "FlowLog"):
@@ -486,6 +539,12 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             f"input received: '{doc.original_filename}' ({doc.file_size_bytes} bytes, .{doc.file_type}, "
             f"source={doc.source}) — document marked processing",
             document_id=str(document_id),
+            io={"input": {
+                "filename": doc.original_filename,
+                "size_bytes": doc.file_size_bytes,
+                "file_type": doc.file_type,
+                "source": doc.source,
+            }},
         )
 
         # resolve agents + config
@@ -516,19 +575,23 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             f"page_select={cfg.page_selection_mode}, features=[{', '.join(_features) or 'none'}]",
         )
 
+        logger.info(f"[pipeline] {document_id}: fetching file from storage ({agent_scope}/{file_name})")
         file_bytes = await storage.get_file(agent_scope, file_name)
         file_type = (doc.file_type or "").lower().lstrip(".")
+        logger.info(f"[pipeline] {document_id}: file fetched ({len(file_bytes)} bytes, type={file_type})")
 
         # 1. extension gate
         if cfg.allowed_extensions and file_type not in cfg.allowed_extensions and cfg.skip_unmatched:
             raise PipelineError(f"file type '{file_type}' not allowed by this agent")
 
         # 2. detect digital/scanned (per page)
+        logger.info(f"[pipeline] {document_id}: classifying document (digital/scanned)")
         original_bytes = file_bytes
         overall_kind, page_status = text_layer.classify_document(
             original_bytes, file_type, min_text_length=cfg.min_text_length
         )
         flow.step("detect", "ok", f"{overall_kind} ({len(page_status)} page(s))", page_status=page_status)
+        logger.info(f"[pipeline] {document_id}: detected as {overall_kind} ({len(page_status)} pages)")
 
         digital_pages = {int(p) for p, k in page_status.items() if k == text_layer.DIGITAL}
         scanned_pages = {int(p) for p, k in page_status.items() if k == text_layer.SCANNED}
@@ -540,19 +603,25 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         if overall_kind == text_layer.DIGITAL:
             _, tokens = text_layer.extract_native_text(original_bytes, file_type)
             _chars = sum(len(str(t.get("text", ""))) for t in tokens)
-            flow.step("native", "ok", f"digital — native text layer used (no OCR): {len(tokens)} token(s), {_chars} chars")
+            flow.step("native", "ok", f"digital — native text layer used (no OCR): {len(tokens)} token(s), {_chars} chars",
+                      io={"output": {"char_count": _chars, "token_count": len(tokens),
+                                     "text_sample": _clip(" ".join(str(t.get("text", "")) for t in tokens))}})
         elif overall_kind == text_layer.SCANNED:
             ocr_bytes = await _maybe_preprocess(original_bytes, file_type, cfg, flow)
             tokens = await run_paddle_ocr(ocr_bytes, file_type, cfg.ocr_lang)
             _chars = sum(len(str(t.get("text", ""))) for t in tokens)
-            flow.step("ocr", "ok", f"PaddleOCR ({cfg.ocr_lang}) output: {len(tokens)} token(s), {_chars} chars")
+            flow.step("ocr", "ok", f"PaddleOCR ({cfg.ocr_lang}) output: {len(tokens)} token(s), {_chars} chars",
+                      io={"output": {"char_count": _chars, "token_count": len(tokens),
+                                     "text_sample": _clip(" ".join(str(t.get("text", "")) for t in tokens))}})
         else:  # mixed: native text for digital pages, OCR for scanned pages
             _, native = text_layer.extract_native_text(original_bytes, file_type)
             tokens += [t for t in native if int(t.get("page_number", 1) or 1) in digital_pages]
             ocr_bytes = await _maybe_preprocess(original_bytes, file_type, cfg, flow)
             ocr = await run_paddle_ocr(ocr_bytes, file_type, cfg.ocr_lang)
             tokens += [t for t in ocr if int(t.get("page_number", 1) or 1) in scanned_pages]
-            flow.step("ocr", "ok", f"mixed: native {len(digital_pages)} digital + OCR {len(scanned_pages)} scanned page(s)")
+            flow.step("ocr", "ok", f"mixed: native {len(digital_pages)} digital + OCR {len(scanned_pages)} scanned page(s)",
+                      io={"output": {"token_count": len(tokens),
+                                     "text_sample": _clip(" ".join(str(t.get("text", "")) for t in tokens))}})
 
         # HOOK: B32 multi-doc split — operate on the WHOLE document (before page selection).
         # If the file holds several documents, materialise a child doc+job each and stop here;
@@ -618,14 +687,34 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                 "text", "ok",
                 f"merged page-numbered text built: {len(merged_text)} chars across {len(selected)} page(s) "
                 f"→ saved to ocr_output/{document_id}/ocr_text.txt",
+                io={"output": {
+                    "chars": len(merged_text),
+                    "pages": len(selected),
+                    "path": f"ocr_output/{document_id}/ocr_text.txt",
+                    "text_sample": _clip(merged_text),
+                }},
             )
         else:
             flow.step("text", "warn", "no text extracted from the document")
 
+        logger.info(f"[pipeline] {document_id}: starting classification (classify_enabled={cfg.classify_enabled})")
         # HOOK: B29 classification — may set cfg.predicted_type + auto-select a Named Config
         # (mutates cfg.field_config_id / cfg.extraction_mode) before extraction runs.
-        await _hook_classify(session, document_id, base_agent, merged_text, cfg, flow)
+        # Returns True when doc_types filter is active and document type is not in selected list.
+        classify_skip = await _hook_classify(session, document_id, base_agent, merged_text, cfg, flow)
+        if classify_skip:
+            doc.status = "skipped"
+            doc.processing_completed_at = _utcnow()
+            job.status = "completed"
+            job.completed_at = _utcnow()
+            job.steps_completed = flow.steps_ok
+            job.log = flow.events
+            session.add(doc)
+            session.add(job)
+            await session.commit()
+            return
 
+        logger.info(f"[pipeline] {document_id}: starting extraction (mode={cfg.extraction_mode})")
         # 5. extract (text modes; multimodal parked)
         if cfg.multimodal_requested:
             flow.step("extract", "warn", "multimodal parked -> using text extraction")  # MULTIMODAL HOOK (PARKED)
@@ -707,11 +796,21 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         _names = list(_headers.keys())
         _preview = ", ".join(_names[:12]) + ("…" if len(_names) > 12 else "")
         job.extraction_mode_used = cfg.extraction_mode
+        _ex = extracted if isinstance(extracted, dict) else {}
         flow.step(
             "extract", "ok",
             f"LLM ({cfg.extraction_mode}) returned {n_head} header field(s) [{_preview}] "
             f"+ {n_line} line-item row(s); overall confidence={overall_conf:.2f} → saved to "
             f"idp_extracted_headers/idp_extracted_line_items",
+            io={
+                "input": {"mode": cfg.extraction_mode, "chars": len(merged_text), "text_sample": _clip(merged_text)},
+                "output": {
+                    "headers": _io_headers(_ex),
+                    "line_item_rows": n_line,
+                    "sample_rows": _io_sample_rows(_ex),
+                    "overall_confidence": round(float(overall_conf), 4),
+                },
+            },
         )
 
         # HOOK: B36 cross-page entity linking — record entities seen on multiple pages.

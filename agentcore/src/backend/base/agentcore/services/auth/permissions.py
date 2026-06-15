@@ -143,6 +143,14 @@ ACTIONS = {
     "ADD_CONNECTOR": "add_connector",
     "EDIT_MODEL_REGISTRY": "edit_model",
     "DELETE_MODEL_REGISTRY": "delete_model",
+    # IDP
+    "VIEW_IDP": "view_idp",
+    "MANAGE_IDP": "manage_idp",
+    "REVIEW_DOCS": "review_docs",
+    "ADMIN_IDP": "admin_idp",
+    "SUBMIT_DOCUMENTS": "submit_documents",
+    "APPROVE_DOCUMENTS": "approve_documents",
+    "VIEW_IDP_ANALYTICS": "view_idp_analytics",
 }
 
 ROLE_PERMISSIONS: Dict[str, List[str]] = {
@@ -200,9 +208,15 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "manage_idp",
         "review_docs",
         "admin_idp",
+        "submit_documents",
+        "approve_documents",
+        "view_idp_analytics",
     ],
-    "leader_executive": [
+    "idp_auditor": [
         "view_dashboard",
+        # IDP: read-only reporting and audit
+        "view_idp",
+        "view_idp_analytics",
     ],
     "super_admin": [
         "view_dashboard",
@@ -257,6 +271,9 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "manage_idp",
         "review_docs",
         "admin_idp",
+        "submit_documents",
+        "approve_documents",
+        "view_idp_analytics",
     ],
     "department_admin": [
         "view_dashboard",
@@ -311,8 +328,11 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "manage_idp",
         "review_docs",
         "admin_idp",
+        "submit_documents",
+        "approve_documents",
+        "view_idp_analytics",
     ],
-    "developer": [
+    "idp_configurator": [
         "view_dashboard",
         "view_projects_page",
         "view_published_agents",
@@ -342,12 +362,12 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_connector_page",
         "add_connector",
         "view_hitl_approvals_page",
-        # IDP: developers build + review, not admin
+        # IDP: configurators build templates and can submit test docs, not review/approve/admin
         "view_idp",
         "manage_idp",
-        "review_docs",
+        "submit_documents",
     ],
-    "business_user": [
+    "doc_reviewer": [
         "view_dashboard",
         "view_projects_page",
         "view_published_agents",
@@ -377,16 +397,30 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_connector_page",
         "add_connector",
         "view_hitl_approvals_page",
+        # IDP: reviewers correct AI-extracted data via HITL
+        "view_idp",
+        "review_docs",
     ],
-    "consumer": [
+    "doc_submitter": [
         "view_published_agents",
         "view_registry_agent",
         "view_orchastration_page",
         "interact_agents",
+        # IDP: submitters upload documents and track processing status
+        "view_idp",
+        "submit_documents",
+    ],
+    "doc_approver": [
+        "view_dashboard",
+        "view_hitl_approvals_page",
+        # IDP: final approval gate after HITL review
+        "view_idp",
+        "review_docs",
+        "approve_documents",
     ],
 }
 
-PERMISSION_VERSION = "v23"  # bump when permissions change (v23: + IDP perms view_idp/manage_idp/review_docs/admin_idp)
+PERMISSION_VERSION = "v26"  # bump when permissions change (v26: invalidate stale IDP role caches after the idp_b24 role-redesign grants — super_admin/department_admin gained submit_documents/approve_documents/view_idp_analytics; v25: IDP-native role key renames — doc_submitter, doc_reviewer, doc_approver, idp_auditor, idp_configurator)
 
 
 class PermissionCacheService:

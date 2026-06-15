@@ -14,15 +14,16 @@ from agentcore.services.database.models.user.model import User, UserUpdate
 
 
 def _role_priority(role: str | None) -> int:
-    normalized = normalize_role(role or "consumer")
+    normalized = normalize_role(role or "doc_submitter")
     priorities = {
         "root": 500,
         "super_admin": 400,
-        "leader_executive": 350,
+        "idp_auditor": 350,
         "department_admin": 300,
-        "developer": 200,
-        "business_user": 200,
-        "consumer": 100,
+        "idp_configurator": 200,
+        "doc_reviewer": 200,
+        "doc_submitter": 100,
+        "doc_approver": 150,
     }
     return priorities.get(normalized, 0)
 
@@ -99,6 +100,9 @@ async def update_user(user_db: User | None, user: UserUpdate, db: AsyncSession) 
     except IntegrityError as e:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception:
+        await db.rollback()
+        raise
 
     return user_db
 
@@ -110,3 +114,4 @@ async def update_user_last_login_at(user_id: UUID, db: AsyncSession):
         return await update_user(user, user_data, db)
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error updating user last login at: {e!s}")
+        await db.rollback()

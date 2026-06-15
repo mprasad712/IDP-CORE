@@ -36,7 +36,7 @@ async def setup_test_data():
     """Sets up user, organization, base agent, and IDP agent config."""
     async with session_scope() as session:
         # Resolve developer role
-        developer_role = (await session.exec(select(Role).where(Role.name == "developer"))).first()
+        developer_role = (await session.exec(select(Role).where(Role.name == "idp_configurator"))).first()
 
         # Create user
         user = User(
@@ -46,7 +46,7 @@ async def setup_test_data():
             password="testpassword",
             is_active=True,
             is_superuser=False,
-            role="developer",
+            role="idp_configurator",
         )
         session.add(user)
         await session.flush()

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel
-from sqlalchemy import Index, String, text
+from sqlalchemy import Column, DateTime, Index, String, text
 from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
@@ -50,20 +50,9 @@ class AgentApiKeyBase(SQLModel):
         description="Whether this key is active. Set False to revoke.",
     )
     created_by: UUID = Field(foreign_key="user.id", nullable=False)
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    last_used_at: datetime | None = Field(
-        default=None,
-        nullable=True,
-        description="Timestamp of last successful validation",
-    )
-    expires_at: datetime | None = Field(
-        default=None,
-        nullable=True,
-        description="Optional expiry. Null means no expiry.",
-    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
+    last_used_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True), description="Timestamp of last successful validation")
+    expires_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True), description="Optional expiry. Null means no expiry.")
 
 
 class AgentApiKey(AgentApiKeyBase, table=True):  # type: ignore[call-arg]

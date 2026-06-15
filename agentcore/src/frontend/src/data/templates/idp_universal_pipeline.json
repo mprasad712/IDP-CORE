@@ -675,8 +675,8 @@
         "id": "DocumentClassifier-AWLMd",
         "type": "genericNode",
         "position": {
-          "x": 2177,
-          "y": -178.00000000000006
+          "x": 2280,
+          "y": 400
         },
         "data": {
           "node": {
@@ -812,7 +812,11 @@
           "width": 290,
           "height": 311
         },
-        "dragging": false
+        "dragging": false,
+        "positionAbsolute": {
+          "x": 2280,
+          "y": 400
+        }
       },
       {
         "id": "OutputParser-aizxF",
@@ -906,7 +910,7 @@
         "id": "ChunkingStrategy-jTIgh",
         "type": "genericNode",
         "position": {
-          "x": 2460,
+          "x": 2640,
           "y": 400
         },
         "data": {
@@ -1018,6 +1022,10 @@
         "measured": {
           "width": 290,
           "height": 317
+        },
+        "positionAbsolute": {
+          "x": 2640,
+          "y": 400
         }
       },
       {
@@ -2000,8 +2008,8 @@
         "id": "RegistryModelComponent-opFWQ",
         "type": "genericNode",
         "position": {
-          "x": 2606.0603458984788,
-          "y": -392.5519091329234
+          "x": 2280,
+          "y": 100
         },
         "data": {
           "node": {
@@ -2177,7 +2185,11 @@
           "width": 290,
           "height": 276
         },
-        "dragging": false
+        "dragging": false,
+        "positionAbsolute": {
+          "x": 2280,
+          "y": 100
+        }
       }
     ],
     "edges": [
@@ -2294,62 +2306,6 @@
         "animated": false
       },
       {
-        "source": "PaddleOCR-AM5Dp",
-        "sourceHandle": "{œdataTypeœ:œPaddleOCRœ,œidœ:œPaddleOCR-AM5Dpœ,œnameœ:œtext_blocksœ,œoutput_typesœ:[œMessageœ]}",
-        "target": "DocumentClassifier-AWLMd",
-        "targetHandle": "{œfieldNameœ:œdocumentœ,œidœ:œDocumentClassifier-AWLMdœ,œinputTypesœ:[œMessageœ],œtypeœ:œotherœ}",
-        "id": "reactFlow__edge-PaddleOCR-AM5Dp{œdataTypeœ:œPaddleOCRœ,œidœ:œPaddleOCR-AM5Dpœ,œnameœ:œtext_blocksœ,œoutput_typesœ:[œMessageœ]}-DocumentClassifier-AWLMd{œfieldNameœ:œdocumentœ,œidœ:œDocumentClassifier-AWLMdœ,œinputTypesœ:[œMessageœ],œtypeœ:œotherœ}",
-        "data": {
-          "targetHandle": {
-            "fieldName": "document",
-            "id": "DocumentClassifier-AWLMd",
-            "inputTypes": [
-              "Message"
-            ],
-            "type": "other"
-          },
-          "sourceHandle": {
-            "dataType": "PaddleOCR",
-            "id": "PaddleOCR-AM5Dp",
-            "name": "text_blocks",
-            "output_types": [
-              "Message"
-            ]
-          }
-        },
-        "className": "",
-        "selected": false,
-        "animated": false
-      },
-      {
-        "source": "DocumentClassifier-AWLMd",
-        "sourceHandle": "{œdataTypeœ:œDocumentClassifierœ,œidœ:œDocumentClassifier-AWLMdœ,œnameœ:œclassified_documentœ,œoutput_typesœ:[œMessageœ]}",
-        "target": "OutputParser-aizxF",
-        "targetHandle": "{œfieldNameœ:œbranch_bœ,œidœ:œOutputParser-aizxFœ,œinputTypesœ:[œMessageœ],œtypeœ:œotherœ}",
-        "id": "reactFlow__edge-DocumentClassifier-AWLMd{œdataTypeœ:œDocumentClassifierœ,œidœ:œDocumentClassifier-AWLMdœ,œnameœ:œclassified_documentœ,œoutput_typesœ:[œMessageœ]}-OutputParser-aizxF{œfieldNameœ:œbranch_bœ,œidœ:œOutputParser-aizxFœ,œinputTypesœ:[œMessageœ],œtypeœ:œotherœ}",
-        "data": {
-          "targetHandle": {
-            "fieldName": "branch_b",
-            "id": "OutputParser-aizxF",
-            "inputTypes": [
-              "Message"
-            ],
-            "type": "other"
-          },
-          "sourceHandle": {
-            "dataType": "DocumentClassifier",
-            "id": "DocumentClassifier-AWLMd",
-            "name": "classified_document",
-            "output_types": [
-              "Message"
-            ]
-          }
-        },
-        "className": "",
-        "selected": false,
-        "animated": false
-      },
-      {
         "source": "DocumentTypeDetector-yjZYc",
         "sourceHandle": "{œdataTypeœ:œDocumentTypeDetectorœ,œidœ:œDocumentTypeDetector-yjZYcœ,œnameœ:œdigital_pathœ,œoutput_typesœ:[œMessageœ]}",
         "target": "OutputParser-aizxF",
@@ -2368,34 +2324,6 @@
             "dataType": "DocumentTypeDetector",
             "id": "DocumentTypeDetector-yjZYc",
             "name": "digital_path",
-            "output_types": [
-              "Message"
-            ]
-          }
-        },
-        "className": "",
-        "selected": false,
-        "animated": false
-      },
-      {
-        "source": "OutputParser-aizxF",
-        "sourceHandle": "{œdataTypeœ:œOutputParserœ,œidœ:œOutputParser-aizxFœ,œnameœ:œmergedœ,œoutput_typesœ:[œMessageœ]}",
-        "target": "ChunkingStrategy-jTIgh",
-        "targetHandle": "{œfieldNameœ:œdocumentœ,œidœ:œChunkingStrategy-jTIghœ,œinputTypesœ:[œMessageœ],œtypeœ:œotherœ}",
-        "id": "reactFlow__edge-OutputParser-aizxF{œdataTypeœ:œOutputParserœ,œidœ:œOutputParser-aizxFœ,œnameœ:œmergedœ,œoutput_typesœ:[œMessageœ]}-ChunkingStrategy-jTIgh{œfieldNameœ:œdocumentœ,œidœ:œChunkingStrategy-jTIghœ,œinputTypesœ:[œMessageœ],œtypeœ:œotherœ}",
-        "data": {
-          "targetHandle": {
-            "fieldName": "document",
-            "id": "ChunkingStrategy-jTIgh",
-            "inputTypes": [
-              "Message"
-            ],
-            "type": "other"
-          },
-          "sourceHandle": {
-            "dataType": "OutputParser",
-            "id": "OutputParser-aizxF",
-            "name": "merged",
             "output_types": [
               "Message"
             ]
@@ -2678,6 +2606,90 @@
           }
         },
         "id": "xy-edge__RegistryModelComponent-opFWQ{œdataTypeœ:œRegistryModelComponentœ,œidœ:œRegistryModelComponent-opFWQœ,œnameœ:œmodel_outputœ,œoutput_typesœ:[œLanguageModelœ]}-DocumentClassifier-AWLMd{œfieldNameœ:œllmœ,œidœ:œDocumentClassifier-AWLMdœ,œinputTypesœ:[œLanguageModelœ],œtypeœ:œotherœ}"
+      },
+      {
+        "source": "PaddleOCR-AM5Dp",
+        "sourceHandle": "{œdataTypeœ:œPaddleOCRœ,œidœ:œPaddleOCR-AM5Dpœ,œnameœ:œtext_blocksœ,œoutput_typesœ:[œMessageœ]}",
+        "target": "OutputParser-aizxF",
+        "targetHandle": "{œfieldNameœ:œbranch_bœ,œidœ:œOutputParser-aizxFœ,œinputTypesœ:[œMessageœ],œtypeœ:œotherœ}",
+        "id": "reactFlow__edge-PaddleOCR-AM5Dp{œdataTypeœ:œPaddleOCRœ,œidœ:œPaddleOCR-AM5Dpœ,œnameœ:œtext_blocksœ,œoutput_typesœ:[œMessageœ]}-OutputParser-aizxF{œfieldNameœ:œbranch_bœ,œidœ:œOutputParser-aizxFœ,œinputTypesœ:[œMessageœ],œtypeœ:œotherœ}",
+        "data": {
+          "sourceHandle": {
+            "dataType": "PaddleOCR",
+            "id": "PaddleOCR-AM5Dp",
+            "name": "text_blocks",
+            "output_types": [
+              "Message"
+            ]
+          },
+          "targetHandle": {
+            "fieldName": "branch_b",
+            "id": "OutputParser-aizxF",
+            "inputTypes": [
+              "Message"
+            ],
+            "type": "other"
+          }
+        },
+        "className": "",
+        "selected": false,
+        "animated": false
+      },
+      {
+        "source": "OutputParser-aizxF",
+        "sourceHandle": "{œdataTypeœ:œOutputParserœ,œidœ:œOutputParser-aizxFœ,œnameœ:œmergedœ,œoutput_typesœ:[œMessageœ]}",
+        "target": "DocumentClassifier-AWLMd",
+        "targetHandle": "{œfieldNameœ:œdocumentœ,œidœ:œDocumentClassifier-AWLMdœ,œinputTypesœ:[œMessageœ],œtypeœ:œotherœ}",
+        "id": "reactFlow__edge-OutputParser-aizxF{œdataTypeœ:œOutputParserœ,œidœ:œOutputParser-aizxFœ,œnameœ:œmergedœ,œoutput_typesœ:[œMessageœ]}-DocumentClassifier-AWLMd{œfieldNameœ:œdocumentœ,œidœ:œDocumentClassifier-AWLMdœ,œinputTypesœ:[œMessageœ],œtypeœ:œotherœ}",
+        "data": {
+          "sourceHandle": {
+            "dataType": "OutputParser",
+            "id": "OutputParser-aizxF",
+            "name": "merged",
+            "output_types": [
+              "Message"
+            ]
+          },
+          "targetHandle": {
+            "fieldName": "document",
+            "id": "DocumentClassifier-AWLMd",
+            "inputTypes": [
+              "Message"
+            ],
+            "type": "other"
+          }
+        },
+        "className": "",
+        "selected": false,
+        "animated": false
+      },
+      {
+        "source": "DocumentClassifier-AWLMd",
+        "sourceHandle": "{œdataTypeœ:œDocumentClassifierœ,œidœ:œDocumentClassifier-AWLMdœ,œnameœ:œclassified_documentœ,œoutput_typesœ:[œMessageœ]}",
+        "target": "ChunkingStrategy-jTIgh",
+        "targetHandle": "{œfieldNameœ:œdocumentœ,œidœ:œChunkingStrategy-jTIghœ,œinputTypesœ:[œMessageœ],œtypeœ:œotherœ}",
+        "id": "reactFlow__edge-DocumentClassifier-AWLMd{œdataTypeœ:œDocumentClassifierœ,œidœ:œDocumentClassifier-AWLMdœ,œnameœ:œclassified_documentœ,œoutput_typesœ:[œMessageœ]}-ChunkingStrategy-jTIgh{œfieldNameœ:œdocumentœ,œidœ:œChunkingStrategy-jTIghœ,œinputTypesœ:[œMessageœ],œtypeœ:œotherœ}",
+        "data": {
+          "sourceHandle": {
+            "dataType": "DocumentClassifier",
+            "id": "DocumentClassifier-AWLMd",
+            "name": "classified_document",
+            "output_types": [
+              "Message"
+            ]
+          },
+          "targetHandle": {
+            "fieldName": "document",
+            "id": "ChunkingStrategy-jTIgh",
+            "inputTypes": [
+              "Message"
+            ],
+            "type": "other"
+          }
+        },
+        "className": "",
+        "selected": false,
+        "animated": false
       }
     ],
     "viewport": {

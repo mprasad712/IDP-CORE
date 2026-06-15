@@ -50,8 +50,8 @@ router = APIRouter(tags=["Users"], prefix="/users")
 
 ACTIVE_ORG_STATUSES = {"accepted", "active"}
 ACTIVE_DEPT_STATUS = "active"
-NON_ASSIGNABLE_ROLES = {"consumer"}
-ORG_SCOPED_NON_DEPARTMENT_ROLES = {"leader_executive"}
+NON_ASSIGNABLE_ROLES = {"doc_submitter"}
+ORG_SCOPED_NON_DEPARTMENT_ROLES = {"idp_auditor"}
 
 
 def _strip_or_none(value: str | None) -> str | None:
@@ -170,6 +170,40 @@ def _friendly_role_name(role_name: str | None) -> str:
     return normalized.replace("_", " ").title() if normalized else "-"
 
 
+def _serialize_user_for_response(user: User) -> dict:
+    """Serialize only scalar user fields needed by API responses.
+
+    Avoid calling ``model_dump()`` on ORM-backed SQLModel instances here because
+    that can touch relationship attributes and trigger lazy async IO during
+    FastAPI response construction.
+    """
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "display_name": user.display_name,
+        "entra_object_id": user.entra_object_id,
+        "profile_image": user.profile_image,
+        "store_api_key": user.store_api_key,
+        "is_active": user.is_active,
+        "is_superuser": user.is_superuser,
+        "role": user.role,
+        "creator_email": user.creator_email,
+        "creator_role": user.creator_role,
+        "department_admin_email": user.department_admin_email,
+        "department_name": user.department_name,
+        "create_at": user.create_at,
+        "updated_at": user.updated_at,
+        "last_login_at": user.last_login_at,
+        "deleted_at": user.deleted_at,
+        "optins": user.optins,
+        "department_admin": user.department_admin,
+        "created_by": user.created_by,
+        "country": user.country,
+        "expires_at": user.expires_at,
+    }
+
+
 def _build_add_user_email_details(target_user: User) -> list[str]:
     details = [
         f"Username: {target_user.username}",
@@ -258,7 +292,7 @@ async def _resolve_existing_user_for_create(
     if existing:
         existing.sort(
             key=lambda user: (
-                1 if normalize_role(getattr(user, "role", "consumer")) != "consumer" else 0,
+                1 if normalize_role(getattr(user, "role", "doc_submitter")) != "doc_submitter" else 0,
                 getattr(user, "updated_at", None) or getattr(user, "create_at", None),
             ),
             reverse=True,
@@ -273,7 +307,7 @@ async def _resolve_existing_user_for_create(
             await session.exec(
                 select(User).where(
                     User.deleted_at.is_(None),
-                    func.lower(User.role) == "consumer",
+                    func.lower(User.role) == "doc_submitter",
                 )
             )
         ).all()
@@ -1462,7 +1496,7 @@ async def add_user(
         organization_name = _strip_or_none(user.organization_name)
         organization_description = _strip_or_none(user.organization_description)
         country = _strip_or_none(user.country)
-        creator_role = normalize_role(getattr(current_user, "role", "developer"))
+        creator_role = normalize_role(getattr(current_user, "role", "idp_configurator"))
         target_role = normalize_role(user.role)
         assignable_roles = await _assignable_roles_for_creator(session, creator_role)
 
@@ -1477,13 +1511,13 @@ async def add_user(
         is_reusing_consumer = bool(
             existing_user
             and not is_reusing_soft_deleted
-            and normalize_role(getattr(existing_user, "role", "consumer")) == "consumer"
+            and normalize_role(getattr(existing_user, "role", "doc_submitter")) == "doc_submitter"
         )
         is_reusing_same_role = bool(
             existing_user
             and not is_reusing_consumer
             and not is_reusing_soft_deleted
-            and normalize_role(getattr(existing_user, "role", "consumer")) == target_role
+            and normalize_role(getattr(existing_user, "role", "doc_submitter")) == target_role
         )
         if existing_user and not is_reusing_consumer and not is_reusing_same_role and not is_reusing_soft_deleted:
             raise HTTPException(status_code=400, detail="This username is unavailable.")
@@ -1642,7 +1676,7 @@ async def add_user(
                 if target_role in ORG_SCOPED_NON_DEPARTMENT_ROLES:
                     new_user.department_admin_email = None
                     new_user.department_name = None
-                elif target_role in {"developer", "business_user"}:
+                elif target_role in {"idp_configurator", "doc_reviewer"}:
                     if not user.department_id:
                         raise HTTPException(status_code=400, detail="Department is required.")
                     department = (
@@ -1763,7 +1797,7 @@ async def list_assignable_roles(
     session: DbSession,
     current_user: User = Depends(PermissionChecker(["view_admin_page"])),
 ) -> list[str]:
-    creator_role = normalize_role(getattr(current_user, "role", "developer"))
+    creator_role = normalize_role(getattr(current_user, "role", "idp_configurator"))
     return await _assignable_roles_for_creator(session, creator_role)
 
 
@@ -1848,10 +1882,22 @@ async def read_current_user(
         cached_user = await user_cache.get_user(str(current_user.id))
         if not cached_user:
             user = await get_user_by_id(db, current_user.id)
-            cached_user = user.model_dump()
-            await user_cache.set_user(cached_user)
+            if user is not None:
+                cached_user = _serialize_user_for_response(user)
+                await user_cache.set_user(cached_user)
     except Exception:
-        cached_user = current_user.model_dump()
+        # Rollback any failed DB transaction before subsequent queries run.
+        # get_user_by_id uses the request session; a DB failure here aborts
+        # the PostgreSQL transaction and every following query would get
+        # InFailedSQLTransactionError without this rollback.
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        cached_user = _serialize_user_for_response(current_user)
+
+    if not cached_user:
+        cached_user = _serialize_user_for_response(current_user)
 
     try:
         if permission_cache:
@@ -1952,11 +1998,11 @@ async def export_users_csv(
             select(1).where(
                 duplicate.id != User.id,
                 duplicate_identity == current_identity,
-                func.lower(duplicate.role) != "consumer",
+                func.lower(duplicate.role) != "doc_submitter",
             )
         )
         query = query.where(
-            ~and_(func.lower(User.role) == "consumer", has_non_consumer_duplicate)
+            ~and_(func.lower(User.role) == "doc_submitter", has_non_consumer_duplicate)
         )
     if role:
         query = query.where(User.role == normalize_role(role))
@@ -2120,11 +2166,11 @@ async def read_all_users(
             select(1).where(
                 duplicate.id != User.id,
                 duplicate_identity == current_identity,
-                func.lower(duplicate.role) != "consumer",
+                func.lower(duplicate.role) != "doc_submitter",
             )
         )
         query = query.where(
-            ~and_(func.lower(User.role) == "consumer", has_non_consumer_duplicate)
+            ~and_(func.lower(User.role) == "doc_submitter", has_non_consumer_duplicate)
         )
     if role:
         query = query.where(User.role == normalize_role(role))
@@ -2216,11 +2262,11 @@ async def read_all_users(
             select(1).where(
                 duplicate.id != User.id,
                 duplicate_identity == current_identity,
-                func.lower(duplicate.role) != "consumer",
+                func.lower(duplicate.role) != "doc_submitter",
             )
         )
         count_query = count_query.where(
-            ~and_(func.lower(User.role) == "consumer", has_non_consumer_duplicate)
+            ~and_(func.lower(User.role) == "doc_submitter", has_non_consumer_duplicate)
         )
     if role:
         count_query = count_query.where(User.role == normalize_role(role))

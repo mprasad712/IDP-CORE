@@ -2,8 +2,8 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import String, Text
-from sqlmodel import Field, SQLModel, Column, JSON
+from sqlalchemy import Column, DateTime, String, Text
+from sqlmodel import Field, SQLModel, JSON
 
 
 class DatasetRunBase(SQLModel):
@@ -18,8 +18,8 @@ class DatasetRun(DatasetRunBase, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     dataset_id: UUID = Field(foreign_key="dataset.id", index=True, nullable=False)
     user_id: UUID | None = Field(default=None, foreign_key="user.id", index=True, nullable=True)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False))
 
     def to_response(self, dataset_name: str = "") -> dict:
         return {
