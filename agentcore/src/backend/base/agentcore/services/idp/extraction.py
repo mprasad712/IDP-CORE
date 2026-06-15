@@ -244,8 +244,12 @@ async def extract_dynamic(
             structured_model = llm_model.with_structured_output(StructuredExtractionResult)
             result = await asyncio.wait_for(structured_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
             if isinstance(result, StructuredExtractionResult):
+                if not result.headers and not result.line_items:
+                    raise ValueError("Structured output returned empty headers and line items")
                 return result.model_dump()
             if isinstance(result, dict):
+                if not result.get("headers") and not result.get("line_items"):
+                    raise ValueError("Structured output returned empty headers and line items")
                 return result
         except Exception as e:
             logger.warning(f"[LLM] with_structured_output failed: {e}. Falling back to raw JSON parsing.")
@@ -494,8 +498,12 @@ async def extract_multimodal(
             structured_model = llm_model.with_structured_output(StructuredExtractionResult)
             result = await structured_model.ainvoke(messages)
             if isinstance(result, StructuredExtractionResult):
+                if not result.headers and not result.line_items:
+                    raise ValueError("Structured output returned empty headers and line items")
                 raw_result = result.model_dump()
             elif isinstance(result, dict):
+                if not result.get("headers") and not result.get("line_items"):
+                    raise ValueError("Structured output returned empty headers and line items")
                 raw_result = result
         except Exception as e:
             logger.warning(f"[Multimodal] with_structured_output failed: {e}. Falling back to raw JSON.")

@@ -51,10 +51,11 @@ async def setup_test_data():
             await session.refresh(root_user)
 
         # Create standard user
+        unique_suffix = uuid4().hex[:8]
         std_user = User(
             id=uuid4(),
-            username="std_user@test.com",
-            email="std_user@test.com",
+            username=f"std_user_{unique_suffix}@test.com",
+            email=f"std_user_{unique_suffix}@test.com",
             password="testpassword",
             is_active=True,
             is_superuser=False,
@@ -65,7 +66,7 @@ async def setup_test_data():
         # Create organization
         test_org = Organization(
             id=uuid4(),
-            name="Test Org Field Configs",
+            name=f"Test Org Field Configs {unique_suffix}",
             owner_user_id=root_user.id,
             created_by=root_user.id,
         )

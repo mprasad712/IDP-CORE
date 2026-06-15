@@ -6,7 +6,7 @@ from sqlmodel import select
 from agentcore.main import create_app
 from agentcore.services.deps import session_scope
 from agentcore.services.auth.utils import get_current_active_user
-from agentcore.api.idp import idp_rbac
+from agentcore.api.idp import idp_rbac, _idp_review_rbac
 from agentcore.services.database.models.user.model import User
 from agentcore.services.database.models.organization.model import Organization
 from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
@@ -101,6 +101,7 @@ async def setup_test_data():
             extraction_mode="dynamic_prompting",
             default_rule_action="pending_review",
             is_active=True,
+            extra={"has_processed_docs_output": "true"},
         )
         session.add(idp_agent)
         await session.commit()
@@ -248,6 +249,7 @@ async def test_processed_docs_flow(setup_test_data):
     app = create_app()
     app.dependency_overrides[get_current_active_user] = get_mock_user
     app.dependency_overrides[idp_rbac] = get_mock_user
+    app.dependency_overrides[_idp_review_rbac] = get_mock_user
     
     client = TestClient(app)
     mock_user = user
