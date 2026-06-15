@@ -1240,9 +1240,10 @@ def test_flow_log_io_helpers_are_bounded():
     assert "+" in pipeline._clip("x" * 5000)  # truncation marker
     assert pipeline._clip("short") == "short"
 
+    # Create well above the caps so the clamp is exercised regardless of the cap values.
     extracted = {
-        "headers": {f"h{i}": {"value": str(i)} for i in range(50)},
-        "line_items": [{"columns": [{"column_name": "a", "value": str(i)}]} for i in range(10)],
+        "headers": {f"h{i}": {"value": str(i)} for i in range(pipeline._IO_MAX_HEADERS + 20)},
+        "line_items": [{"columns": [{"column_name": "a", "value": str(i)}]} for i in range(pipeline._IO_MAX_ROWS + 20)],
     }
     assert len(pipeline._io_headers(extracted)) == pipeline._IO_MAX_HEADERS
     assert len(pipeline._io_sample_rows(extracted)) == pipeline._IO_MAX_ROWS
