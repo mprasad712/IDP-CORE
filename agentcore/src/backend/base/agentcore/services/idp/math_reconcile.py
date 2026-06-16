@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from agentcore.services.idp.extraction import StructuredExtractionResult
+from agentcore.services.idp.extraction import StructuredExtractionResult, _extract_usage_from_response
 
 
 def parse_float(val: Any) -> float | None:
@@ -131,6 +131,7 @@ async def reconcile_math(
         discrepancy_logs.append("Initial extraction is mathematically balanced.")
 
     attempts_run = 0
+    aggregated_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     while not is_balanced and attempts_run < max_attempts:
         attempts_run += 1
@@ -155,16 +156,30 @@ async def reconcile_math(
         ]
 
         result = None
+        usage_info = None
         if hasattr(llm_model, "with_structured_output"):
             try:
-                structured_model = llm_model.with_structured_output(StructuredExtractionResult)
-                result = await structured_model.ainvoke(messages)
+                try:
+                    structured_model = llm_model.with_structured_output(StructuredExtractionResult, include_raw=True)
+                    res_dict = await structured_model.ainvoke(messages)
+                    if isinstance(res_dict, dict):
+                        result = res_dict.get("parsed")
+                        raw_response = res_dict.get("raw")
+                    else:
+                        result = res_dict
+                        raw_response = None
+                except TypeError:
+                    structured_model = llm_model.with_structured_output(StructuredExtractionResult)
+                    result = await structured_model.ainvoke(messages)
+                    raw_response = None
+                usage_info = _extract_usage_from_response(raw_response, model_fallback=getattr(llm_model, "model_name", None))
             except Exception as e:
                 logger.warning(f"[Math Reconcile] structured output failed: {e}. Falling back to standard JSON parsing.")
 
         if result is None:
             try:
                 response = await llm_model.ainvoke(messages)
+                usage_info = _extract_usage_from_response(response, model_fallback=getattr(llm_model, "model_name", None))
                 content = response.content if hasattr(response, "content") else str(response)
                 content = content.strip()
                 if content.startswith("```"):
@@ -179,6 +194,11 @@ async def reconcile_math(
             except Exception as e:
                 logger.error(f"[Math Reconcile] prediction parsing failed: {e}")
                 break
+
+        if usage_info:
+            aggregated_usage["input_tokens"] += usage_info.get("input_tokens", 0)
+            aggregated_usage["output_tokens"] += usage_info.get("output_tokens", 0)
+            aggregated_usage["total_tokens"] += usage_info.get("total_tokens", 0)
 
         if result:
             current_extracted = result.model_dump()
@@ -196,4 +216,5 @@ async def reconcile_math(
         "attempts": attempts_run,
         "balanced": is_balanced,
         "report": discrepancy_logs,
+        "_usage": aggregated_usage if aggregated_usage["total_tokens"] > 0 else None,
     }

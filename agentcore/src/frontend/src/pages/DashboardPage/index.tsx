@@ -95,7 +95,7 @@ type SectionChart = {
   title: string;
   subtitle: string;
   type: ChartType;
-  data: { label: string; value?: number; [key: string]: number | string | undefined }[];
+  data: { label: string; value?: number;[key: string]: number | string | undefined }[];
   lines?: LineConfig[];
   xKey?: string;
   xType?: "number" | "category";
@@ -200,37 +200,37 @@ const sections: SectionConfig[] = [
       },
     ],
   },
-  {
-    id: "governance",
-    label: "Governance & Guardrail",
-    headline: "Governance & Guardrail KPIs",
-    description: "Policy enforcement and agents operating without guardrails.",
-    kpis: [
-      { name: "Guardrail Violation Rate", value: "0%" },
-      { name: "Escalation to Human Review", value: "0" },
-      { name: "% Agents Without Guardrails", value: "0%" },
-      { name: "Policy Breach Attempts", value: "0" },
-    ],
-    charts: [],
-  },
-  {
-    id: "cost",
-    label: "Cost & Financial",
-    headline: "Cost & Financial KPIs",
-    description: "Agent execution costs, average cost per run, and monthly cost trends.",
-    kpis: [
-      { name: "Total Cost", value: "$0" },
-      { name: "Avg Cost Per Run", value: "$0" },
-    ],
-    charts: [
-      {
-        title: "Monthly Cost Trend",
-        subtitle: "Daily cost over time",
-        type: "area",
-        data: [],
-      },
-    ],
-  },
+  // {
+  //   id: "governance",
+  //   label: "Governance & Guardrail",
+  //   headline: "Governance & Guardrail KPIs",
+  //   description: "Policy enforcement and agents operating without guardrails.",
+  //   kpis: [
+  //     { name: "Guardrail Violation Rate", value: "0%" },
+  //     { name: "Escalation to Human Review", value: "0" },
+  //     { name: "% Agents Without Guardrails", value: "0%" },
+  //     { name: "Policy Breach Attempts", value: "0" },
+  //   ],
+  //   charts: [],
+  // },
+  // {
+  //   id: "cost",
+  //   label: "Cost & Financial",
+  //   headline: "Cost & Financial KPIs",
+  //   description: "Agent execution costs, average cost per run, and monthly cost trends.",
+  //   kpis: [
+  //     { name: "Total Cost", value: "$0" },
+  //     { name: "Avg Cost Per Run", value: "$0" },
+  //   ],
+  //   charts: [
+  //     {
+  //       title: "Monthly Cost Trend",
+  //       subtitle: "Daily cost over time",
+  //       type: "area",
+  //       data: [],
+  //     },
+  //   ],
+  // },
   {
     id: "lifecycle",
     label: "Environment & Lifecycle",
@@ -424,28 +424,28 @@ const consumerSections: SectionConfig[] = [idpSubmissionSection];
 const chartColors = ["#2563eb", "#14b8a6", "#f97316", "#a855f7"];
 
 const sectionThemes: Record<SectionId, { badge: string; accent: string; border: string; headerBg: string; iconBg: string; icon: React.ReactNode }> = {
-  platform:    { badge: "bg-sky-100 text-sky-700",         accent: "#0ea5e9", border: "border-l-sky-500",     headerBg: "bg-sky-50/60 dark:bg-sky-950/20",     iconBg: "bg-sky-100 dark:bg-sky-900/30",     icon: <Server className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
-  governance:  { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
-  cost:        { badge: "bg-amber-100 text-amber-700",     accent: "#f59e0b", border: "border-l-amber-500",   headerBg: "bg-amber-50/60 dark:bg-amber-950/20",   iconBg: "bg-amber-100 dark:bg-amber-900/30",   icon: <DollarSign className="h-4 w-4 text-amber-600 dark:text-amber-400" /> },
-  lifecycle:   { badge: "bg-violet-100 text-violet-700",   accent: "#8b5cf6", border: "border-l-violet-500",  headerBg: "bg-violet-50/60 dark:bg-violet-950/20", iconBg: "bg-violet-100 dark:bg-violet-900/30", icon: <GitBranch className="h-4 w-4 text-violet-600 dark:text-violet-400" /> },
-  usage:       { badge: "bg-sky-100 text-sky-700",         accent: "#0ea5e9", border: "border-l-sky-500",     headerBg: "bg-sky-50/60 dark:bg-sky-950/20",     iconBg: "bg-sky-100 dark:bg-sky-900/30",     icon: <Users className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
-  approval:    { badge: "bg-amber-100 text-amber-700",     accent: "#f59e0b", border: "border-l-amber-500",   headerBg: "bg-amber-50/60 dark:bg-amber-950/20",   iconBg: "bg-amber-100 dark:bg-amber-900/30",   icon: <ClipboardCheck className="h-4 w-4 text-amber-600 dark:text-amber-400" /> },
-  hitl:        { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <UserCog className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
-  rag:         { badge: "bg-violet-100 text-violet-700",   accent: "#8b5cf6", border: "border-l-violet-500",  headerBg: "bg-violet-50/60 dark:bg-violet-950/20", iconBg: "bg-violet-100 dark:bg-violet-900/30", icon: <Database className="h-4 w-4 text-violet-600 dark:text-violet-400" /> },
-  quality:     { badge: "bg-sky-100 text-sky-700",         accent: "#0ea5e9", border: "border-l-sky-500",     headerBg: "bg-sky-50/60 dark:bg-sky-950/20",     iconBg: "bg-sky-100 dark:bg-sky-900/30",     icon: <Microscope className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
+  platform: { badge: "bg-sky-100 text-sky-700", accent: "#0ea5e9", border: "border-l-sky-500", headerBg: "bg-sky-50/60 dark:bg-sky-950/20", iconBg: "bg-sky-100 dark:bg-sky-900/30", icon: <Server className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
+  governance: { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
+  cost: { badge: "bg-amber-100 text-amber-700", accent: "#f59e0b", border: "border-l-amber-500", headerBg: "bg-amber-50/60 dark:bg-amber-950/20", iconBg: "bg-amber-100 dark:bg-amber-900/30", icon: <DollarSign className="h-4 w-4 text-amber-600 dark:text-amber-400" /> },
+  lifecycle: { badge: "bg-violet-100 text-violet-700", accent: "#8b5cf6", border: "border-l-violet-500", headerBg: "bg-violet-50/60 dark:bg-violet-950/20", iconBg: "bg-violet-100 dark:bg-violet-900/30", icon: <GitBranch className="h-4 w-4 text-violet-600 dark:text-violet-400" /> },
+  usage: { badge: "bg-sky-100 text-sky-700", accent: "#0ea5e9", border: "border-l-sky-500", headerBg: "bg-sky-50/60 dark:bg-sky-950/20", iconBg: "bg-sky-100 dark:bg-sky-900/30", icon: <Users className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
+  approval: { badge: "bg-amber-100 text-amber-700", accent: "#f59e0b", border: "border-l-amber-500", headerBg: "bg-amber-50/60 dark:bg-amber-950/20", iconBg: "bg-amber-100 dark:bg-amber-900/30", icon: <ClipboardCheck className="h-4 w-4 text-amber-600 dark:text-amber-400" /> },
+  hitl: { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <UserCog className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
+  rag: { badge: "bg-violet-100 text-violet-700", accent: "#8b5cf6", border: "border-l-violet-500", headerBg: "bg-violet-50/60 dark:bg-violet-950/20", iconBg: "bg-violet-100 dark:bg-violet-900/30", icon: <Database className="h-4 w-4 text-violet-600 dark:text-violet-400" /> },
+  quality: { badge: "bg-sky-100 text-sky-700", accent: "#0ea5e9", border: "border-l-sky-500", headerBg: "bg-sky-50/60 dark:bg-sky-950/20", iconBg: "bg-sky-100 dark:bg-sky-900/30", icon: <Microscope className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
   performance: { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <Zap className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
-  code:        { badge: "bg-amber-100 text-amber-700",     accent: "#f59e0b", border: "border-l-amber-500",   headerBg: "bg-amber-50/60 dark:bg-amber-950/20",   iconBg: "bg-amber-100 dark:bg-amber-900/30",   icon: <Code2 className="h-4 w-4 text-amber-600 dark:text-amber-400" /> },
-  productivity:{ badge: "bg-sky-100 text-sky-700",         accent: "#0ea5e9", border: "border-l-sky-500",     headerBg: "bg-sky-50/60 dark:bg-sky-950/20",     iconBg: "bg-sky-100 dark:bg-sky-900/30",     icon: <TrendingUp className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
-  experience:  { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <Star className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
-  roi:         { badge: "bg-sky-100 text-sky-700",         accent: "#0ea5e9", border: "border-l-sky-500",     headerBg: "bg-sky-50/60 dark:bg-sky-950/20",     iconBg: "bg-sky-100 dark:bg-sky-900/30",     icon: <DollarSign className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
-  maturity:    { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <BarChart2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
-  risk:         { badge: "bg-rose-100 text-rose-700",       accent: "#f43f5e", border: "border-l-rose-500",    headerBg: "bg-rose-50/60 dark:bg-rose-950/20",     iconBg: "bg-rose-100 dark:bg-rose-900/30",     icon: <AlertTriangle className="h-4 w-4 text-rose-600 dark:text-rose-400" /> },
-  idp_pipeline: { badge: "bg-sky-100 text-sky-700",         accent: "#0ea5e9", border: "border-l-sky-500",     headerBg: "bg-sky-50/60 dark:bg-sky-950/20",     iconBg: "bg-sky-100 dark:bg-sky-900/30",     icon: <FileText className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
-  idp_review:   { badge: "bg-amber-100 text-amber-700",     accent: "#f59e0b", border: "border-l-amber-500",   headerBg: "bg-amber-50/60 dark:bg-amber-950/20",   iconBg: "bg-amber-100 dark:bg-amber-900/30",   icon: <Eye className="h-4 w-4 text-amber-600 dark:text-amber-400" /> },
+  code: { badge: "bg-amber-100 text-amber-700", accent: "#f59e0b", border: "border-l-amber-500", headerBg: "bg-amber-50/60 dark:bg-amber-950/20", iconBg: "bg-amber-100 dark:bg-amber-900/30", icon: <Code2 className="h-4 w-4 text-amber-600 dark:text-amber-400" /> },
+  productivity: { badge: "bg-sky-100 text-sky-700", accent: "#0ea5e9", border: "border-l-sky-500", headerBg: "bg-sky-50/60 dark:bg-sky-950/20", iconBg: "bg-sky-100 dark:bg-sky-900/30", icon: <TrendingUp className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
+  experience: { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <Star className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
+  roi: { badge: "bg-sky-100 text-sky-700", accent: "#0ea5e9", border: "border-l-sky-500", headerBg: "bg-sky-50/60 dark:bg-sky-950/20", iconBg: "bg-sky-100 dark:bg-sky-900/30", icon: <DollarSign className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
+  maturity: { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <BarChart2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
+  risk: { badge: "bg-rose-100 text-rose-700", accent: "#f43f5e", border: "border-l-rose-500", headerBg: "bg-rose-50/60 dark:bg-rose-950/20", iconBg: "bg-rose-100 dark:bg-rose-900/30", icon: <AlertTriangle className="h-4 w-4 text-rose-600 dark:text-rose-400" /> },
+  idp_pipeline: { badge: "bg-sky-100 text-sky-700", accent: "#0ea5e9", border: "border-l-sky-500", headerBg: "bg-sky-50/60 dark:bg-sky-950/20", iconBg: "bg-sky-100 dark:bg-sky-900/30", icon: <FileText className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
+  idp_review: { badge: "bg-amber-100 text-amber-700", accent: "#f59e0b", border: "border-l-amber-500", headerBg: "bg-amber-50/60 dark:bg-amber-950/20", iconBg: "bg-amber-100 dark:bg-amber-900/30", icon: <Eye className="h-4 w-4 text-amber-600 dark:text-amber-400" /> },
   idp_approval: { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <CheckSquare className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
-  idp_submission:{ badge: "bg-violet-100 text-violet-700",  accent: "#8b5cf6", border: "border-l-violet-500",  headerBg: "bg-violet-50/60 dark:bg-violet-950/20", iconBg: "bg-violet-100 dark:bg-violet-900/30", icon: <Upload className="h-4 w-4 text-violet-600 dark:text-violet-400" /> },
-  idp_quality:  { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <Microscope className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
-  idp_analytics:{ badge: "bg-sky-100 text-sky-700",         accent: "#0ea5e9", border: "border-l-sky-500",     headerBg: "bg-sky-50/60 dark:bg-sky-950/20",     iconBg: "bg-sky-100 dark:bg-sky-900/30",     icon: <BarChart2 className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
+  idp_submission: { badge: "bg-violet-100 text-violet-700", accent: "#8b5cf6", border: "border-l-violet-500", headerBg: "bg-violet-50/60 dark:bg-violet-950/20", iconBg: "bg-violet-100 dark:bg-violet-900/30", icon: <Upload className="h-4 w-4 text-violet-600 dark:text-violet-400" /> },
+  idp_quality: { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <Microscope className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
+  idp_analytics: { badge: "bg-sky-100 text-sky-700", accent: "#0ea5e9", border: "border-l-sky-500", headerBg: "bg-sky-50/60 dark:bg-sky-950/20", iconBg: "bg-sky-100 dark:bg-sky-900/30", icon: <BarChart2 className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
 };
 
 // --- Tooltips -------------------------------------------------------------
@@ -760,7 +760,7 @@ function SectionCard({
             </div>
           )}
 
-          
+
 
           {/* Charts */}
           {charts.length > 0 && (
@@ -844,14 +844,14 @@ export default function DashboardAdmin(): JSX.Element {
   const { t } = useTranslation();
   const { role, userData } = useContext(AuthContext);
   const normalizedRole = (role ?? "").toLowerCase().trim().replace(/\s+/g, "_");
-  const isDepartmentAdmin   = normalizedRole === "department_admin";
-  const isDeveloper         = normalizedRole === "idp_configurator";
-  const isBusinessUser      = normalizedRole === "doc_reviewer";
-  const isRootAdmin         = normalizedRole === "root";
-  const isSuperAdmin        = normalizedRole === "super_admin";
-  const isLeaderExecutive   = normalizedRole === "idp_auditor";
-  const isDocumentApprover  = normalizedRole === "doc_approver";
-  const isConsumer          = normalizedRole === "doc_submitter";
+  const isDepartmentAdmin = normalizedRole === "department_admin";
+  const isDeveloper = normalizedRole === "idp_configurator";
+  const isBusinessUser = normalizedRole === "doc_reviewer";
+  const isRootAdmin = normalizedRole === "root";
+  const isSuperAdmin = normalizedRole === "super_admin";
+  const isLeaderExecutive = normalizedRole === "idp_auditor";
+  const isDocumentApprover = normalizedRole === "doc_approver";
+  const isConsumer = normalizedRole === "doc_submitter";
 
   // ── Region selector (root admin only) ──────────────────────────────────
   const regions = useRegionStore((s) => s.regions);
@@ -882,70 +882,70 @@ export default function DashboardAdmin(): JSX.Element {
     return hub ? hub.code !== selectedRegionCode : false;
   }, [selectedRegionCode, regions]);
 
-  const [lifecycleKpis, setLifecycleKpis]         = useState<SectionKpi[] | null>(null);
-  const [governanceKpis, setGovernanceKpis]         = useState<SectionKpi[] | null>(null);
-  const [deptUsageKpis, setDeptUsageKpis]           = useState<SectionKpi[] | null>(null);
-  const [deptApprovalKpis, setDeptApprovalKpis]     = useState<SectionKpi[] | null>(null);
+  const [lifecycleKpis, setLifecycleKpis] = useState<SectionKpi[] | null>(null);
+  const [governanceKpis, setGovernanceKpis] = useState<SectionKpi[] | null>(null);
+  const [deptUsageKpis, setDeptUsageKpis] = useState<SectionKpi[] | null>(null);
+  const [deptApprovalKpis, setDeptApprovalKpis] = useState<SectionKpi[] | null>(null);
   const [deptResponseTimeSeries, setDeptResponseTimeSeries] = useState<PendingSeriesPoint[] | null>(null);
-  const [approvalRange, setApprovalRange]           = useState<"7d" | "30d" | "12w">("7d");
+  const [approvalRange, setApprovalRange] = useState<"7d" | "30d" | "12w">("7d");
   const [approvalPendingSeries, setApprovalPendingSeries] = useState<PendingSeriesPoint[] | null>(null);
-  const [refreshTick, setRefreshTick]               = useState(0);
-  const [deptHitlKpis, setDeptHitlKpis]             = useState<SectionKpi[] | null>(null);
-  const [hitlRange, setHitlRange]                   = useState<"7d" | "30d" | "12w">("7d");
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [deptHitlKpis, setDeptHitlKpis] = useState<SectionKpi[] | null>(null);
+  const [hitlRange, setHitlRange] = useState<"7d" | "30d" | "12w">("7d");
   const [hitlInvocationSeries, setHitlInvocationSeries] = useState<PendingSeriesPoint[] | null>(null);
   const [hitlResponseSeries, setHitlResponseSeries] = useState<PendingSeriesPoint[] | null>(null);
   const tzOffsetMinutes = useMemo(() => -new Date().getTimezoneOffset(), []);
-  const [devCodeKpis, setDevCodeKpis]               = useState<SectionKpi[] | null>(null);
+  const [devCodeKpis, setDevCodeKpis] = useState<SectionKpi[] | null>(null);
   const [businessMaturityKpis, setBusinessMaturityKpis] = useState<SectionKpi[] | null>(null);
-  const [rootMaturityKpis, setRootMaturityKpis]     = useState<SectionKpi[] | null>(null);
-  const [platformKpis, setPlatformKpis]             = useState<SectionKpi[] | null>(null);
+  const [rootMaturityKpis, setRootMaturityKpis] = useState<SectionKpi[] | null>(null);
+  const [platformKpis, setPlatformKpis] = useState<SectionKpi[] | null>(null);
   const [platformLatencySeries, setPlatformLatencySeries] = useState<Array<{ label: string; ts: number; p95?: number; p99?: number }> | null>(null);
-  const [platformErrorSeries, setPlatformErrorSeries]     = useState<Array<{ label: string; ts: number; value?: number }> | null>(null);
-  const [platformCpuMemSeries, setPlatformCpuMemSeries]   = useState<Array<{ label: string; ts: number; cpu?: number; memory?: number }> | null>(null);
+  const [platformErrorSeries, setPlatformErrorSeries] = useState<Array<{ label: string; ts: number; value?: number }> | null>(null);
+  const [platformCpuMemSeries, setPlatformCpuMemSeries] = useState<Array<{ label: string; ts: number; cpu?: number; memory?: number }> | null>(null);
   const [devPerformanceKpis, setDevPerformanceKpis] = useState<SectionKpi[] | null>(null);
-  const [devLatencySeries, setDevLatencySeries]     = useState<Array<{ label: string; p95?: number; p99?: number }> | null>(null);
+  const [devLatencySeries, setDevLatencySeries] = useState<Array<{ label: string; p95?: number; p99?: number }> | null>(null);
   const [businessExperienceKpis, setBusinessExperienceKpis] = useState<SectionKpi[] | null>(null);
   const [businessResponseTimeSeries, setBusinessResponseTimeSeries] = useState<PendingSeriesPoint[] | null>(null);
-  const [costKpis, setCostKpis]                           = useState<SectionKpi[] | null>(null);
-  const [costRange, setCostRange]                         = useState<"30d" | "90d">("30d");
-  const [costTrendSeries, setCostTrendSeries]             = useState<PendingSeriesPoint[] | null>(null);
-  const [costP95Range, setCostP95Range]                   = useState<"30d" | "90d">("30d");
-  const [costP95TrendSeries, setCostP95TrendSeries]       = useState<PendingSeriesPoint[] | null>(null);
+  const [costKpis, setCostKpis] = useState<SectionKpi[] | null>(null);
+  const [costRange, setCostRange] = useState<"30d" | "90d">("30d");
+  const [costTrendSeries, setCostTrendSeries] = useState<PendingSeriesPoint[] | null>(null);
+  const [costP95Range, setCostP95Range] = useState<"30d" | "90d">("30d");
+  const [costP95TrendSeries, setCostP95TrendSeries] = useState<PendingSeriesPoint[] | null>(null);
 
   // IDP section state
-  const [idpPipelineKpis, setIdpPipelineKpis]             = useState<SectionKpi[] | null>(null);
-  const [idpPipelineSeries, setIdpPipelineSeries]         = useState<PendingSeriesPoint[] | null>(null);
-  const [idpReviewKpis, setIdpReviewKpis]                 = useState<SectionKpi[] | null>(null);
-  const [idpReviewSeries, setIdpReviewSeries]             = useState<PendingSeriesPoint[] | null>(null);
-  const [idpApprovalKpis, setIdpApprovalKpis]             = useState<SectionKpi[] | null>(null);
-  const [idpApprovalSeries, setIdpApprovalSeries]         = useState<PendingSeriesPoint[] | null>(null);
-  const [idpSubmissionKpis, setIdpSubmissionKpis]         = useState<SectionKpi[] | null>(null);
-  const [idpSubmissionSeries, setIdpSubmissionSeries]     = useState<PendingSeriesPoint[] | null>(null);
-  const [idpQualityKpis, setIdpQualityKpis]               = useState<SectionKpi[] | null>(null);
-  const [idpQualitySeries, setIdpQualitySeries]           = useState<PendingSeriesPoint[] | null>(null);
-  const [idpAnalyticsKpis, setIdpAnalyticsKpis]           = useState<SectionKpi[] | null>(null);
+  const [idpPipelineKpis, setIdpPipelineKpis] = useState<SectionKpi[] | null>(null);
+  const [idpPipelineSeries, setIdpPipelineSeries] = useState<PendingSeriesPoint[] | null>(null);
+  const [idpReviewKpis, setIdpReviewKpis] = useState<SectionKpi[] | null>(null);
+  const [idpReviewSeries, setIdpReviewSeries] = useState<PendingSeriesPoint[] | null>(null);
+  const [idpApprovalKpis, setIdpApprovalKpis] = useState<SectionKpi[] | null>(null);
+  const [idpApprovalSeries, setIdpApprovalSeries] = useState<PendingSeriesPoint[] | null>(null);
+  const [idpSubmissionKpis, setIdpSubmissionKpis] = useState<SectionKpi[] | null>(null);
+  const [idpSubmissionSeries, setIdpSubmissionSeries] = useState<PendingSeriesPoint[] | null>(null);
+  const [idpQualityKpis, setIdpQualityKpis] = useState<SectionKpi[] | null>(null);
+  const [idpQualitySeries, setIdpQualitySeries] = useState<PendingSeriesPoint[] | null>(null);
+  const [idpAnalyticsKpis, setIdpAnalyticsKpis] = useState<SectionKpi[] | null>(null);
   const [idpAnalyticsThroughputSeries, setIdpAnalyticsThroughputSeries] = useState<PendingSeriesPoint[] | null>(null);
-  const [idpAnalyticsCostSeries, setIdpAnalyticsCostSeries]             = useState<PendingSeriesPoint[] | null>(null);
+  const [idpAnalyticsCostSeries, setIdpAnalyticsCostSeries] = useState<PendingSeriesPoint[] | null>(null);
 
   // Fallbacks
-  const lifecycleKpiFallback:   SectionKpi[] = [{ name: "Agents in UAT", value: "0" }, { name: "UAT to PROD Conversion Rate", value: "0%" }, { name: "Deprecated Agent Count", value: "0" }];
-  const governanceKpiFallback:  SectionKpi[] = [{ name: "Guardrail Violation Rate", value: "0%" }, { name: "Escalation to Human Review", value: "0" }, { name: "% Agents Without Guardrails", value: "0%" }, { name: "Policy Breach Attempts", value: "0" }];
-  const deptUsageKpiFallback:   SectionKpi[] = [{ name: "Active Agents in Dept (UAT)", value: "0" }, { name: "Active Agents in Dept (PROD)", value: "0" }, { name: "Avg Response Time", value: "0ms" }];
-  const deptApprovalKpiFallback:SectionKpi[] = [{ name: "Pending Approvals", value: "0" }, { name: "Rejection Rate", value: "0%" }, { name: "Avg Approval Time", value: "0min" }];
-  const deptHitlKpiFallback:    SectionKpi[] = [{ name: "Agents with HITL", value: "0" }, { name: "HITL Invocation Rate", value: "0%" }, { name: "Avg HITL Response Time", value: "0min" }];
-  const devCodeKpiFallback:     SectionKpi[] = [{ name: "Avg. Version Count of Agents", value: "0" }];
-  const businessMaturityFallback:SectionKpi[]= [{ name: "% Agents with Guardrails", value: "0%" }, { name: "% Agents with RAG", value: "0%" }, { name: "% Agents with HITL", value: "0%" }];
-  const rootMaturityFallback:   SectionKpi[] = [{ name: "% Agents with Guardrails", value: "0%" }, { name: "% Agents with RAG", value: "0%" }, { name: "% Agents with HITL", value: "0%" }];
-  const platformKpiFallback:    SectionKpi[] = [{ name: "Platform Uptime %", value: "0%" }, { name: "API Latency P95", value: "0ms" }, { name: "API Latency P99", value: "0ms" }, { name: "Error Rate %", value: "0%" }, { name: "Running Pods", value: "0" }, { name: "AKS Pod Scaling Events", value: "0" }, { name: "CPU/Memory Saturation %", value: "0%" }, { name: "Total Agent Runs", value: "0" }, { name: "Failed Agent Runs", value: "0" }, { name: "Execution Failure Rate", value: "0%" }];
-  const costKpiFallback:        SectionKpi[] = [{ name: "Total Cost", value: "$0.00" }, { name: "Avg Cost Per Run", value: "$0.00" }];
+  const lifecycleKpiFallback: SectionKpi[] = [{ name: "Agents in UAT", value: "0" }, { name: "UAT to PROD Conversion Rate", value: "0%" }, { name: "Deprecated Agent Count", value: "0" }];
+  const governanceKpiFallback: SectionKpi[] = [{ name: "Guardrail Violation Rate", value: "0%" }, { name: "Escalation to Human Review", value: "0" }, { name: "% Agents Without Guardrails", value: "0%" }, { name: "Policy Breach Attempts", value: "0" }];
+  const deptUsageKpiFallback: SectionKpi[] = [{ name: "Active Agents in Dept (UAT)", value: "0" }, { name: "Active Agents in Dept (PROD)", value: "0" }, { name: "Avg Response Time", value: "0ms" }];
+  const deptApprovalKpiFallback: SectionKpi[] = [{ name: "Pending Approvals", value: "0" }, { name: "Rejection Rate", value: "0%" }, { name: "Avg Approval Time", value: "0min" }];
+  const deptHitlKpiFallback: SectionKpi[] = [{ name: "Agents with HITL", value: "0" }, { name: "HITL Invocation Rate", value: "0%" }, { name: "Avg HITL Response Time", value: "0min" }];
+  const devCodeKpiFallback: SectionKpi[] = [{ name: "Avg. Version Count of Agents", value: "0" }];
+  const businessMaturityFallback: SectionKpi[] = [{ name: "% Agents with Guardrails", value: "0%" }, { name: "% Agents with RAG", value: "0%" }, { name: "% Agents with HITL", value: "0%" }];
+  const rootMaturityFallback: SectionKpi[] = [{ name: "% Agents with Guardrails", value: "0%" }, { name: "% Agents with RAG", value: "0%" }, { name: "% Agents with HITL", value: "0%" }];
+  const platformKpiFallback: SectionKpi[] = [{ name: "Platform Uptime %", value: "0%" }, { name: "API Latency P95", value: "0ms" }, { name: "API Latency P99", value: "0ms" }, { name: "Error Rate %", value: "0%" }, { name: "Running Pods", value: "0" }, { name: "AKS Pod Scaling Events", value: "0" }, { name: "CPU/Memory Saturation %", value: "0%" }, { name: "Total Agent Runs", value: "0" }, { name: "Failed Agent Runs", value: "0" }, { name: "Execution Failure Rate", value: "0%" }];
+  const costKpiFallback: SectionKpi[] = [{ name: "Total Cost", value: "$0.00" }, { name: "Avg Cost Per Run", value: "$0.00" }];
   const devPerformanceFallback: SectionKpi[] = [{ name: "Avg Agent Latency", value: "0ms" }, { name: "Latency P95", value: "0ms" }, { name: "Latency P99", value: "0ms" }];
-  const businessExperienceFallback:SectionKpi[]=[{ name: "Avg Response Time", value: "0ms" }, { name: "Avg Session Duration", value: "0ms" }, { name: "Escalation to Human", value: "0" }, { name: "User Satisfaction Score", value: "0" }];
-  const idpPipelineFallback:   SectionKpi[] = [{ name: "Docs Processed (30d)", value: "0" }, { name: "Processing Success Rate", value: "0%" }, { name: "Docs Pending Review", value: "0" }, { name: "Docs Pending Approval", value: "0" }, { name: "Active Field Configs", value: "0" }, { name: "Avg Processing Time", value: "0s" }];
-  const idpReviewFallback:     SectionKpi[] = [{ name: "Docs Pending Review", value: "0" }, { name: "Reviewed Today", value: "0" }, { name: "Reviewed This Week", value: "0" }, { name: "Avg Review Time", value: "0min" }, { name: "Correction Rate", value: "0%" }];
-  const idpApprovalFallback:   SectionKpi[] = [{ name: "Pending Approval", value: "0" }, { name: "Approved Today", value: "0" }, { name: "Rejected Today", value: "0" }, { name: "Approval Rate", value: "0%" }, { name: "Avg Approval Time", value: "0min" }];
+  const businessExperienceFallback: SectionKpi[] = [{ name: "Avg Response Time", value: "0ms" }, { name: "Avg Session Duration", value: "0ms" }, { name: "Escalation to Human", value: "0" }, { name: "User Satisfaction Score", value: "0" }];
+  const idpPipelineFallback: SectionKpi[] = [{ name: "Docs Processed (30d)", value: "0" }, { name: "Processing Success Rate", value: "0%" }, { name: "Docs Pending Review", value: "0" }, { name: "Docs Pending Approval", value: "0" }, { name: "Active Field Configs", value: "0" }, { name: "Avg Processing Time", value: "0s" }];
+  const idpReviewFallback: SectionKpi[] = [{ name: "Docs Pending Review", value: "0" }, { name: "Reviewed Today", value: "0" }, { name: "Reviewed This Week", value: "0" }, { name: "Avg Review Time", value: "0min" }, { name: "Correction Rate", value: "0%" }];
+  const idpApprovalFallback: SectionKpi[] = [{ name: "Pending Approval", value: "0" }, { name: "Approved Today", value: "0" }, { name: "Rejected Today", value: "0" }, { name: "Approval Rate", value: "0%" }, { name: "Avg Approval Time", value: "0min" }];
   const idpSubmissionFallback: SectionKpi[] = [{ name: "Total Submitted", value: "0" }, { name: "Processing", value: "0" }, { name: "Under Review", value: "0" }, { name: "Approved", value: "0" }, { name: "Failed / Skipped", value: "0" }];
-  const idpQualityFallback:    SectionKpi[] = [{ name: "Active Field Configs", value: "0" }, { name: "Avg Extraction Accuracy", value: "0%" }, { name: "Docs Processed (30d)", value: "0" }, { name: "Avg Correction Rate", value: "0%" }, { name: "Failed Extractions", value: "0" }];
-  const idpAnalyticsFallback:  SectionKpi[] = [{ name: "Total Docs Processed", value: "0" }, { name: "Processing Success Rate", value: "0%" }, { name: "SLA Compliance", value: "0%" }, { name: "Avg Cost per Document", value: "$0.00" }, { name: "Docs Processed (30d)", value: "0" }, { name: "Processing Error Rate", value: "0%" }];
+  const idpQualityFallback: SectionKpi[] = [{ name: "Active Field Configs", value: "0" }, { name: "Avg Extraction Accuracy", value: "0%" }, { name: "Docs Processed (30d)", value: "0" }, { name: "Avg Correction Rate", value: "0%" }, { name: "Failed Extractions", value: "0" }];
+  const idpAnalyticsFallback: SectionKpi[] = [{ name: "Total Docs Processed", value: "0" }, { name: "Processing Success Rate", value: "0%" }, { name: "SLA Compliance", value: "0%" }, { name: "Avg Cost per Document", value: "$0.00" }, { name: "Docs Processed (30d)", value: "0" }, { name: "Processing Error Rate", value: "0%" }];
   const approvalRangeOptions = [{ value: "7d", label: "Last 7 days" }, { value: "30d", label: "Last 30 days" }, { value: "12w", label: "Last 12 weeks" }];
 
   useEffect(() => { const id = setInterval(() => setRefreshTick((t) => t + 1), 15000); return () => clearInterval(id); }, []);
@@ -1080,7 +1080,7 @@ export default function DashboardAdmin(): JSX.Element {
           return [...base.filter((k) => !obsNames.has(k.name)), ...mapped];
         });
       })
-      .catch(() => {});
+      .catch(() => { });
   }, [isSuperAdmin, isRootAdmin, refreshTick, userData?.organization_id, selectedRegionCode]);
   useEffect(() => {
     if (!isSuperAdmin && !isRootAdmin) return;
@@ -1213,27 +1213,27 @@ export default function DashboardAdmin(): JSX.Element {
   const aDays = approvalRange === "7d" ? 7 : approvalRange === "30d" ? 30 : 84;
   const hDays = hitlRange === "7d" ? 7 : hitlRange === "30d" ? 30 : 84;
 
-  const approvalChartData      = useMemo(() => mkDateSeries(approvalPendingSeries, aDays), [approvalPendingSeries, aDays]);
+  const approvalChartData = useMemo(() => mkDateSeries(approvalPendingSeries, aDays), [approvalPendingSeries, aDays]);
   const hitlInvocationChartData = useMemo(() => mkDateSeries(hitlInvocationSeries, hDays), [hitlInvocationSeries, hDays]);
-  const hitlResponseChartData   = useMemo(() => mkDateSeries(hitlResponseSeries, hDays), [hitlResponseSeries, hDays]);
-  const deptRtChartData         = useMemo(() => mkDateSeries(deptResponseTimeSeries, 7), [deptResponseTimeSeries]);
-  const bizRtChartData          = useMemo(() => mkDateSeries(businessResponseTimeSeries, 7), [businessResponseTimeSeries]);
-  const platLatencyData  = useMemo(() => platformLatencySeries?.length ? platformLatencySeries : mkTsSeries(8).map((p) => ({ ...p, p95: 0, p99: 0 })), [platformLatencySeries]);
-  const platErrorData    = useMemo(() => platformErrorSeries?.length ? platformErrorSeries : mkTsSeries(8).map((p) => ({ ...p, value: 0 })), [platformErrorSeries]);
-  const platCpuMemData   = useMemo(() => platformCpuMemSeries?.length ? platformCpuMemSeries : mkTsSeries(8).map((p) => ({ ...p, cpu: 0, memory: 0 })), [platformCpuMemSeries]);
+  const hitlResponseChartData = useMemo(() => mkDateSeries(hitlResponseSeries, hDays), [hitlResponseSeries, hDays]);
+  const deptRtChartData = useMemo(() => mkDateSeries(deptResponseTimeSeries, 7), [deptResponseTimeSeries]);
+  const bizRtChartData = useMemo(() => mkDateSeries(businessResponseTimeSeries, 7), [businessResponseTimeSeries]);
+  const platLatencyData = useMemo(() => platformLatencySeries?.length ? platformLatencySeries : mkTsSeries(8).map((p) => ({ ...p, p95: 0, p99: 0 })), [platformLatencySeries]);
+  const platErrorData = useMemo(() => platformErrorSeries?.length ? platformErrorSeries : mkTsSeries(8).map((p) => ({ ...p, value: 0 })), [platformErrorSeries]);
+  const platCpuMemData = useMemo(() => platformCpuMemSeries?.length ? platformCpuMemSeries : mkTsSeries(8).map((p) => ({ ...p, cpu: 0, memory: 0 })), [platformCpuMemSeries]);
   const cDays = costRange === "90d" ? 90 : 30;
   const costTrendChartData = useMemo(() => mkDateSeries(costTrendSeries, cDays), [costTrendSeries, cDays]);
   const cP95Days = costP95Range === "90d" ? 90 : 30;
   const costP95ChartData = useMemo(() => mkDateSeries(costP95TrendSeries, cP95Days), [costP95TrendSeries, cP95Days]);
-  const devLatData       = useMemo(() => devLatencySeries ?? [], [devLatencySeries]);
+  const devLatData = useMemo(() => devLatencySeries ?? [], [devLatencySeries]);
 
-  const idpPipelineChartData   = useMemo(() => mkDateSeries(idpPipelineSeries, 30), [idpPipelineSeries]);
-  const idpReviewChartData     = useMemo(() => mkDateSeries(idpReviewSeries, 7), [idpReviewSeries]);
-  const idpApprovalChartData   = useMemo(() => mkDateSeries(idpApprovalSeries, 7), [idpApprovalSeries]);
+  const idpPipelineChartData = useMemo(() => mkDateSeries(idpPipelineSeries, 30), [idpPipelineSeries]);
+  const idpReviewChartData = useMemo(() => mkDateSeries(idpReviewSeries, 7), [idpReviewSeries]);
+  const idpApprovalChartData = useMemo(() => mkDateSeries(idpApprovalSeries, 7), [idpApprovalSeries]);
   const idpSubmissionChartData = useMemo(() => mkDateSeries(idpSubmissionSeries, 7), [idpSubmissionSeries]);
-  const idpQualityChartData    = useMemo(() => mkDateSeries(idpQualitySeries, 30), [idpQualitySeries]);
+  const idpQualityChartData = useMemo(() => mkDateSeries(idpQualitySeries, 30), [idpQualitySeries]);
   const idpAnalyticsThroughputData = useMemo(() => mkDateSeries(idpAnalyticsThroughputSeries, 30), [idpAnalyticsThroughputSeries]);
-  const idpAnalyticsCostData   = useMemo(() => mkDateSeries(idpAnalyticsCostSeries, 30), [idpAnalyticsCostSeries]);
+  const idpAnalyticsCostData = useMemo(() => mkDateSeries(idpAnalyticsCostSeries, 30), [idpAnalyticsCostSeries]);
 
   // -- Resolve KPIs + charts for each section ----------------------------
 
@@ -1282,7 +1282,7 @@ export default function DashboardAdmin(): JSX.Element {
     const charts = section.charts.map((chart) => {
       if (section.id === "platform") {
         if (chart.title === "API Latency P95 vs P99") return { ...chart, data: platLatencyData };
-        if (chart.title === "Error Rate Trend")        return { ...chart, data: platErrorData };
+        if (chart.title === "Error Rate Trend") return { ...chart, data: platErrorData };
         if (chart.title === "CPU & Memory Saturation") return { ...chart, data: platCpuMemData };
       }
       if (section.id === "cost" && chart.title === "Monthly Cost Trend") return { ...chart, data: costTrendChartData };
@@ -1291,7 +1291,7 @@ export default function DashboardAdmin(): JSX.Element {
       if (section.id === "approval" && chart.title === "Pending Approvals") return { ...chart, data: approvalChartData };
       if (section.id === "hitl") {
         if (chart.title === "Invocation Rate") return { ...chart, data: hitlInvocationChartData };
-        if (chart.title === "Response Time")   return { ...chart, data: hitlResponseChartData };
+        if (chart.title === "Response Time") return { ...chart, data: hitlResponseChartData };
       }
       if (section.id === "performance" && chart.title === "API Latency P95 vs P99") return { ...chart, data: devLatData };
       if (section.id === "experience" && chart.title === "Response Time") return { ...chart, data: bizRtChartData };
