@@ -136,12 +136,19 @@ async def sync_agent_registry(
             )
         ).first()
 
+        cand_vis = str(candidate.visibility.value if hasattr(candidate.visibility, "value") else candidate.visibility).upper()
+        mapped_visibility = (
+            RegistryVisibilityEnum.PUBLIC
+            if cand_vis == "PUBLIC"
+            else RegistryVisibilityEnum.PRIVATE
+        )
+
         if existing is not None:
             # Same deployment re-synced (e.g. title/description changed)
             existing.title = candidate.agent_name
             existing.summary = candidate.agent_description
             existing.tags = agent_tags
-            existing.visibility = RegistryVisibilityEnum.PUBLIC
+            existing.visibility = mapped_visibility
             existing.updated_at = now
             session.add(existing)
             logger.info(
@@ -159,7 +166,7 @@ async def sync_agent_registry(
                 title=candidate.agent_name,
                 summary=candidate.agent_description,
                 tags=agent_tags,
-                visibility=RegistryVisibilityEnum.PUBLIC,
+                visibility=mapped_visibility,
                 listed_by=acted_by,
                 listed_at=now,
                 created_at=now,
@@ -252,7 +259,7 @@ async def _cleanup_stale_registry_entries(
                 and dep.is_active
                 and dep.is_enabled
                 and dep.status == DeploymentPRODStatusEnum.PUBLISHED
-                and dep.visibility == ProdDeploymentVisibilityEnum.PUBLIC
+                and dep.visibility in (ProdDeploymentVisibilityEnum.PUBLIC, ProdDeploymentVisibilityEnum.PRIVATE)
             )
         else:
             dep = await session.get(AgentDeploymentUAT, entry.agent_deployment_id)
@@ -261,7 +268,7 @@ async def _cleanup_stale_registry_entries(
                 and dep.is_active
                 and dep.is_enabled
                 and dep.status == DeploymentUATStatusEnum.PUBLISHED
-                and dep.visibility == DeploymentVisibilityEnum.PUBLIC
+                and dep.visibility in (DeploymentVisibilityEnum.PUBLIC, DeploymentVisibilityEnum.PRIVATE)
             )
 
         if not qualifies:
@@ -289,7 +296,7 @@ async def _find_qualifying_deployment(
                 AgentDeploymentProd.is_active == True,  # noqa: E712
                 AgentDeploymentProd.is_enabled == True,  # noqa: E712
                 AgentDeploymentProd.status == DeploymentPRODStatusEnum.PUBLISHED,
-                AgentDeploymentProd.visibility == ProdDeploymentVisibilityEnum.PUBLIC,
+                AgentDeploymentProd.visibility.in_([ProdDeploymentVisibilityEnum.PUBLIC, ProdDeploymentVisibilityEnum.PRIVATE]),
             )
             .order_by(col(AgentDeploymentProd.version_number).desc())
             .limit(1)
@@ -302,7 +309,7 @@ async def _find_qualifying_deployment(
                 AgentDeploymentUAT.is_active == True,  # noqa: E712
                 AgentDeploymentUAT.is_enabled == True,  # noqa: E712
                 AgentDeploymentUAT.status == DeploymentUATStatusEnum.PUBLISHED,
-                AgentDeploymentUAT.visibility == DeploymentVisibilityEnum.PUBLIC,
+                AgentDeploymentUAT.visibility.in_([DeploymentVisibilityEnum.PUBLIC, DeploymentVisibilityEnum.PRIVATE]),
             )
             .order_by(col(AgentDeploymentUAT.version_number).desc())
             .limit(1)
