@@ -175,6 +175,8 @@ def get_langfuse_client_for_binding(binding: Any) -> Any | None:
         return None
     client._trace_cache_namespace = f"binding:{binding.id}"
     client._agentcore_binding_id = str(binding.id)
+    client._langfuse_project_id = getattr(binding, "langfuse_project_id", None)
+    client._langfuse_host = getattr(binding, "langfuse_host", None)
 
     _BINDING_CLIENT_CACHE[str(binding.id)] = {
         "fingerprint": fingerprint,

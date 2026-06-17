@@ -69,6 +69,7 @@ class TraceListItem(BaseModel):
     models_used: list[str] = []
     observation_count: int = 0
     level: str | None = None
+    langfuse_console_url: str | None = None
 
 
 class TracesListResponse(BaseModel):
@@ -76,6 +77,7 @@ class TracesListResponse(BaseModel):
     total: int
     page: int
     limit: int
+    langfuse_base_console_url: str | None = None
     scope_warning: bool = False
     scope_warning_message: str | None = None
 
@@ -100,6 +102,7 @@ class TraceDetailResponse(BaseModel):
     tags: list[str] = []
     level: str | None = None
     status: str | None = None
+    langfuse_console_url: str | None = None
     scope_warning: bool = False
     scope_warning_message: str | None = None
 

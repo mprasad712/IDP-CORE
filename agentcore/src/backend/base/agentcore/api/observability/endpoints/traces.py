@@ -51,6 +51,21 @@ from ..trace_store import (
 router = APIRouter()
 
 
+def _build_langfuse_console_url(client: Any, trace_id: str | None = None) -> str | None:
+    """Construct a Langfuse console deep-link URL from client binding metadata.
+
+    Returns the full trace URL if trace_id is given, otherwise the project base URL.
+    """
+    host = getattr(client, "_langfuse_host", None)
+    project_id = getattr(client, "_langfuse_project_id", None)
+    if not host or not project_id:
+        return None
+    base = host.rstrip("/")
+    if trace_id:
+        return f"{base}/project/{project_id}/traces/{trace_id}"
+    return f"{base}/project/{project_id}"
+
+
 @router.get("/traces")
 async def get_user_traces(
     current_user: Annotated[User, Depends(get_current_active_user)],
@@ -107,8 +122,17 @@ async def get_user_traces(
         start_idx = (page - 1) * limit
         paginated = items[start_idx:start_idx + limit]
 
+        # Resolve the Langfuse console base URL from the first usable client
+        langfuse_base_url: str | None = None
+        for sc in scoped_clients:
+            url = _build_langfuse_console_url(sc)
+            if url:
+                langfuse_base_url = url
+                break
+
         return TracesListResponse(
             traces=paginated, total=total, page=page, limit=limit,
+            langfuse_base_console_url=langfuse_base_url,
             **scope_warning_payload(scope_warnings),
         )
     except HTTPException:
@@ -425,6 +449,9 @@ async def get_trace_detail(
             logger.warning(f"Error merging scores for trace {resolved_trace_id}: {e}")
             pass
 
+        # Build Langfuse console URL from binding metadata on the trace's client
+        langfuse_console_url = _build_langfuse_console_url(trace_client, resolved_trace_id)
+
         return TraceDetailResponse(
             id=resolved_trace_id,
             name=get_attr(trace, "name"),
@@ -445,6 +472,7 @@ async def get_trace_detail(
             tags=get_attr(trace, "tags", default=[]) or [],
             level=_enum_str(get_attr(trace, "level")),
             status=_enum_str(get_attr(trace, "status")),
+            langfuse_console_url=langfuse_console_url,
             **scope_warning_payload(scope_warnings),
         )
     except HTTPException:

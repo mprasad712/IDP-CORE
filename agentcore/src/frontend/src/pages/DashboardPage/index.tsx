@@ -53,6 +53,7 @@ import { useTranslation } from "react-i18next";
 import { AuthContext } from "@/contexts/authContext";
 import { api } from "@/controllers/API/api";
 import useRegionStore from "@/stores/regionStore";
+import { ObservabilityDashboardSection } from "./components/observabilityDashboardSection";
 
 type SectionId =
   | "platform"
@@ -76,7 +77,8 @@ type SectionId =
   | "idp_approval"
   | "idp_submission"
   | "idp_quality"
-  | "idp_analytics";
+  | "idp_analytics"
+  | "idp_observability";
 
 type SectionKpi = {
   name: string;
@@ -369,10 +371,28 @@ const idpAnalyticsSection: SectionConfig = {
   ],
 };
 
+const idpObservabilitySection: SectionConfig = {
+  id: "idp_observability",
+  label: "LLM Observability",
+  headline: "LLM Execution Observability",
+  description: "LLM metrics, tokens, model breakdown, costs, latency, and detailed execution trace logs.",
+  kpis: [
+    { name: "Total Cost", value: "$0.00" },
+    { name: "Total Traces", value: "0" },
+    { name: "Avg Latency", value: "0.00s" },
+    { name: "Total Tokens", value: "0" },
+  ],
+  charts: [
+    { title: "Daily Token Consumption", subtitle: "Token usage trend over time", type: "area", data: [] },
+    { title: "Model Usage Breakdown", subtitle: "Total cost per model type", type: "donut", data: [] },
+  ],
+};
+
 const getDepartmentSections = (): SectionConfig[] => [
   idpPipelineSection,
   idpReviewSection,
   idpApprovalSection,
+  idpObservabilitySection,
 ];
 
 const getDeveloperSections = (): SectionConfig[] => [
@@ -401,23 +421,24 @@ const getDeveloperSections = (): SectionConfig[] => [
       },
     ],
   },
+  idpObservabilitySection,
 ];
 
-const getBusinessSections = (): SectionConfig[] => [idpReviewSection];
+const getBusinessSections = (): SectionConfig[] => [idpReviewSection, idpObservabilitySection];
 
-const allSections: SectionConfig[] = [...sections, idpPipelineSection];
+const allSections: SectionConfig[] = [...sections, idpPipelineSection, idpObservabilitySection];
 
 // ── Leader / Auditor sections ───────────────────────────────────────────────
 
-const rootSections: SectionConfig[] = [idpAnalyticsSection];
+const rootSections: SectionConfig[] = [idpAnalyticsSection, idpObservabilitySection];
 
 // ── Document Approver sections ──────────────────────────────────────────────
 
-const documentApproverSections: SectionConfig[] = [idpApprovalSection];
+const documentApproverSections: SectionConfig[] = [idpApprovalSection, idpObservabilitySection];
 
 // ── Document Submitter (consumer) sections ──────────────────────────────────
 
-const consumerSections: SectionConfig[] = [idpSubmissionSection];
+const consumerSections: SectionConfig[] = [idpSubmissionSection, idpObservabilitySection];
 
 // --- Style constants -------------------------------------------------------
 
@@ -446,6 +467,7 @@ const sectionThemes: Record<SectionId, { badge: string; accent: string; border: 
   idp_submission: { badge: "bg-violet-100 text-violet-700", accent: "#8b5cf6", border: "border-l-violet-500", headerBg: "bg-violet-50/60 dark:bg-violet-950/20", iconBg: "bg-violet-100 dark:bg-violet-900/30", icon: <Upload className="h-4 w-4 text-violet-600 dark:text-violet-400" /> },
   idp_quality: { badge: "bg-emerald-100 text-emerald-700", accent: "#10b981", border: "border-l-emerald-500", headerBg: "bg-emerald-50/60 dark:bg-emerald-950/20", iconBg: "bg-emerald-100 dark:bg-emerald-900/30", icon: <Microscope className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> },
   idp_analytics: { badge: "bg-sky-100 text-sky-700", accent: "#0ea5e9", border: "border-l-sky-500", headerBg: "bg-sky-50/60 dark:bg-sky-950/20", iconBg: "bg-sky-100 dark:bg-sky-900/30", icon: <BarChart2 className="h-4 w-4 text-sky-600 dark:text-sky-400" /> },
+  idp_observability: { badge: "bg-orange-100 text-orange-700", accent: "#D04A02", border: "border-l-orange-600", headerBg: "bg-orange-50/60 dark:bg-orange-950/20", iconBg: "bg-orange-100 dark:bg-orange-900/30", icon: <Activity className="h-4 w-4 text-orange-600 dark:text-orange-400" /> },
 };
 
 // --- Tooltips -------------------------------------------------------------
@@ -615,6 +637,12 @@ function SectionCard({
   costRangeSelector,
   costP95RangeSelector,
   defaultExpanded,
+  isRootAdmin,
+  isSuperAdmin,
+  isLeaderExecutive,
+  isDepartmentAdmin,
+  userData,
+  refreshTick,
 }: {
   section: SectionConfig;
   displayKpis: SectionKpi[];
@@ -624,6 +652,12 @@ function SectionCard({
   costRangeSelector?: React.ReactNode;
   costP95RangeSelector?: React.ReactNode;
   defaultExpanded: boolean;
+  isRootAdmin?: boolean;
+  isSuperAdmin?: boolean;
+  isLeaderExecutive?: boolean;
+  isDepartmentAdmin?: boolean;
+  userData?: any;
+  refreshTick?: number;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const { t } = useTranslation();
@@ -716,9 +750,22 @@ function SectionCard({
       {/* -- Expanded Body -- */}
       {expanded && !isEmpty && (
         <div className="border-t border-border bg-card px-6 pb-6">
-
-          {/* KPI grid - uses section accent color consistently */}
-          {displayKpis.length > 0 && (
+          {section.id === "idp_observability" ? (
+            <div className="mt-5">
+              <ObservabilityDashboardSection
+                isRootAdmin={!!isRootAdmin}
+                isSuperAdmin={!!isSuperAdmin}
+                isLeaderExecutive={!!isLeaderExecutive}
+                isDepartmentAdmin={!!isDepartmentAdmin}
+                userData={userData}
+                refreshTick={refreshTick ?? 0}
+                accentColor={theme.accent}
+              />
+            </div>
+          ) : (
+            <>
+              {/* KPI grid - uses section accent color consistently */}
+              {displayKpis.length > 0 && (
             <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
               {displayKpis.map((kpi, i) => (
                 <div
@@ -832,6 +879,8 @@ function SectionCard({
               </div>
             </>
           )}
+        </>
+      )}
         </div>
       )}
     </div>
@@ -1429,6 +1478,12 @@ export default function DashboardAdmin(): JSX.Element {
                 costRangeSelector={section.id === "cost" ? costRangeSelector : undefined}
                 costP95RangeSelector={section.id === "cost" ? costP95RangeSelector : undefined}
                 defaultExpanded={i === 0}
+                isRootAdmin={isRootAdmin}
+                isSuperAdmin={isSuperAdmin}
+                isLeaderExecutive={isLeaderExecutive}
+                isDepartmentAdmin={isDepartmentAdmin}
+                userData={userData}
+                refreshTick={refreshTick}
               />
             );
           })}
