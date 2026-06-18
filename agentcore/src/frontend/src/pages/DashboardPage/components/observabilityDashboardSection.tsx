@@ -76,10 +76,17 @@ export function ObservabilityDashboardSection({
   const [page, setPage] = React.useState(1);
   const limit = 10;
   const [environmentFilter, setEnvironmentFilter] = React.useState<"all" | "uat" | "production">("all");
+  const [dateRangeFilter, setDateRangeFilter] = React.useState<"1" | "7" | "30">("30");
 
   // Selected trace for timeline drawer
   const [selectedTraceId, setSelectedTraceId] = React.useState<string | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
+
+  const dateRangeLabel = React.useMemo(() => {
+    if (dateRangeFilter === "1") return "today";
+    if (dateRangeFilter === "7") return "last 7d";
+    return "last 30d";
+  }, [dateRangeFilter]);
 
   // Determine trace scope according to PwC user privileges
   const traceScope = React.useMemo(() => {
@@ -95,8 +102,15 @@ export function ObservabilityDashboardSection({
     let active = true;
     setIsLoadingMetrics(true);
 
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const ago = new Date();
+    const daysOffset = dateRangeFilter === "1" ? 0 : Number(dateRangeFilter);
+    ago.setDate(ago.getDate() - daysOffset);
+    const fromDateStr = ago.toISOString().slice(0, 10);
+
     const params: Record<string, any> = {
-      days: 30,
+      from_date: fromDateStr,
+      to_date: todayStr,
       trace_scope: traceScope,
       tz_offset: tzOffset
     };
@@ -124,7 +138,7 @@ export function ObservabilityDashboardSection({
     return () => {
       active = false;
     };
-  }, [traceScope, userData?.organization_id, userData?.department_id, environmentFilter, appliedSearch, tzOffset, refreshTick]);
+  }, [traceScope, userData?.organization_id, userData?.department_id, environmentFilter, dateRangeFilter, appliedSearch, tzOffset, refreshTick]);
 
   // Fetch individual trace logs
   React.useEffect(() => {
@@ -140,11 +154,12 @@ export function ObservabilityDashboardSection({
     if (userData?.department_id) params.dept_id = userData.department_id;
     if (environmentFilter !== "all") params.environment = environmentFilter;
 
-    // Fetch a slightly wider date window for logs
+    // Fetch dates according to range filter selection
     const todayStr = new Date().toISOString().slice(0, 10);
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    const fromDateStr = thirtyDaysAgo.toISOString().slice(0, 10);
+    const ago = new Date();
+    const daysOffset = dateRangeFilter === "1" ? 0 : Number(dateRangeFilter);
+    ago.setDate(ago.getDate() - daysOffset);
+    const fromDateStr = ago.toISOString().slice(0, 10);
 
     params.from_date = fromDateStr;
     params.to_date = todayStr;
@@ -168,7 +183,7 @@ export function ObservabilityDashboardSection({
     return () => {
       active = false;
     };
-  }, [traceScope, userData?.organization_id, userData?.department_id, environmentFilter, page, refreshTick]);
+  }, [traceScope, userData?.organization_id, userData?.department_id, environmentFilter, dateRangeFilter, page, refreshTick]);
 
   // Search submit trigger
   const handleSearchSubmit = (e: React.FormEvent) => {
@@ -308,7 +323,7 @@ export function ObservabilityDashboardSection({
         <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-orange-50/5 dark:bg-zinc-800/40">
           <div>
             <p className="text-xs font-bold text-foreground leading-tight">Daily Token Consumption</p>
-            <p className="text-[10px] text-muted-foreground mt-0.5">Token usage trend (last 30d)</p>
+            <p className="text-[10px] text-muted-foreground mt-0.5">Token usage trend ({dateRangeLabel})</p>
           </div>
           <Layers className="h-3.5 w-3.5 text-orange-600" />
         </div>
@@ -398,6 +413,40 @@ export function ObservabilityDashboardSection({
     </div>
   );
 
+  const globalFilters = (
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end mb-4">
+      <div className="flex flex-wrap items-center gap-2">
+        {/* Environment Filter */}
+        <select
+          value={environmentFilter}
+          onChange={(e) => {
+            setEnvironmentFilter(e.target.value as any);
+            setPage(1);
+          }}
+          className="h-8 rounded-lg border border-border bg-white dark:bg-zinc-900 px-3 text-xs font-semibold text-[#2D2926] dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-[#D04A02] hover:bg-stone-50 dark:hover:bg-zinc-800 transition-colors"
+        >
+          <option value="all">All Environments</option>
+          <option value="uat">UAT</option>
+          <option value="production">Production</option>
+        </select>
+
+        {/* Date Range Filter */}
+        <select
+          value={dateRangeFilter}
+          onChange={(e) => {
+            setDateRangeFilter(e.target.value as any);
+            setPage(1);
+          }}
+          className="h-8 rounded-lg border border-border bg-white dark:bg-zinc-900 px-3 text-xs font-semibold text-[#2D2926] dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-[#D04A02] hover:bg-stone-50 dark:hover:bg-zinc-800 transition-colors"
+        >
+          <option value="1">Today</option>
+          <option value="7">Last 7 Days</option>
+          <option value="30">Last 30 Days</option>
+        </select>
+      </div>
+    </div>
+  );
+
   const tracesGrid = (
     <div className="rounded-xl border border-border bg-white dark:bg-zinc-900 shadow-sm overflow-hidden">
       
@@ -417,20 +466,6 @@ export function ObservabilityDashboardSection({
               className="w-full h-7.5 rounded-lg border border-border bg-background pl-8 pr-3 text-xxs focus:outline-none focus:ring-1 focus:ring-[#D04A02] focus:border-[#D04A02]"
             />
           </form>
-
-          {/* Environment select */}
-          <select
-            value={environmentFilter}
-            onChange={(e) => {
-              setEnvironmentFilter(e.target.value as any);
-              setPage(1);
-            }}
-            className="h-7.5 rounded-lg border border-border bg-background px-2 text-xxs font-medium text-muted-foreground focus:outline-none focus:ring-1 focus:ring-[#D04A02]"
-          >
-            <option value="all">All Environments</option>
-            <option value="uat">UAT</option>
-            <option value="production">Production</option>
-          </select>
         </div>
       </div>
 
@@ -575,6 +610,8 @@ export function ObservabilityDashboardSection({
           </div>
         )}
 
+        {globalFilters}
+
         <Tabs defaultValue="overview" className="w-full flex flex-col gap-6">
           <TabsList className="h-9 bg-transparent p-0 gap-1 border-b border-border w-full justify-start rounded-none">
             <TabsTrigger
@@ -638,6 +675,7 @@ export function ObservabilityDashboardSection({
         </div>
       )}
 
+      {globalFilters}
       {kpisGrid}
       {chartsRow}
       {tracesGrid}
