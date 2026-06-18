@@ -57,6 +57,8 @@ const SetPasswordPage             = lazy(() => import("./pages/SetPasswordPage")
 const FieldConfigurationsPage     = lazy(() => import("./pages/FieldConfigurationsPage"));
 const ProcessedDocsPage           = lazy(() => import("./pages/ProcessedDocsPage"));
 const IdpUploadPage               = lazy(() => import("./pages/IdpUploadPage"));
+const ObservabilityPage           = lazy(() => import("./pages/ObservabilityPage"));
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -260,6 +262,14 @@ const router = createBrowserRouter(
                     element={
                       <ProtectedPermissionRoute permission="view_idp">
                         <Suspense fallback={<PageLoader />}><IdpUploadPage /></Suspense>
+                      </ProtectedPermissionRoute>
+                    }
+                  />
+                  <Route
+                    path="observability"
+                    element={
+                      <ProtectedPermissionRoute permission="view_idp">
+                        <Suspense fallback={<PageLoader />}><ObservabilityPage /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />
