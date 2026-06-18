@@ -12,6 +12,7 @@ export default function ObservabilityPage() {
   const isRootAdmin = normalizedRole === "root";
   const isSuperAdmin = normalizedRole === "super_admin";
   const isLeaderExecutive = normalizedRole === "idp_auditor";
+  const isDocApprover = normalizedRole === "doc_approver";
 
   const [refreshTick] = useState(0);
 
@@ -35,6 +36,7 @@ export default function ObservabilityPage() {
               isSuperAdmin={isSuperAdmin}
               isLeaderExecutive={isLeaderExecutive}
               isDepartmentAdmin={isDepartmentAdmin}
+              isDocApprover={isDocApprover}
               userData={userData}
               refreshTick={refreshTick}
               accentColor="#D04A02"

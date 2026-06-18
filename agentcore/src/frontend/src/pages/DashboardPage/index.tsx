@@ -757,6 +757,7 @@ function SectionCard({
                 isSuperAdmin={!!isSuperAdmin}
                 isLeaderExecutive={!!isLeaderExecutive}
                 isDepartmentAdmin={!!isDepartmentAdmin}
+                isDocApprover={!!isDocumentApprover}
                 userData={userData}
                 refreshTick={refreshTick ?? 0}
                 accentColor={theme.accent}

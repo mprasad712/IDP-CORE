@@ -32,12 +32,15 @@ import type {
   TracesListResponse,
   TraceListItem
 } from "@/controllers/API/queries/observability/types";
+import { useGetDepartments } from "@/controllers/API/queries/auth";
+import type { DepartmentListItem } from "@/controllers/API/queries/auth/use-get-departments";
 
 interface ObservabilityDashboardSectionProps {
   isRootAdmin: boolean;
   isSuperAdmin: boolean;
   isLeaderExecutive: boolean;
   isDepartmentAdmin: boolean;
+  isDocApprover: boolean;
   userData: any;
   refreshTick: number;
   accentColor: string;
@@ -57,6 +60,7 @@ export function ObservabilityDashboardSection({
   isSuperAdmin,
   isLeaderExecutive,
   isDepartmentAdmin,
+  isDocApprover,
   userData,
   refreshTick,
   accentColor,
@@ -88,12 +92,34 @@ export function ObservabilityDashboardSection({
     return "last 30d";
   }, [dateRangeFilter]);
 
-  // Determine trace scope according to PwC user privileges
-  const traceScope = React.useMemo(() => {
-    if (isRootAdmin || isSuperAdmin || isLeaderExecutive) return "all";
+  // Determine default scope according to active role privileges
+  const defaultScope = React.useMemo(() => {
+    if (isSuperAdmin || isLeaderExecutive || isDocApprover) return "all";
     if (isDepartmentAdmin) return "dept";
     return "my";
-  }, [isRootAdmin, isSuperAdmin, isLeaderExecutive, isDepartmentAdmin]);
+  }, [isSuperAdmin, isLeaderExecutive, isDocApprover, isDepartmentAdmin]);
+
+  const [traceScopeFilter, setTraceScopeFilter] = React.useState<"all" | "dept" | "my">(defaultScope);
+  const [selectedDeptId, setSelectedDeptId] = React.useState<string>("");
+  const [departments, setDepartments] = React.useState<DepartmentListItem[]>([]);
+
+  const { mutate: mutateGetDepartments } = useGetDepartments();
+
+  React.useEffect(() => {
+    const isPrivileged = isSuperAdmin || isLeaderExecutive || isDocApprover;
+    if (isPrivileged) {
+      mutateGetDepartments(undefined, {
+        onSuccess: (items) => {
+          if (Array.isArray(items)) {
+            setDepartments(items);
+            if (items.length > 0 && !selectedDeptId) {
+              setSelectedDeptId(items[0].id);
+            }
+          }
+        }
+      });
+    }
+  }, [isSuperAdmin, isLeaderExecutive, isDocApprover]);
 
   const tzOffset = React.useMemo(() => -new Date().getTimezoneOffset(), []);
 
@@ -111,11 +137,17 @@ export function ObservabilityDashboardSection({
     const params: Record<string, any> = {
       from_date: fromDateStr,
       to_date: todayStr,
-      trace_scope: traceScope,
+      trace_scope: traceScopeFilter,
       tz_offset: tzOffset
     };
     if (userData?.organization_id) params.org_id = userData.organization_id;
-    if (userData?.department_id) params.dept_id = userData.department_id;
+    if (traceScopeFilter === "dept") {
+      if ((isSuperAdmin || isLeaderExecutive || isDocApprover) && selectedDeptId) {
+        params.dept_id = selectedDeptId;
+      } else if (userData?.department_id) {
+        params.dept_id = userData.department_id;
+      }
+    }
     if (environmentFilter !== "all") params.environment = environmentFilter;
     if (appliedSearch) params.search = appliedSearch;
 
@@ -138,7 +170,7 @@ export function ObservabilityDashboardSection({
     return () => {
       active = false;
     };
-  }, [traceScope, userData?.organization_id, userData?.department_id, environmentFilter, dateRangeFilter, appliedSearch, tzOffset, refreshTick]);
+  }, [traceScopeFilter, selectedDeptId, userData?.organization_id, userData?.department_id, environmentFilter, dateRangeFilter, appliedSearch, tzOffset, refreshTick, isSuperAdmin, isLeaderExecutive, isDocApprover]);
 
   // Fetch individual trace logs
   React.useEffect(() => {
@@ -148,10 +180,16 @@ export function ObservabilityDashboardSection({
     const params: Record<string, any> = {
       page,
       limit,
-      trace_scope: traceScope
+      trace_scope: traceScopeFilter
     };
     if (userData?.organization_id) params.org_id = userData.organization_id;
-    if (userData?.department_id) params.dept_id = userData.department_id;
+    if (traceScopeFilter === "dept") {
+      if ((isSuperAdmin || isLeaderExecutive || isDocApprover) && selectedDeptId) {
+        params.dept_id = selectedDeptId;
+      } else if (userData?.department_id) {
+        params.dept_id = userData.department_id;
+      }
+    }
     if (environmentFilter !== "all") params.environment = environmentFilter;
 
     // Fetch dates according to range filter selection
@@ -183,7 +221,7 @@ export function ObservabilityDashboardSection({
     return () => {
       active = false;
     };
-  }, [traceScope, userData?.organization_id, userData?.department_id, environmentFilter, dateRangeFilter, page, refreshTick]);
+  }, [traceScopeFilter, selectedDeptId, userData?.organization_id, userData?.department_id, environmentFilter, dateRangeFilter, page, refreshTick, isSuperAdmin, isLeaderExecutive, isDocApprover]);
 
   // Search submit trigger
   const handleSearchSubmit = (e: React.FormEvent) => {
@@ -416,6 +454,47 @@ export function ObservabilityDashboardSection({
   const globalFilters = (
     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end mb-4">
       <div className="flex flex-wrap items-center gap-2">
+        {/* Trace Scope Filter */}
+        {(isSuperAdmin || isLeaderExecutive || isDocApprover || isDepartmentAdmin) && (
+          <select
+            value={traceScopeFilter}
+            onChange={(e) => {
+              setTraceScopeFilter(e.target.value as any);
+              setPage(1);
+            }}
+            className="h-8 rounded-lg border border-border bg-white dark:bg-zinc-900 px-3 text-xs font-semibold text-[#2D2926] dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-[#D04A02] hover:bg-stone-50 dark:hover:bg-zinc-800 transition-colors"
+          >
+            {(isSuperAdmin || isLeaderExecutive || isDocApprover) && (
+              <option value="all">Org Traces</option>
+            )}
+            <option value="dept">Dept Traces</option>
+            <option value="my">My Traces</option>
+          </select>
+        )}
+
+        {/* Department Selector (for privileged roles selecting Dept scope) */}
+        {(isSuperAdmin || isLeaderExecutive || isDocApprover) && traceScopeFilter === "dept" && (
+          <select
+            value={selectedDeptId}
+            onChange={(e) => {
+              setSelectedDeptId(e.target.value);
+              setPage(1);
+            }}
+            disabled={departments.length === 0}
+            className="h-8 rounded-lg border border-border bg-white dark:bg-zinc-900 px-3 text-xs font-semibold text-[#2D2926] dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-[#D04A02] hover:bg-stone-50 dark:hover:bg-zinc-800 transition-colors disabled:opacity-50"
+          >
+            {departments.length === 0 ? (
+              <option value="">No Departments</option>
+            ) : (
+              departments.map((dept) => (
+                <option key={dept.id} value={dept.id}>
+                  {dept.name}
+                </option>
+              ))
+            )}
+          </select>
+        )}
+
         {/* Environment Filter */}
         <select
           value={environmentFilter}
