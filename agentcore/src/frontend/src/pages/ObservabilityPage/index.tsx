@@ -27,7 +27,7 @@ export default function ObservabilityPage() {
             </span>
           </div>
           <span className="admin-page-description-text mb-6">
-            {t("Monitor real-time LLM trace logs, execution latency, model cost structures, and token metrics across all workflow pipelines.")}
+            {t("Monitor real-time LLM trace logs, execution latency, model cost structures, and token metrics across all agents.")}
           </span>
 
           <div className="px-4">
