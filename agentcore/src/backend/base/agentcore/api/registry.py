@@ -240,9 +240,47 @@ async def browse_registry(
         RegistryListResponse with paginated results and metadata.
     """
     try:
-        # Only show PUBLIC entries (published + active is enforced by registry_service)
-        stmt = select(AgentRegistry).where(
-            AgentRegistry.visibility == RegistryVisibilityEnum.PUBLIC,
+        from sqlalchemy import false, true
+        from agentcore.services.database.models.agent_publish_recipient.model import AgentPublishRecipient
+        from agentcore.api.control_panel import (
+            _designated_super_admin_org_ids,
+            _department_admin_dept_ids,
+        )
+
+        conditions = [AgentRegistry.visibility == RegistryVisibilityEnum.PUBLIC]
+
+        current_role = str(getattr(current_user, "role", "")).lower()
+        private_share_exists = (
+            select(AgentPublishRecipient.id)
+            .where(
+                AgentPublishRecipient.agent_id == AgentRegistry.agent_id,
+                AgentPublishRecipient.recipient_user_id == current_user.id,
+            )
+            .exists()
+        )
+
+        creator_access = (AgentRegistry.listed_by == current_user.id) | (Agent.user_id == current_user.id)
+
+        admin_access = false()
+        if current_role == "root":
+            admin_access = true()
+        elif current_role == "super_admin":
+            org_ids = await _designated_super_admin_org_ids(session, current_user)
+            admin_access = AgentRegistry.org_id.in_(list(org_ids)) if org_ids else false()
+        elif current_role == "department_admin":
+            dept_ids = await _department_admin_dept_ids(session, current_user)
+            admin_access = Agent.dept_id.in_(list(dept_ids)) if dept_ids else false()
+
+        private_access = creator_access | private_share_exists | admin_access
+
+        conditions.append(
+            (AgentRegistry.visibility == RegistryVisibilityEnum.PRIVATE) & private_access
+        )
+
+        stmt = (
+            select(AgentRegistry)
+            .join(Agent, Agent.id == AgentRegistry.agent_id)
+            .where(or_(*conditions))
         )
 
         # Free-text search across title, summary

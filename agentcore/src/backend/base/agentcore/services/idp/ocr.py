@@ -9,6 +9,8 @@ Spreadsheet and Word files are extracted natively (no OCR needed).
 import cv2
 import numpy as np
 import fitz
+import os
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 from loguru import logger
 
 _paddle_ocr_available = False

@@ -758,6 +758,7 @@ export const AUTHORIZED_DUPLICATE_REQUESTS = [
   "/logout",
   "/refresh",
   "/login",
+  "/file",
 ];
 
 export const BROKEN_EDGES_WARNING =

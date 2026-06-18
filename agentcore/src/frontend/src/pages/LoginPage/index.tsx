@@ -18,12 +18,12 @@ import MothersonLogo from "@/assets/micore.svg";
 
 /* PwC brand tokens */
 const PwC = {
-  orange:     "#D04A02",
-  orangeHover:"#B84002",
-  orangeLight:"#F5E6DE",
-  charcoal:   "#2D2D2D",
-  darkBg:     "#1C1B1F",
-  cardDark:   "#26252A",
+  orange: "#D04A02",
+  orangeHover: "#B84002",
+  orangeLight: "#F5E6DE",
+  charcoal: "#2D2D2D",
+  darkBg: "#1C1B1F",
+  cardDark: "#26252A",
 };
 
 /* ── Document-stack watermark ── */
@@ -47,7 +47,7 @@ function DocWatermark() {
       <line x1="18" y1="68" x2="70" y2="68" />
       <line x1="18" y1="80" x2="70" y2="80" />
       <line x1="18" y1="92" x2="52" y2="92" />
-      <line x1="6"  y1="86" x2="86" y2="86" strokeWidth="2" strokeDasharray="4 3" stroke="#D04A02" />
+      <line x1="6" y1="86" x2="86" y2="86" strokeWidth="2" strokeDasharray="4 3" stroke="#D04A02" />
     </svg>
   );
 }

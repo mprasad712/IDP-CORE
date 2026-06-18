@@ -1,5 +1,6 @@
 import {
   Plus,
+  Sparkles,
   Pencil,
   Trash2,
   Copy,
@@ -56,14 +57,25 @@ import {
   usePostFieldConfigLineItem,
   usePutFieldConfigLineItem,
   useDeleteFieldConfigLineItem,
+  usePostGenerateConfig,
   type FieldConfig as ApiFieldConfig,
   type FieldConfigHeader,
   type FieldConfigLineItem,
 } from "@/controllers/API/queries/field-configs";
+import { useGetRegistryModels } from "@/controllers/API/queries/models/use-get-models";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type FieldDataType = "text" | "number" | "date" | "boolean";
+
+// Coerce a (possibly loose) backend type string to the strict ConfigField.dataType union.
+function normalizeDataType(t: string | null | undefined): FieldDataType {
+  const v = (t ?? "").toLowerCase().trim();
+  if (["number", "integer", "int", "float", "decimal", "numeric"].includes(v)) return "number";
+  if (["date", "datetime", "timestamp"].includes(v)) return "date";
+  if (["boolean", "bool"].includes(v)) return "boolean";
+  return "text";
+}
 
 interface ConfigField {
   id: string;       // UUID when from DB, short random string when newly added in form
@@ -486,6 +498,105 @@ function ConfigDialog({ open, initial, onSave, onClose, saving, error, templates
   );
 }
 
+// ─── Generate-from-prompt dialog ──────────────────────────────────────────────
+// Calls POST /field-configs/generate (LLM drafts header + line-item fields from a description),
+// then hands the draft to the normal Create dialog for review + save.
+
+function GenerateConfigDialog({ open, onClose, onGenerated }: {
+  open: boolean;
+  onClose: () => void;
+  onGenerated: (draft: FieldConfig) => void;
+}) {
+  const [description, setDescription] = useState("");
+  const [modelId, setModelId]         = useState("");
+  const [error, setError]             = useState<string | null>(null);
+  const [generating, setGenerating]   = useState(false);
+  const { data: models } = useGetRegistryModels();
+  const { mutateAsync: generate } = usePostGenerateConfig();
+
+  const handleGenerate = async () => {
+    if (!description.trim() || !modelId) return;
+    setError(null);
+    setGenerating(true);
+    try {
+      const draft = await generate({ description: description.trim(), model_id: modelId });
+      onGenerated({
+        id: uid(),                       // non-UUID → "new" so the Create dialog saves it
+        name: draft.suggested_name || "Generated Configuration",
+        description: description.trim(),
+        doc_type: "",
+        visibility: "org",
+        headerFields: draft.headers.map((h) => ({
+          id: uid(), name: h.field_name, dataType: normalizeDataType(h.field_type), required: h.is_required,
+          displayOrder: h.display_order, prompt: h.prompt ?? "",
+        })),
+        lineItemColumns: draft.line_items.map((c) => ({
+          id: uid(), name: c.column_name, dataType: normalizeDataType(c.column_type), required: c.is_required,
+          displayOrder: c.display_order, prompt: c.prompt ?? "",
+        })),
+        createdBy: "me",
+        createdDate: new Date().toISOString().slice(0, 10),
+        isTemplate: false,
+      });
+      setDescription("");
+      setModelId("");
+    } catch (e: any) {
+      setError(
+        e?.response?.data?.detail ??
+        "Could not generate a configuration. Try a clearer description or a different model.",
+      );
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Generate Field Configuration with AI</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 px-1 py-2">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium">Describe the document type</label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={4}
+              placeholder="e.g. A purchase order with PO number, vendor, order date, and line items of description, quantity and unit price"
+              className="w-full rounded-lg border bg-background/50 text-sm px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-[#D04A02]/30"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium">Model</label>
+            <Select value={modelId} onValueChange={setModelId}>
+              <SelectTrigger><SelectValue placeholder="Select a model" /></SelectTrigger>
+              <SelectContent>
+                {(models ?? []).map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    {m.provider} · {m.model_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {error && <p className="text-xs text-destructive">{error}</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button
+            onClick={handleGenerate}
+            disabled={generating || !description.trim() || !modelId}
+            className="bg-[#D04A02] hover:bg-[#B84000] text-white disabled:opacity-60"
+          >
+            {generating ? "Generating…" : "Generate"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Template Preview Dialog ──────────────────────────────────────────────────
 // Read-only view. Shows field name, type, required, and the extraction prompt.
 
@@ -620,6 +731,7 @@ export default function FieldConfigurationsPage() {
   const [search,     setSearch]     = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing,    setEditing]    = useState<FieldConfig | null>(null);
+  const [genOpen,    setGenOpen]    = useState(false);
   const [previewing, setPreviewing] = useState<FieldConfig | null>(null);
   const [saving,     setSaving]     = useState(false);
   const [saveError,  setSaveError]  = useState<string | null>(null);
@@ -844,6 +956,9 @@ export default function FieldConfigurationsPage() {
             Define named extraction schemas used by the Named Config extraction node.
           </p>
         </div>
+        <Button variant="outline" onClick={() => setGenOpen(true)} className="gap-1.5 rounded-lg">
+          <Sparkles className="h-4 w-4" /> Generate with AI
+        </Button>
         <Button onClick={openCreate} className="gap-1.5 bg-[#D04A02] hover:bg-[#B84000] text-white rounded-lg">
           <Plus className="h-4 w-4" /> New Configuration
         </Button>
@@ -1065,6 +1180,12 @@ export default function FieldConfigurationsPage() {
         template={previewing}
         onClone={handleClone}
         onClose={() => setPreviewing(null)}
+      />
+
+      <GenerateConfigDialog
+        open={genOpen}
+        onClose={() => setGenOpen(false)}
+        onGenerated={(draft) => { setGenOpen(false); setEditing(draft); setDialogOpen(true); }}
       />
     </div>
   );

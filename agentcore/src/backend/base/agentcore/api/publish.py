@@ -648,6 +648,17 @@ async def _resolve_publish_scope(
         )
     ).all()
     if not base_memberships:
+        if allow_departmentless_private_publish:
+            # No department membership, but departmentless private publish is allowed.
+            # Resolve org from the agent itself or user org memberships.
+            resolved_org_id = agent.org_id
+            if not resolved_org_id:
+                current_user_org_ids = await _current_user_org_ids(session, current_user.id)
+                if current_user_org_ids:
+                    resolved_org_id = sorted(current_user_org_ids, key=str)[0]
+                    agent.org_id = resolved_org_id
+                    session.add(agent)
+            return None, None
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
@@ -1152,6 +1163,7 @@ async def get_publish_context(
         session,
         current_user=current_user,
         agent=agent,
+        allow_departmentless_private_publish=True,
     )
     return PublishContextResponse(
         agent_id=agent.id,
@@ -2228,7 +2240,6 @@ async def publish_agent(
         allow_departmentless_private_publish = (
             env == "uat"
             and str(body.visibility).strip().upper() == "PRIVATE"
-            and str(getattr(current_user, "role", "")).lower() in {"root", "super_admin", "admin"}
         )
 
         resolved_department_id, resolved_department_admin_id = await _resolve_publish_scope(

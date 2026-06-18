@@ -152,12 +152,13 @@ async def test_extract_dynamic_dirty_json_fallback():
     assert "headers" in res
     # Flat value "INV-1003" should be converted to the canonical structured format with the
     # uniform compact-mode default confidence.
+    from agentcore.services.idp.extraction import _DEFAULT_FIELD_CONFIDENCE
     assert res["headers"]["invoice_number"]["value"] == "INV-1003"
-    assert res["headers"]["invoice_number"]["confidence"] == 0.85
+    assert res["headers"]["invoice_number"]["confidence"] == _DEFAULT_FIELD_CONFIDENCE
     assert res["headers"]["invoice_number"]["reasoning"] == "compact extraction"
 
     # Columns present in the document get the same default confidence.
-    assert res["line_items"][0]["columns"][0]["confidence"] == 0.85
+    assert res["line_items"][0]["columns"][0]["confidence"] == _DEFAULT_FIELD_CONFIDENCE
 
 @pytest.mark.anyio
 async def test_llm_extractor_node_integration():
@@ -622,8 +623,11 @@ async def test_save_extraction_results_success():
             ocr_tokens=ocr_tokens
         )
 
-    # Simple average of 0.95, 0.85, and 0.9 should be 0.9
-    assert abs(overall_conf - 0.9) < 1e-4
+    # Confidence is now OCR-evidence-based (NOT the LLM's self-reported score): values found
+    # verbatim in the OCR tokens score high, reformatted/absent values score low. Here
+    # invoice_number + item are exact OCR matches (high ~0.99); date is absent (low ~0.3),
+    # so the overall mean lands in the mid-range.
+    assert 0.6 < overall_conf < 0.85
 
     async with session_scope() as session:
         # Check persisted headers
@@ -634,7 +638,7 @@ async def test_save_extraction_results_success():
         header_map = {h.field_name: h for h in headers}
         assert "invoice_number" in header_map
         assert header_map["invoice_number"].extracted_value == "INV-TEST-100"
-        assert float(header_map["invoice_number"].confidence_score) == 0.95
+        assert float(header_map["invoice_number"].confidence_score) >= 0.88  # exact OCR token match
         assert header_map["invoice_number"].reasoning_trace == "Top left location"
         assert header_map["invoice_number"].source_location is not None
         assert header_map["invoice_number"].source_location["page_number"] == 1
@@ -644,6 +648,9 @@ async def test_save_extraction_results_success():
         assert header_map["date"].extracted_value == "2026-06-08"
         # Date wasn't in ocr_tokens, so source_location should be None
         assert header_map["date"].source_location is None
+        # ...and its OCR-evidence confidence is low (absent value), well below the exact match.
+        assert float(header_map["date"].confidence_score) <= 0.51
+        assert float(header_map["date"].confidence_score) < float(header_map["invoice_number"].confidence_score)
 
         # Check line items
         line_items = (await session.exec(
@@ -655,10 +662,11 @@ async def test_save_extraction_results_success():
         assert line_items[0].row_index == 0
         assert line_items[0].source_location is not None
         assert line_items[0].source_location["bounding_box"] == [[100, 100], [200, 100], [200, 120], [100, 120]]
+        assert float(line_items[0].confidence_score) >= 0.88  # "Widgets" is an exact OCR match
 
-        # Check updated document confidence
+        # Check updated document confidence (DB NUMERIC column rounds to 4 dp, so compare approx)
         db_doc = await session.get(IdpDocument, doc_id)
-        assert float(db_doc.overall_confidence) == overall_conf
+        assert abs(float(db_doc.overall_confidence) - overall_conf) < 1e-3
 
     # 6. Cleanup
     async with session_scope() as session:
@@ -690,13 +698,14 @@ def test_expand_extraction_flat_and_empty():
         ],
     }
     out = _expand_extraction(parsed)
+    from agentcore.services.idp.extraction import _DEFAULT_FIELD_CONFIDENCE
     assert out["headers"]["invoice_number"]["value"] == "INV-9"
-    assert out["headers"]["invoice_number"]["confidence"] == 0.85
+    assert out["headers"]["invoice_number"]["confidence"] == _DEFAULT_FIELD_CONFIDENCE
     assert out["headers"]["po_number"]["value"] is None and out["headers"]["po_number"]["confidence"] == 0.0
     assert out["headers"]["vendor"]["value"] is None and out["headers"]["vendor"]["confidence"] == 0.0
     assert [r["row_index"] for r in out["line_items"]] == [0, 1]
     cols0 = {c["column_name"]: c for c in out["line_items"][0]["columns"]}
-    assert cols0["description"]["value"] == "Widget" and cols0["description"]["confidence"] == 0.85
+    assert cols0["description"]["value"] == "Widget" and cols0["description"]["confidence"] == _DEFAULT_FIELD_CONFIDENCE
 
 
 @pytest.mark.anyio
@@ -710,3 +719,91 @@ async def test_extract_dynamic_compact_flat_line_items():
     assert res["headers"]["invoice_number"]["value"] == "INV-7"
     assert len(res["line_items"]) == 3
     assert [r["row_index"] for r in res["line_items"]] == [0, 1, 2]
+
+
+def test_build_compact_extraction_messages_is_flat():
+    """The compact named-config prompt must ask for FLAT JSON — no per-cell confidence/reasoning."""
+    from agentcore.services.idp.prompt_templates import build_compact_extraction_messages
+
+    class _H:
+        def __init__(self, n, t, p=None, d=None):
+            self.field_name, self.field_type, self.prompt, self.description = n, t, p, d
+
+    class _C:
+        def __init__(self, n, t, p=None):
+            self.column_name, self.column_type, self.prompt = n, t, p
+
+    headers = [_H("invoice_number", "text", "the invoice id top-right"), _H("total", "number")]
+    line_items = [_C("description", "text"), _C("amount", "number", "the row total")]
+    system, user = build_compact_extraction_messages(headers, line_items, ocr_text="DOC TEXT HERE")
+
+    # System forbids confidence/reasoning; user carries the field names + hints + the raw text.
+    assert "confidence" not in system.lower() or "do not include" in system.lower()
+    assert "invoice_number" in user and "description" in user
+    assert "the invoice id top-right" in user  # DB prompt hint preserved
+    assert "DOC TEXT HERE" in user
+    # The flat JSON scaffold must NOT contain a per-cell "confidence" key.
+    assert '"confidence"' not in user
+
+
+@pytest.mark.anyio
+async def test_extract_named_config_compact_flat_multirow():
+    """Named-config goes through the COMPACT path: a FLAT multi-row response persists all rows,
+    undeclared columns are dropped, and missing declared columns are filled at confidence 0.0.
+
+    This is the regression fix — the verbose schema returned 0 line items on multi-row invoices."""
+    from agentcore.services.deps import session_scope
+    from agentcore.services.database.models.idp.config import (
+        IdpFieldConfiguration,
+        IdpFieldConfigHeader,
+        IdpFieldConfigLineItem,
+    )
+    from agentcore.services.idp.extraction import extract_named_config
+
+    config_id = uuid4()
+    async with session_scope() as session:
+        session.add(IdpFieldConfiguration(id=config_id, name="Compact Multirow Cfg", is_active=True))
+        await session.flush()
+        session.add(IdpFieldConfigHeader(id=uuid4(), config_id=config_id, field_name="invoice_number", field_type="text", display_order=0))
+        session.add(IdpFieldConfigLineItem(id=uuid4(), config_id=config_id, column_name="description", column_type="text", display_order=0))
+        session.add(IdpFieldConfigLineItem(id=uuid4(), config_id=config_id, column_name="amount", column_type="number", display_order=1))
+        await session.commit()
+
+    # FLAT compact response with 3 rows; one row has an undeclared "junk" column; one row omits "amount".
+    flat = (
+        '{"headers":{"invoice_number":"INV-3001"},'
+        '"line_items":['
+        '{"description":"Widget A","amount":"10.00","junk":"x"},'
+        '{"description":"Widget B","amount":"20.00"},'
+        '{"description":"Widget C"}'
+        ']}'
+    )
+    mock_llm = MockLLM(response_text=flat)
+    try:
+        async with session_scope() as session:
+            res = await extract_named_config(
+                session=session, ocr_text="multi row invoice", field_config_id=config_id, llm_model=mock_llm
+            )
+
+        assert res["headers"]["invoice_number"]["value"] == "INV-3001"
+        assert len(res["line_items"]) == 3  # all rows persisted (the fix)
+
+        # Every row aligns to exactly the two declared columns; undeclared "junk" dropped.
+        for row in res["line_items"]:
+            names = {c["column_name"] for c in row["columns"]}
+            assert names == {"description", "amount"}
+            assert "junk" not in names
+
+        # Row 3 had no "amount" -> filled as a declared-but-missing cell at confidence 0.0.
+        row3 = {c["column_name"]: c for c in res["line_items"][2]["columns"]}
+        assert row3["amount"]["value"] is None
+        assert float(row3["amount"]["confidence"]) == 0.0
+        # Present compact cells (flat scalar, no model confidence) get the uniform default.
+        from agentcore.services.idp.extraction import _DEFAULT_FIELD_CONFIDENCE
+        assert float(row3["description"]["confidence"]) == _DEFAULT_FIELD_CONFIDENCE
+    finally:
+        async with session_scope() as session:
+            db_cfg = await session.get(IdpFieldConfiguration, config_id)
+            if db_cfg:
+                await session.delete(db_cfg)
+            await session.commit()

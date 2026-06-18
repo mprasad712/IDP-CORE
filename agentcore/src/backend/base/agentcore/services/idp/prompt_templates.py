@@ -67,6 +67,86 @@ def _field_description(name: str, field_type: str, prompt: str | None, descripti
     return f"{name} ({field_type}): {detail}"
 
 
+COMPACT_EXTRACTION_SYSTEM_TEMPLATE = (
+    "You are an expert Intelligent Document Processing (IDP) agent and data extraction specialist.\n"
+    "Extract the requested fields from the document text and return ONLY a JSON object of this shape:\n"
+    '{"headers": {"field_name": "value_or_null", ...}, "line_items": [{"column_name": "value", ...}, ...]}\n\n'
+    "Rules:\n"
+    "- 'headers' are single document-level fields; 'line_items' is a list of table rows, each a flat "
+    "object of column_name -> value.\n"
+    "- Extract EVERY row of the table — do not stop early or summarise.\n"
+    "- Include ONLY the fields/columns listed below that you actually find; omit anything not present "
+    "(do NOT invent values).\n"
+    "- Dates as YYYY-MM-DD; numbers as plain strings. Values must be strings or null.\n"
+    "- Do NOT include any confidence or reasoning keys. Return ONLY valid JSON — no markdown, no prose, "
+    "no code fences."
+)
+
+COMPACT_EXTRACTION_USER_TEMPLATE = """\
+Extract the value of each field listed below from the document text.
+
+### Header Fields to Extract:
+{header_field_descriptions}
+
+### Line Item Columns (one object per table row):
+{line_item_descriptions}
+
+### Document:
+-------
+{data}
+-------
+
+Return ONLY a JSON object of exactly this shape (flat values, no confidence/reasoning):
+
+{json_schema}\
+"""
+
+
+def build_compact_extraction_messages(
+    headers: List[Any],
+    line_items: List[Any],
+    ocr_text: str,
+) -> tuple[str, str]:
+    """Build (system_prompt, user_prompt) for COMPACT named-config extraction.
+
+    Mirrors :func:`build_extraction_messages` but asks the model for FLAT key/value JSON only
+    (no per-cell ``confidence``/``reasoning``). The verbose per-cell schema overflows the model's
+    output-token budget on multi-row tables and truncates ``line_items`` to empty; the compact
+    shape is ~half the tokens, and a uniform default confidence is re-attached downstream by
+    ``extraction._expand_extraction``. Per-field DB prompts/descriptions are still passed as hints.
+    """
+    if headers:
+        header_field_descriptions = "\n".join(
+            _field_description(h.field_name, h.field_type, getattr(h, "prompt", None), getattr(h, "description", None))
+            for h in headers
+        )
+    else:
+        header_field_descriptions = "None"
+
+    if line_items:
+        line_item_descriptions = "\n".join(
+            _field_description(getattr(c, "column_name", ""), getattr(c, "column_type", "text"), getattr(c, "prompt", None), None)
+            for c in line_items
+        )
+    else:
+        line_item_descriptions = "None"
+
+    # Flat schema scaffold — header_name -> placeholder, one sample row of column_name -> placeholder.
+    header_schema = {h.field_name: "<value or null>" for h in headers}
+    line_items_schema = (
+        [{c.column_name: "<value>" for c in line_items}] if line_items else []
+    )
+    json_schema = json.dumps({"headers": header_schema, "line_items": line_items_schema}, indent=2)
+
+    user_prompt = COMPACT_EXTRACTION_USER_TEMPLATE.format(
+        header_field_descriptions=header_field_descriptions,
+        line_item_descriptions=line_item_descriptions,
+        data=ocr_text,
+        json_schema=json_schema,
+    )
+    return COMPACT_EXTRACTION_SYSTEM_TEMPLATE, user_prompt
+
+
 def build_extraction_messages(
     headers: List[Any],
     line_items: List[Any],

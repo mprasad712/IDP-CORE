@@ -1,5 +1,5 @@
 import type React from "react";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, Fragment } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Upload,
@@ -11,6 +11,7 @@ import {
   ArrowRight,
   RefreshCw,
   Inbox,
+  ListTree,
 } from "lucide-react";
 import {
   Select,
@@ -30,6 +31,7 @@ import {
 } from "@/components/ui/table";
 import Loading from "@/components/ui/loading";
 import { cn } from "@/utils/utils";
+import { ProcessingTrace } from "@/components/core/idpProcessingTrace";
 import { api } from "@/controllers/API/api";
 import { getURL } from "@/controllers/API/helpers/constants";
 import { useGetRegistry } from "@/controllers/API/queries/registry/use-get-registry";
@@ -112,6 +114,7 @@ function ResultsPanel({
   env: Env;
   onOpen: (id: string) => void;
 }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   if (docs.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4 text-center px-8">
@@ -160,8 +163,8 @@ function ResultsPanel({
           </TableHeader>
           <TableBody>
             {docs.map((doc) => (
+              <Fragment key={doc.id}>
               <TableRow
-                key={doc.id}
                 className="cursor-pointer group hover:bg-muted/20 transition-colors"
                 onClick={() => onOpen(doc.id)}
               >
@@ -201,15 +204,36 @@ function ResultsPanel({
                   {doc.processedAt}
                 </TableCell>
                 <TableCell className="pr-6">
-                  <button
-                    className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center rounded-lg p-1.5 hover:bg-[#D04A02]/10 text-muted-foreground hover:text-[#D04A02]"
-                    onClick={(e) => { e.stopPropagation(); onOpen(doc.id); }}
-                    title="Open in Processed Docs"
-                  >
-                    <ArrowRight className="h-4 w-4" />
-                  </button>
+                  <div className="flex items-center justify-end gap-0.5">
+                    <button
+                      className={cn(
+                        "flex items-center justify-center rounded-lg p-1.5 hover:bg-[#D04A02]/10 hover:text-[#D04A02] transition-colors",
+                        expandedId === doc.id ? "text-[#D04A02]" : "text-muted-foreground opacity-0 group-hover:opacity-100",
+                      )}
+                      onClick={(e) => { e.stopPropagation(); setExpandedId(expandedId === doc.id ? null : doc.id); }}
+                      title="Show processing trace"
+                    >
+                      <ListTree className="h-4 w-4" />
+                    </button>
+                    <button
+                      className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center rounded-lg p-1.5 hover:bg-[#D04A02]/10 text-muted-foreground hover:text-[#D04A02]"
+                      onClick={(e) => { e.stopPropagation(); onOpen(doc.id); }}
+                      title="Open in Processed Docs"
+                    >
+                      <ArrowRight className="h-4 w-4" />
+                    </button>
+                  </div>
                 </TableCell>
               </TableRow>
+              {expandedId === doc.id && (
+                <TableRow className="hover:bg-transparent">
+                  <TableCell colSpan={7} className="p-0 bg-muted/10 border-t">
+                    <p className="px-4 pt-3 text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">Processing Trace</p>
+                    <ProcessingTrace docId={doc.id} />
+                  </TableCell>
+                </TableRow>
+              )}
+              </Fragment>
             ))}
           </TableBody>
         </Table>

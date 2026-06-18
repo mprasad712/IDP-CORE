@@ -20,6 +20,7 @@ from agentcore.services.database.models.idp.config import (
 from agentcore.services.database.models.agent.model import Agent
 from agentcore.services.idp.agent_config import resolve_pipeline_config
 from agentcore.services.idp.catalogue import DEFAULT_TEMPLATES
+from agentcore.services.idp.extraction import _extract_usage_from_response
 
 
 class ClassificationResult(BaseModel):
@@ -117,16 +118,30 @@ async def classify_and_persist(
 
     # 4. Invoke LLM and Parse
     result = None
+    usage_info = None
     if hasattr(llm_model, "with_structured_output"):
         try:
-            structured_model = llm_model.with_structured_output(ClassificationResult)
-            result = await asyncio.wait_for(structured_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
+            try:
+                structured_model = llm_model.with_structured_output(ClassificationResult, include_raw=True)
+                res_dict = await asyncio.wait_for(structured_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
+                if isinstance(res_dict, dict):
+                    result = res_dict.get("parsed")
+                    raw_response = res_dict.get("raw")
+                else:
+                    result = res_dict
+                    raw_response = None
+            except TypeError:
+                structured_model = llm_model.with_structured_output(ClassificationResult)
+                result = await asyncio.wait_for(structured_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
+                raw_response = None
+            usage_info = _extract_usage_from_response(raw_response, model_fallback=getattr(llm_model, "model_name", None))
         except Exception as e:
             logger.warning(f"[Classification] structured output failed: {e}. Falling back to standard JSON parsing.")
 
     if result is None:
         try:
             response = await asyncio.wait_for(llm_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
+            usage_info = _extract_usage_from_response(response, model_fallback=getattr(llm_model, "model_name", None))
             content = response.content if hasattr(response, "content") else str(response)
             content = content.strip()
             if content.startswith("```"):
@@ -193,13 +208,16 @@ async def classify_and_persist(
                 is_selected=False,
             ))
             await session.commit()
-            return {
+            res = {
                 "predicted_type": predicted_type,
                 "confidence": conf,
                 "candidates": result.candidates,
                 "selected_config_id": None,
                 "skip": True,
             }
+            if usage_info:
+                res["_usage"] = usage_info
+            return res
 
     selected_config_id = None
 
@@ -289,9 +307,12 @@ async def classify_and_persist(
     session.add(doc)
     await session.commit()
 
-    return {
+    res = {
         "predicted_type": predicted_type,
         "confidence": conf,
         "candidates": result.candidates,
         "selected_config_id": selected_config_id
     }
+    if usage_info:
+        res["_usage"] = usage_info
+    return res

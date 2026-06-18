@@ -12,6 +12,7 @@ from loguru import logger
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
+from redis.exceptions import RedisClusterException
 from typing_extensions import override
 
 from agentcore.services.cache.base import (
@@ -351,7 +352,7 @@ class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
     async def _run_with_reconnect(self, *, operation: str, call):
         try:
             return await call(self._client)
-        except (RedisConnectionError, RedisTimeoutError, RedisError, OSError) as exc:
+        except (RedisConnectionError, RedisTimeoutError, RedisError, RedisClusterException, OSError) as exc:
             logger.warning(
                 f"RedisCache {operation} failed: {exc}. "
                 "Reconnecting Redis client and retrying once."
@@ -359,7 +360,7 @@ class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
             try:
                 await self._reconnect_client()
                 return await call(self._client)
-            except (RedisConnectionError, RedisTimeoutError, RedisError, OSError) as retry_exc:
+            except (RedisConnectionError, RedisTimeoutError, RedisError, RedisClusterException, OSError) as retry_exc:
                 logger.error(
                     f"RedisCache {operation} failed after reconnect: {retry_exc}"
                 )
@@ -372,7 +373,7 @@ class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
                 operation="ping",
                 call=lambda client: client.ping(),
             )
-        except (RedisConnectionError, RedisTimeoutError, RedisError, OSError) as exc:
+        except (RedisConnectionError, RedisTimeoutError, RedisError, RedisClusterException, OSError) as exc:
             logger.warning(f"RedisCache connection check failed: {exc}")
             return False
         return True

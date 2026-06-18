@@ -9,6 +9,34 @@ try:
 except ImportError:
     pd = None
 
+# Real-world money/number strings ("$1,200.00", "₹ 19.80", "12.5%", "USD 1,000") must coerce to a
+# float for numeric rule comparisons, while genuine non-numbers ("INV-123", "N/A") must be REJECTED
+# (so a numeric rule on an identifier-like value fails cleanly instead of comparing a wrong number).
+# Strategy: remove ONLY known currency tokens / separators / % / whitespace, then require the
+# remainder to be a pure number. (Comma is treated as a thousands separator — the dominant US/Indian
+# convention; European decimal-comma like "1.200,00" is NOT supported and will mis-parse.)
+_CURRENCY_WORDS = re.compile(r"\b(USD|EUR|GBP|INR|RS|JPY|CAD|AUD|AED)\b", re.IGNORECASE)
+_CURRENCY_SYMBOLS = "$€£₹¥"
+_PURE_NUMBER = re.compile(r"-?\d+(\.\d+)?$")
+
+
+def _to_number(v) -> float:
+    """Coerce a raw extracted value to float, tolerating currency symbols/codes, thousands
+    separators, percent signs and surrounding whitespace. Raises ValueError if, after removing
+    those, the value is not a pure number (e.g. 'INV-123', 'N/A', '' all raise)."""
+    if v is None or isinstance(v, bool):
+        raise ValueError(f"not numeric: {v!r}")
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = _CURRENCY_WORDS.sub("", str(v))
+    for ch in _CURRENCY_SYMBOLS + "%,":
+        s = s.replace(ch, "")
+    s = s.replace(" ", "").strip()
+    if not _PURE_NUMBER.fullmatch(s):
+        raise ValueError(f"not numeric: {v!r}")
+    return float(s)
+
+
 # Helper to parse dates dynamically
 def _parse_date(val: str | None) -> datetime | None:
     if not val:
@@ -46,8 +74,8 @@ def _compare_values(val_a: any, val_b: any, operator: str, val_type: str = "text
     # Normalize type comparisons
     if val_type == "numeric":
         try:
-            num_a = float(val_a)
-            num_b = float(val_b)
+            num_a = _to_number(val_a)
+            num_b = _to_number(val_b)
             if operator == "==": return num_a == num_b
             if operator == "!=": return num_a != num_b
             if operator == ">": return num_a > num_b
@@ -163,8 +191,8 @@ def _evaluate_single_rule(
         # Determine value type dynamically (try numeric, then date, fallback to text)
         val_type = "text"
         try:
-            float(header_val)
-            float(header_val_b)
+            _to_number(header_val)
+            _to_number(header_val_b)
             val_type = "numeric"
         except (ValueError, TypeError):
             if _parse_date(header_val) and _parse_date(header_val_b):

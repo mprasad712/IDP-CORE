@@ -834,13 +834,13 @@ async def toggle_agent_field(
                     dep.is_active
                     and dep.is_enabled
                     and dep.status == DeploymentPRODStatusEnum.PUBLISHED
-                    and dep.visibility == ProdDeploymentVisibilityEnum.PUBLIC
+                    and dep.visibility in (ProdDeploymentVisibilityEnum.PUBLIC, ProdDeploymentVisibilityEnum.PRIVATE)
                 )
             return (
                 dep.is_active
                 and dep.is_enabled
                 and dep.status == DeploymentUATStatusEnum.PUBLISHED
-                and dep.visibility == DeploymentVisibilityEnum.PUBLIC
+                and dep.visibility in (DeploymentVisibilityEnum.PUBLIC, DeploymentVisibilityEnum.PRIVATE)
             )
 
         async def _has_registry_row() -> bool:

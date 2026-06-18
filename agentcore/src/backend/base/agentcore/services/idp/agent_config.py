@@ -8,6 +8,7 @@ This mirrors the legacy ``process_backend_bulk.py`` (parse graph JSON -> run a f
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import UUID
@@ -90,13 +91,24 @@ class ResolvedPipelineConfig:
     long_doc_enabled: bool = True
     long_doc_max_pages: int = 8
     long_doc_max_tokens: int = 12000
-    chunk_overlap_tokens: int = 256
+    long_doc_overlap_tokens: int = 256
     entity_linking_enabled: bool = True
+    dedup_strategy: str = "keep_highest_confidence"
+    rules_operator: str = "AND"
+    canvas_rules: list[dict] = field(default_factory=list)
+    approval_field: str = "rule_action"
+    approve_value: str = "auto_approve"
 
 
 # ───────────────────────── graph helpers ─────────────────────────
 def _nodes(data: dict | None) -> list[dict]:
-    return (data or {}).get("nodes", []) if isinstance(data, dict) else []
+    nodes = (data or {}).get("nodes", []) if isinstance(data, dict) else []
+    return nodes if isinstance(nodes, list) else []  # tolerate {"nodes": None}
+
+
+def _edges(data: dict | None) -> list[dict]:
+    edges = (data or {}).get("edges", []) if isinstance(data, dict) else []
+    return edges if isinstance(edges, list) else []
 
 
 def _find_node(data: dict | None, display_name: str) -> dict | None:
@@ -104,6 +116,14 @@ def _find_node(data: dict | None, display_name: str) -> dict | None:
         if (node.get("data", {}).get("node", {}) or {}).get("display_name") == display_name:
             return node
     return None
+
+
+def _find_nodes(data: dict | None, display_name: str) -> list[dict]:
+    """All nodes with the given display_name (a graph may hold several, e.g. one LLM node per consumer)."""
+    return [
+        node for node in _nodes(data)
+        if (node.get("data", {}).get("node", {}) or {}).get("display_name") == display_name
+    ]
 
 
 def _field(node: dict | None, name: str, default=None):
@@ -116,18 +136,56 @@ def _field(node: dict | None, name: str, default=None):
     return default
 
 
-def _resolve_model_id_from_graph(data: dict | None) -> str | None:
-    """Read the model registry UUID from the 'Large Language Model' node.
+def _llm_node_model_uuid(node: dict | None) -> str | None:
+    """Parse a validated model registry UUID from an LLM node's ``registry_model`` field.
 
-    The ``registry_model`` value is formatted ``"display | model_name | uuid"``.
-    """
-    node = _find_node(data, _N_MODEL)
+    Format ``"display | model_name | uuid"``. Returns the canonical UUID string, or None if the
+    field is empty / malformed / the third part is not a real UUID (so the caller keeps scanning)."""
     raw = _field(node, "registry_model")
     if not raw or not isinstance(raw, str):
         return None
     parts = [p.strip() for p in raw.split("|")]
-    if len(parts) >= 3 and parts[2]:
-        return parts[2]
+    if len(parts) < 3 or not parts[2]:
+        return None
+    try:
+        return str(UUID(parts[2]))
+    except (ValueError, TypeError):
+        return None
+
+
+def _resolve_model_id_from_graph(data: dict | None) -> str | None:
+    """Resolve the model registry UUID for the extraction run.
+
+    A graph (e.g. the universal pipeline) may have SEVERAL 'Large Language Model' nodes — one
+    feeding the classifier, one the extractor — possibly with different models, and the user may
+    have filled only some. Resolve in priority order:
+      1. the LLM node EDGE-CONNECTED to the AI Field Extractor (the model that actually drives
+         extraction) — correct even when nodes carry different models;
+      2. else the first LLM node that carries a valid model uuid (handles the common single-model
+         case where only one of the duplicate nodes was filled).
+    """
+    llm_nodes = _find_nodes(data, _N_MODEL)
+    if not llm_nodes:
+        return None
+
+    # 1. Prefer the LLM wired into the extractor node.
+    extractor = _find_node(data, _N_EXTRACTOR)
+    extractor_id = extractor.get("id") if extractor else None
+    if extractor_id:
+        llm_by_id = {n.get("id"): n for n in llm_nodes}
+        for edge in _edges(data):
+            if not isinstance(edge, dict):
+                continue
+            if edge.get("target") == extractor_id and edge.get("source") in llm_by_id:
+                mid = _llm_node_model_uuid(llm_by_id[edge.get("source")])
+                if mid:
+                    return mid
+
+    # 2. Fallback: first LLM node with a valid model.
+    for node in llm_nodes:
+        mid = _llm_node_model_uuid(node)
+        if mid:
+            return mid
     return None
 
 
@@ -207,20 +265,53 @@ async def resolve_pipeline_config(
     prompt = _field(extractor, "prompt") or idp_agent.dynamic_prompt
     config_name = _field(extractor, "config_name")
 
-    # resolve named-config -> field_config_id (graph name first, else idp_agent column)
+    # If the extractor node exposes NO explicit extraction_mode but a Field Configuration IS
+    # selected on it, treat the run as named-config. Some node templates (e.g. the universal
+    # pipeline) have a config_name field but no extraction_mode dropdown — without this, a chosen
+    # config would be silently ignored and the run would fall back to a generic dynamic prompt.
+    if mode == MODE_DYNAMIC and not graph_mode and config_name:
+        mode = MODE_NAMED
+
+    # resolve named-config -> field_config_id (graph name first, else idp_agent column).
+    # Deterministic when several configs share a name: prefer the agent's org (unique by the
+    # (org_id, name) constraint), else the NEWEST active config of that name — never an arbitrary
+    # .first() over unordered rows.
     field_config_id: UUID | None = idp_agent.field_config_id
     if mode == MODE_NAMED and config_name:
+        # The graph's config_name takes precedence over idp_agent.field_config_id: resolve it
+        # fresh, and on a MISS leave field_config_id = None (so the pipeline fails clearly with
+        # "no field configuration resolved") rather than silently using a stale/wrong config.
+        field_config_id = None
         try:
-            row = (
-                await session.exec(
-                    select(IdpFieldConfiguration).where(
-                        IdpFieldConfiguration.name == config_name,
-                        IdpFieldConfiguration.deleted_at.is_(None),
+            base_q = select(IdpFieldConfiguration).where(
+                IdpFieldConfiguration.name == config_name,
+                IdpFieldConfiguration.deleted_at.is_(None),
+                IdpFieldConfiguration.is_active.is_(True),
+            )
+            agent_org_id = getattr(base_agent, "org_id", None)
+            row = None
+            if agent_org_id is not None:
+                row = (
+                    await session.exec(
+                        base_q.where(IdpFieldConfiguration.org_id == agent_org_id)
+                        .order_by(IdpFieldConfiguration.created_at.desc())
                     )
-                )
-            ).first()
+                ).first()
+            if row is None:  # no org-scoped match -> ONLY global configs (org_id NULL), never
+                # another tenant's private config. Prefer a real global config over a catalogue
+                # template (is_template False sorts first), then newest. Deterministic + tenant-safe.
+                row = (
+                    await session.exec(
+                        base_q.where(IdpFieldConfiguration.org_id.is_(None)).order_by(
+                            IdpFieldConfiguration.is_template.asc(),
+                            IdpFieldConfiguration.created_at.desc(),
+                        )
+                    )
+                ).first()
             if row:
                 field_config_id = row.id
+            else:
+                logger.warning(f"[agent_config] named config '{config_name}' not found / not active")
         except Exception as e:  # pragma: no cover - defensive
             logger.warning(f"[agent_config] config_name lookup failed: {e}")
 
@@ -230,10 +321,61 @@ async def resolve_pipeline_config(
     # routing / misc from idp_agent + extra
     extra = idp_agent.extra or {}
     default_rule_action = (idp_agent.default_rule_action or "pending_review").strip().lower()
-    # confidence_threshold: routing fallback used in _route() no-rules path. Canvas
-    # ConfidenceRouter node takes priority over extra override (default 0.8).
-    confidence_threshold = _to_float(extra.get("confidence_threshold"), 0.8)
     ocr_lang = str(extra.get("ocr_language") or _field(extractor, "language") or "en")
+
+    # ── Resolve visual canvas configuration nodes if present on the graph ──
+    chunking_node = _find_node(data, "Chunking Strategy")
+    aggregator_node = _find_node(data, "Chunk Aggregator")
+    router_node = _find_node(data, "Confidence Router")
+    rules_node = _find_node(data, "Rules / Conditions")
+    gate_node = _find_node(data, "Approval Gate")
+
+    # 1. Chunking settings
+    long_doc_enabled = chunking_node is not None or _as_bool(extra.get("long_doc_enabled"), True)
+    long_doc_max_tokens = 12000
+    if chunking_node:
+        long_doc_max_tokens = _to_int(_field(chunking_node, "chunk_size_tokens"), 4096)
+    else:
+        long_doc_max_tokens = _to_int(extra.get("long_doc_max_tokens"), 12000)
+    
+    long_doc_overlap_tokens = _to_int(
+        _field(chunking_node, "overlap_tokens") if chunking_node else extra.get("long_doc_overlap_tokens"), 256
+    )
+
+    # 2. Aggregator settings
+    dedup_strategy = str(
+        _field(aggregator_node, "dedup_strategy") if aggregator_node else extra.get("dedup_strategy") or "keep_highest_confidence"
+    )
+
+    # 3. Router settings
+    if router_node:
+        confidence_threshold = _to_float(_field(router_node, "threshold"), 0.8)
+    else:
+        confidence_threshold = _to_float(extra.get("confidence_threshold"), 0.8)
+
+    # 4. Rules / Conditions settings
+    rules_operator = "AND"
+    canvas_rules = []
+    if rules_node:
+        rules_operator = str(_field(rules_node, "logic_operator") or "AND")
+        raw_conds = _field(rules_node, "conditions")
+        if isinstance(raw_conds, str) and raw_conds.strip():
+            try:
+                parsed_conds = json.loads(raw_conds)
+                if isinstance(parsed_conds, list):
+                    canvas_rules = parsed_conds
+            except Exception as e:
+                logger.warning(f"[agent_config] failed to parse rules conditions JSON: {e}")
+        elif isinstance(raw_conds, list):
+            canvas_rules = raw_conds
+
+    # 5. Gate settings
+    approval_field = str(
+        _field(gate_node, "approval_field") if gate_node else extra.get("approval_field") or "rule_action"
+    )
+    approve_value = str(
+        _field(gate_node, "approve_value") if gate_node else extra.get("approve_value") or "auto_approve"
+    )
 
     # ── Differentiator toggles: a canvas node's PRESENCE enables the feature; idp_agent.extra
     # is a fallback/override (so API/test config and on-the-fly toggling still work). ──
@@ -241,7 +383,6 @@ async def resolve_pipeline_config(
     detection_node = _find_node(data, _N_DETECTION)
     math_node = _find_node(data, _N_MATH)
     confidence_router_node = _find_node(data, _N_CONFIDENCE_ROUTER)
-    chunking_node = _find_node(data, _N_CHUNKING)
 
     classify_enabled = classifier_node is not None or _as_bool(extra.get("classify_enabled"), False)
     # classify_threshold: min confidence for classification acceptance (DocumentClassifier node)
@@ -282,13 +423,8 @@ async def resolve_pipeline_config(
     math_reconcile_tolerance = _to_float(
         _field(math_node, "tolerance") if math_node else extra.get("math_reconcile_tolerance"), 0.01
     )
-
-    # ChunkingStrategy: canvas node configures chunk size / overlap for long-doc processing
-    long_doc_max_tokens = _to_int(extra.get("long_doc_max_tokens"), 12000)
-    chunk_overlap_tokens = _to_int(extra.get("chunk_overlap_tokens"), 256)
-    if chunking_node:
-        long_doc_max_tokens = _to_int(_field(chunking_node, "chunk_size_tokens"), long_doc_max_tokens)
-        chunk_overlap_tokens = _to_int(_field(chunking_node, "overlap_tokens"), chunk_overlap_tokens)
+    # NOTE: long_doc_max_tokens + long_doc_overlap_tokens are already resolved from the Chunking
+    # Strategy node in the "Chunking settings" block above; no recomputation needed here.
 
     return ResolvedPipelineConfig(
         model_id=model_id,
@@ -321,11 +457,16 @@ async def resolve_pipeline_config(
         math_reconcile_enabled=math_reconcile_enabled,
         math_reconcile_max_attempts=math_reconcile_max_attempts,
         math_reconcile_tolerance=math_reconcile_tolerance,
-        long_doc_enabled=_as_bool(extra.get("long_doc_enabled"), True),
+        long_doc_enabled=long_doc_enabled,
         long_doc_max_pages=_to_int(extra.get("long_doc_max_pages"), 8),
         long_doc_max_tokens=long_doc_max_tokens,
-        chunk_overlap_tokens=chunk_overlap_tokens,
+        long_doc_overlap_tokens=long_doc_overlap_tokens,
         entity_linking_enabled=_as_bool(extra.get("entity_linking_enabled"), True),
+        dedup_strategy=dedup_strategy,
+        rules_operator=rules_operator,
+        canvas_rules=canvas_rules,
+        approval_field=approval_field,
+        approve_value=approve_value,
     )
 
 
