@@ -51,6 +51,7 @@ export const URLs = {
   IDP_FIELD_CONFIGS: `v1/idp/field-configs`,
   IDP_PROCESSED_DOCS: `v1/idp/processed-docs`,
   IDP_DOCUMENTS: `v1/idp/documents`,
+  IDP_REPORTS: `v1/idp/reports`,
   TAGS: `tags`,
   COST_LIMITS: `cost-limits`,
   SEMANTIC_SEARCH: `semantic-search/search`,

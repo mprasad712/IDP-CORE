@@ -1563,3 +1563,310 @@ async def get_cost_p95_trend(
             series.append(TimeseriesPoint(date=d, value=round(costs[p95_idx], 6)))
 
     return CostTrendResponse(range=range, series=series)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IDP (Intelligent Document Processing) dashboard sections.
+#
+# These fill the `/api/dashboard/sections/idp-*` endpoints the IDP dashboard already
+# calls. Every handler is READ-ONLY, org-scoped via `idp_metrics.idp_scope` (root sees
+# all), and fail-safe: on any query error it returns the same KPI/series shape with zero
+# values (the frontend already tolerates that fallback) — one failing section can never
+# 500 the page. Approval-workflow / cost / SLA KPIs have no v1 data source yet and return
+# 0 by design (Phase B). No writes, no migrations.
+# ──────────────────────────────────────────────────────────────────────────────
+
+from agentcore.services.idp import metrics as idp_metrics  # noqa: E402
+
+
+def _idp_daily_series(timestamps, start_day: date, days: int, tz_minutes: int) -> list[TimeseriesPoint]:
+    """Bucket timestamps into a contiguous per-day series over [start_day, start_day+days)."""
+    by_day: dict[date, int] = {}
+    for ts in timestamps:
+        d = _normalize_day(ts, tz_minutes)
+        by_day[d] = by_day.get(d, 0) + 1
+    return [
+        TimeseriesPoint(date=(start_day + timedelta(days=i)).isoformat(), value=by_day.get(start_day + timedelta(days=i), 0))
+        for i in range(days)
+    ]
+
+
+@router.get("/sections/idp-pipeline", response_model=DashboardSectionResponse, status_code=200)
+async def get_idp_pipeline_kpis(
+    *, session: DbSession, current_user: CurrentActiveUser, tz_offset_minutes: int | None = Query(default=None)
+):
+    processed = failed = pending_review = active_configs = 0
+    avg_time = 0.0
+    try:
+        is_root, org_ids = await idp_metrics.idp_scope(session, current_user)
+        tz_minutes = _coerce_tz_offset_minutes(tz_offset_minutes)
+        _, start_dt, end_dt = _local_range_window(30, tz_minutes)
+        processed = await idp_metrics.count_docs(session, is_root, org_ids, statuses=idp_metrics.TERMINAL_STATUSES, start_dt=start_dt, end_dt=end_dt)
+        failed = await idp_metrics.count_docs(session, is_root, org_ids, statuses=idp_metrics.FAILURE_STATUSES, start_dt=start_dt, end_dt=end_dt)
+        pending_review = await idp_metrics.count_docs(session, is_root, org_ids, statuses=("pending_review",))
+        active_configs = await idp_metrics.count_active_field_configs(session, is_root, org_ids)
+        avg_time = await idp_metrics.avg_processing_seconds(session, is_root, org_ids, start_dt=start_dt, end_dt=end_dt)
+    except Exception as e:
+        logger.error("[idp-metrics] idp-pipeline failed: %s", e)
+    # "Success" = processing did not hard-fail (pending_review/skipped processed fine).
+    rate = round((processed - failed) / processed * 100, 1) if processed else 0
+    return DashboardSectionResponse(
+        section="idp_pipeline",
+        kpis=[
+            DashboardKpi(id="docs_processed", label="Docs Processed (30d)", value=processed),
+            DashboardKpi(id="success_rate", label="Processing Success Rate", value=rate, unit="%"),
+            DashboardKpi(id="docs_failed", label="Failed (30d)", value=failed),
+            DashboardKpi(id="pending_review", label="Docs Pending Review", value=pending_review),
+            DashboardKpi(id="pending_approval", label="Docs Pending Approval", value=0),
+            DashboardKpi(id="active_field_configs", label="Active Field Configs", value=active_configs),
+            DashboardKpi(id="avg_processing_time", label="Avg Processing Time", value=avg_time, unit="s"),
+        ],
+    )
+
+
+@router.get("/sections/idp-pipeline/throughput-series", response_model=PendingSeriesResponse, status_code=200)
+async def get_idp_pipeline_throughput_series(
+    *, session: DbSession, current_user: CurrentActiveUser,
+    range_key: str = Query(default="30d", alias="range"), tz_offset_minutes: int | None = Query(default=None),
+):
+    days = _range_to_days(range_key)
+    tz_minutes = _coerce_tz_offset_minutes(tz_offset_minutes)
+    start_day, start_dt, end_dt = _local_range_window(days, tz_minutes)
+    timestamps: list = []
+    try:
+        is_root, org_ids = await idp_metrics.idp_scope(session, current_user)
+        timestamps = await idp_metrics.doc_timestamps(session, is_root, org_ids, start_dt=start_dt, end_dt=end_dt, statuses=idp_metrics.TERMINAL_STATUSES)
+    except Exception as e:
+        logger.error("[idp-metrics] idp-pipeline throughput-series failed: %s", e)
+    return PendingSeriesResponse(range=range_key, series=_idp_daily_series(timestamps, start_day, days, tz_minutes))
+
+
+@router.get("/sections/idp-review-queue", response_model=DashboardSectionResponse, status_code=200)
+async def get_idp_review_queue_kpis(
+    *, session: DbSession, current_user: CurrentActiveUser, tz_offset_minutes: int | None = Query(default=None)
+):
+    pending_review = reviewed_today = reviewed_week = 0
+    correction_rate = 0.0
+    try:
+        is_root, org_ids = await idp_metrics.idp_scope(session, current_user)
+        tz_minutes = _coerce_tz_offset_minutes(tz_offset_minutes)
+        _, day_start, day_end = _local_range_window(1, tz_minutes)
+        _, week_start, week_end = _local_range_window(7, tz_minutes)
+        pending_review = await idp_metrics.count_docs(session, is_root, org_ids, statuses=("pending_review",))
+        reviewed_today = await idp_metrics.count_review_sessions(session, is_root, org_ids, start_dt=day_start, end_dt=day_end)
+        reviewed_week = await idp_metrics.count_review_sessions(session, is_root, org_ids, start_dt=week_start, end_dt=week_end)
+        corrections = await idp_metrics.count_review_sessions(session, is_root, org_ids, start_dt=week_start, end_dt=week_end, final_status="corrections_made")
+        correction_rate = round(corrections / reviewed_week * 100, 1) if reviewed_week else 0
+    except Exception as e:
+        logger.error("[idp-metrics] idp-review-queue failed: %s", e)
+    return DashboardSectionResponse(
+        section="idp_review",
+        kpis=[
+            DashboardKpi(id="pending_review", label="Docs Pending Review", value=pending_review),
+            DashboardKpi(id="reviewed_today", label="Reviewed Today", value=reviewed_today),
+            DashboardKpi(id="reviewed_week", label="Reviewed This Week", value=reviewed_week),
+            DashboardKpi(id="avg_review_time", label="Avg Review Time", value=0, unit="min"),
+            DashboardKpi(id="correction_rate", label="Correction Rate", value=correction_rate, unit="%"),
+        ],
+    )
+
+
+@router.get("/sections/idp-review-queue/activity-series", response_model=PendingSeriesResponse, status_code=200)
+async def get_idp_review_queue_activity_series(
+    *, session: DbSession, current_user: CurrentActiveUser,
+    range_key: str = Query(default="7d", alias="range"), tz_offset_minutes: int | None = Query(default=None),
+):
+    days = _range_to_days(range_key)
+    tz_minutes = _coerce_tz_offset_minutes(tz_offset_minutes)
+    start_day, start_dt, end_dt = _local_range_window(days, tz_minutes)
+    timestamps: list = []
+    try:
+        is_root, org_ids = await idp_metrics.idp_scope(session, current_user)
+        timestamps = await idp_metrics.review_session_timestamps(session, is_root, org_ids, start_dt=start_dt, end_dt=end_dt)
+    except Exception as e:
+        logger.error("[idp-metrics] idp-review-queue activity-series failed: %s", e)
+    return PendingSeriesResponse(range=range_key, series=_idp_daily_series(timestamps, start_day, days, tz_minutes))
+
+
+@router.get("/sections/idp-approval-queue", response_model=DashboardSectionResponse, status_code=200)
+async def get_idp_approval_queue_kpis(
+    *, session: DbSession, current_user: CurrentActiveUser, tz_offset_minutes: int | None = Query(default=None)
+):
+    # v1 has NO distinct document-approval workflow (approval shares the 'reviewed' status with
+    # review — there is no pending-approval/rejected state, approval rate, or approval time to
+    # measure). The whole section is deferred to Phase B and returns 0 rather than conflating
+    # review outcomes with approval activity (which would show e.g. "Approved 5 / Rate 0%").
+    return DashboardSectionResponse(
+        section="idp_approval",
+        kpis=[
+            DashboardKpi(id="pending_approval", label="Pending Approval", value=0),
+            DashboardKpi(id="approved_today", label="Approved Today", value=0),
+            DashboardKpi(id="rejected_today", label="Rejected Today", value=0),
+            DashboardKpi(id="approval_rate", label="Approval Rate", value=0, unit="%"),
+            DashboardKpi(id="avg_approval_time", label="Avg Approval Time", value=0, unit="min"),
+        ],
+    )
+
+
+@router.get("/sections/idp-approval-queue/activity-series", response_model=PendingSeriesResponse, status_code=200)
+async def get_idp_approval_queue_activity_series(
+    *, session: DbSession, current_user: CurrentActiveUser,
+    range_key: str = Query(default="7d", alias="range"), tz_offset_minutes: int | None = Query(default=None),
+):
+    # Approval workflow is Phase B (see section handler above) → zero-filled series.
+    days = _range_to_days(range_key)
+    tz_minutes = _coerce_tz_offset_minutes(tz_offset_minutes)
+    start_day, _, _ = _local_range_window(days, tz_minutes)
+    series = [TimeseriesPoint(date=(start_day + timedelta(days=i)).isoformat(), value=0) for i in range(days)]
+    return PendingSeriesResponse(range=range_key, series=series)
+
+
+@router.get("/sections/idp-my-submissions", response_model=DashboardSectionResponse, status_code=200)
+async def get_idp_my_submissions_kpis(*, session: DbSession, current_user: CurrentActiveUser):
+    total = processing = under_review = approved = failed = 0
+    try:
+        is_root, org_ids = await idp_metrics.idp_scope(session, current_user)
+        me = current_user.id
+        total = await idp_metrics.count_docs(session, is_root, org_ids, uploaded_by=me)
+        processing = await idp_metrics.count_docs(session, is_root, org_ids, statuses=("queued", "processing"), uploaded_by=me)
+        under_review = await idp_metrics.count_docs(session, is_root, org_ids, statuses=("pending_review",), uploaded_by=me)
+        approved = await idp_metrics.count_docs(session, is_root, org_ids, statuses=idp_metrics.SUCCESS_STATUSES, uploaded_by=me)
+        failed = await idp_metrics.count_docs(session, is_root, org_ids, statuses=idp_metrics.FAILED_STATUSES, uploaded_by=me)
+    except Exception as e:
+        logger.error("[idp-metrics] idp-my-submissions failed: %s", e)
+    return DashboardSectionResponse(
+        section="idp_submission",
+        kpis=[
+            DashboardKpi(id="total_submitted", label="Total Submitted", value=total),
+            DashboardKpi(id="processing", label="Processing", value=processing),
+            DashboardKpi(id="under_review", label="Under Review", value=under_review),
+            DashboardKpi(id="approved", label="Approved", value=approved),
+            DashboardKpi(id="failed_skipped", label="Failed / Skipped", value=failed),
+        ],
+    )
+
+
+@router.get("/sections/idp-my-submissions/activity-series", response_model=PendingSeriesResponse, status_code=200)
+async def get_idp_my_submissions_activity_series(
+    *, session: DbSession, current_user: CurrentActiveUser,
+    range_key: str = Query(default="7d", alias="range"), tz_offset_minutes: int | None = Query(default=None),
+):
+    days = _range_to_days(range_key)
+    tz_minutes = _coerce_tz_offset_minutes(tz_offset_minutes)
+    start_day, start_dt, end_dt = _local_range_window(days, tz_minutes)
+    timestamps: list = []
+    try:
+        is_root, org_ids = await idp_metrics.idp_scope(session, current_user)
+        timestamps = await idp_metrics.doc_timestamps(session, is_root, org_ids, start_dt=start_dt, end_dt=end_dt, uploaded_by=current_user.id)
+    except Exception as e:
+        logger.error("[idp-metrics] idp-my-submissions activity-series failed: %s", e)
+    return PendingSeriesResponse(range=range_key, series=_idp_daily_series(timestamps, start_day, days, tz_minutes))
+
+
+@router.get("/sections/idp-field-quality", response_model=DashboardSectionResponse, status_code=200)
+async def get_idp_field_quality_kpis(
+    *, session: DbSession, current_user: CurrentActiveUser, tz_offset_minutes: int | None = Query(default=None)
+):
+    active_configs = processed = failed = 0
+    accuracy = correction_rate = 0.0
+    try:
+        is_root, org_ids = await idp_metrics.idp_scope(session, current_user)
+        tz_minutes = _coerce_tz_offset_minutes(tz_offset_minutes)
+        _, start_dt, end_dt = _local_range_window(30, tz_minutes)
+        active_configs = await idp_metrics.count_active_field_configs(session, is_root, org_ids)
+        accuracy = await idp_metrics.avg_confidence_pct(session, is_root, org_ids, start_dt=start_dt, end_dt=end_dt)
+        processed = await idp_metrics.count_docs(session, is_root, org_ids, statuses=idp_metrics.TERMINAL_STATUSES, start_dt=start_dt, end_dt=end_dt)
+        failed = await idp_metrics.count_docs(session, is_root, org_ids, statuses=idp_metrics.FAILURE_STATUSES, start_dt=start_dt, end_dt=end_dt)
+        reviewed = await idp_metrics.count_review_sessions(session, is_root, org_ids, start_dt=start_dt, end_dt=end_dt)
+        corrections = await idp_metrics.count_review_sessions(session, is_root, org_ids, start_dt=start_dt, end_dt=end_dt, final_status="corrections_made")
+        correction_rate = round(corrections / reviewed * 100, 1) if reviewed else 0
+    except Exception as e:
+        logger.error("[idp-metrics] idp-field-quality failed: %s", e)
+    return DashboardSectionResponse(
+        section="idp_quality",
+        kpis=[
+            DashboardKpi(id="active_field_configs", label="Active Field Configs", value=active_configs),
+            DashboardKpi(id="avg_extraction_accuracy", label="Avg Extraction Accuracy", value=accuracy, unit="%"),
+            DashboardKpi(id="docs_processed", label="Docs Processed (30d)", value=processed),
+            DashboardKpi(id="avg_correction_rate", label="Avg Correction Rate", value=correction_rate, unit="%"),
+            DashboardKpi(id="failed_extractions", label="Failed Extractions", value=failed),
+        ],
+    )
+
+
+@router.get("/sections/idp-field-quality/volume-series", response_model=PendingSeriesResponse, status_code=200)
+async def get_idp_field_quality_volume_series(
+    *, session: DbSession, current_user: CurrentActiveUser,
+    range_key: str = Query(default="30d", alias="range"), tz_offset_minutes: int | None = Query(default=None),
+):
+    days = _range_to_days(range_key)
+    tz_minutes = _coerce_tz_offset_minutes(tz_offset_minutes)
+    start_day, start_dt, end_dt = _local_range_window(days, tz_minutes)
+    timestamps: list = []
+    try:
+        is_root, org_ids = await idp_metrics.idp_scope(session, current_user)
+        timestamps = await idp_metrics.doc_timestamps(session, is_root, org_ids, start_dt=start_dt, end_dt=end_dt, statuses=idp_metrics.TERMINAL_STATUSES)
+    except Exception as e:
+        logger.error("[idp-metrics] idp-field-quality volume-series failed: %s", e)
+    return PendingSeriesResponse(range=range_key, series=_idp_daily_series(timestamps, start_day, days, tz_minutes))
+
+
+@router.get("/sections/idp-analytics", response_model=DashboardSectionResponse, status_code=200)
+async def get_idp_analytics_kpis(
+    *, session: DbSession, current_user: CurrentActiveUser, tz_offset_minutes: int | None = Query(default=None)
+):
+    total_processed = processed_30d = failed_all = 0
+    try:
+        is_root, org_ids = await idp_metrics.idp_scope(session, current_user)
+        tz_minutes = _coerce_tz_offset_minutes(tz_offset_minutes)
+        _, start_dt, end_dt = _local_range_window(30, tz_minutes)
+        total_processed = await idp_metrics.count_docs(session, is_root, org_ids, statuses=idp_metrics.TERMINAL_STATUSES)
+        failed_all = await idp_metrics.count_docs(session, is_root, org_ids, statuses=idp_metrics.FAILURE_STATUSES)
+        processed_30d = await idp_metrics.count_docs(session, is_root, org_ids, statuses=idp_metrics.TERMINAL_STATUSES, start_dt=start_dt, end_dt=end_dt)
+    except Exception as e:
+        logger.error("[idp-metrics] idp-analytics failed: %s", e)
+    # Success = processed without a hard pipeline failure; error_rate is the complement.
+    success_rate = round((total_processed - failed_all) / total_processed * 100, 1) if total_processed else 0
+    error_rate = round(failed_all / total_processed * 100, 1) if total_processed else 0
+    # SLA compliance + cost-per-document have no v1 data source (Phase B) → 0.
+    return DashboardSectionResponse(
+        section="idp_analytics",
+        kpis=[
+            DashboardKpi(id="total_docs_processed", label="Total Docs Processed", value=total_processed),
+            DashboardKpi(id="success_rate", label="Processing Success Rate", value=success_rate, unit="%"),
+            DashboardKpi(id="sla_compliance", label="SLA Compliance", value=0, unit="%"),
+            DashboardKpi(id="avg_cost_per_document", label="Avg Cost per Document", value=0, unit="$"),
+            DashboardKpi(id="docs_processed_30d", label="Docs Processed (30d)", value=processed_30d),
+            DashboardKpi(id="processing_error_rate", label="Processing Error Rate", value=error_rate, unit="%"),
+        ],
+    )
+
+
+@router.get("/sections/idp-analytics/throughput-series", response_model=PendingSeriesResponse, status_code=200)
+async def get_idp_analytics_throughput_series(
+    *, session: DbSession, current_user: CurrentActiveUser,
+    range_key: str = Query(default="30d", alias="range"), tz_offset_minutes: int | None = Query(default=None),
+):
+    days = _range_to_days(range_key)
+    tz_minutes = _coerce_tz_offset_minutes(tz_offset_minutes)
+    start_day, start_dt, end_dt = _local_range_window(days, tz_minutes)
+    timestamps: list = []
+    try:
+        is_root, org_ids = await idp_metrics.idp_scope(session, current_user)
+        timestamps = await idp_metrics.doc_timestamps(session, is_root, org_ids, start_dt=start_dt, end_dt=end_dt, statuses=idp_metrics.TERMINAL_STATUSES)
+    except Exception as e:
+        logger.error("[idp-metrics] idp-analytics throughput-series failed: %s", e)
+    return PendingSeriesResponse(range=range_key, series=_idp_daily_series(timestamps, start_day, days, tz_minutes))
+
+
+@router.get("/sections/idp-analytics/cost-series", response_model=PendingSeriesResponse, status_code=200)
+async def get_idp_analytics_cost_series(
+    *, session: DbSession, current_user: CurrentActiveUser,
+    range_key: str = Query(default="30d", alias="range"), tz_offset_minutes: int | None = Query(default=None),
+):
+    # IDP cost tracking is Phase B → return a zero-filled series in the expected shape.
+    days = _range_to_days(range_key)
+    tz_minutes = _coerce_tz_offset_minutes(tz_offset_minutes)
+    start_day, _, _ = _local_range_window(days, tz_minutes)
+    series = [TimeseriesPoint(date=(start_day + timedelta(days=i)).isoformat(), value=0) for i in range(days)]
+    return PendingSeriesResponse(range=range_key, series=series)

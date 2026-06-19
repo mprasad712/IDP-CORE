@@ -543,6 +543,13 @@ const SideBarFoldersButtonsComponent = ({
               </SidebarMenuItem>
 
               <SidebarMenuItem>
+                <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-reports")} onClick={() => _navigate("/idp-reports")} className={navBtn}>
+                  <ForwardedIconComponent name="BarChart3" className="h-4 w-4 flex-shrink-0" />
+                  {t("Reports")}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
                 <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-upload")} onClick={() => _navigate("/idp-upload")} className={navBtn}>
                   <ForwardedIconComponent name="UploadCloud" className="h-4 w-4 flex-shrink-0" />
                   {t("Document Upload")}

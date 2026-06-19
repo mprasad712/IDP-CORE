@@ -83,6 +83,16 @@ class IdpDocument(SQLModel, table=True):  # type: ignore[call-arg]
         Index("ix_idp_documents_agent_status_created", "agent_id", "status", "created_at"),
     )
 
+    @property
+    def review_draft(self) -> bool:
+        """True when a reviewer saved HITL edits as a draft (persisted but not yet submitted).
+
+        Read-only convenience derived from the ``extra`` JSONB escape hatch — no column,
+        no migration. The flag is set by ``PATCH /fields?draft=true`` and cleared on
+        ``POST /review``; the document itself stays in ``pending_review`` while drafting.
+        """
+        return bool((self.extra or {}).get("review_draft"))
+
 
 # ──────────────────────────── idp_processing_jobs ────────────────────────────
 class IdpProcessingJob(SQLModel, table=True):  # type: ignore[call-arg]

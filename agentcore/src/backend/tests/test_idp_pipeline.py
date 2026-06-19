@@ -1202,6 +1202,58 @@ async def test_document_log_endpoint(monkeypatch):
         await _cleanup(agent_id, doc_id)
 
 
+@pytest.mark.anyio
+async def test_document_log_download_endpoint(monkeypatch):
+    """GET /documents/{id}/log/download streams the flow.log artifact; 404 when absent."""
+    from fastapi.testclient import TestClient
+    from agentcore.main import create_app
+    from agentcore.services.auth.utils import get_current_active_user
+    from agentcore.api.idp import idp_rbac
+    from agentcore.services.deps import session_scope, get_storage_service
+
+    def mock_user():
+        from types import SimpleNamespace
+        return SimpleNamespace(id=uuid4(), role="root")  # root bypasses org scoping
+
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=b"%PDF-1.4 x")
+
+    expected_path = f"flow_logs/{doc_id}/flow.log"
+
+    class FileStore:
+        async def get_file(self, agent_id, file_name):
+            if file_name == expected_path:
+                return b"load | ok | input received\nextract | ok | 3 headers\nfinalize | ok"
+            raise FileNotFoundError(file_name)
+
+    class EmptyStore:
+        async def get_file(self, agent_id, file_name):
+            raise FileNotFoundError(file_name)
+
+    app = create_app()
+    app.dependency_overrides[get_current_active_user] = mock_user
+    app.dependency_overrides[idp_rbac] = mock_user
+    try:
+        # artifact present → 200 + attachment + text body
+        app.dependency_overrides[get_storage_service] = lambda: FileStore()
+        client = TestClient(app)
+        r = client.get(f"/api/v1/idp/documents/{doc_id}/log/download")
+        assert r.status_code == 200, r.text
+        assert b"input received" in r.content
+        assert "text/plain" in r.headers.get("content-type", "")
+        assert "attachment" in r.headers.get("content-disposition", "")
+        assert "_processing_log.txt" in r.headers.get("content-disposition", "")
+
+        # artifact missing → graceful 404 (never 500)
+        app.dependency_overrides[get_storage_service] = lambda: EmptyStore()
+        client = TestClient(app)
+        r2 = client.get(f"/api/v1/idp/documents/{doc_id}/log/download")
+        assert r2.status_code == 404, r2.text
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup(agent_id, doc_id)
+
+
 @pytest.mark.skipif(
     not __import__("agentcore.services.idp.ocr", fromlist=["_paddle_ocr_available"])._paddle_ocr_available,
     reason="PaddleOCR not installed (runs on M4/NVIDIA/Docker/CI)",

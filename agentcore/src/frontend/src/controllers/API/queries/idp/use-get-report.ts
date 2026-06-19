@@ -4,77 +4,75 @@ import { api } from "../../api";
 import { getURL } from "../../helpers/constants";
 import { UseRequestProcessor } from "../../services/request-processor";
 
-export interface ProcessedDoc {
-  id: string;
-  agent_id: string;
-  parent_document_id: string | null;
+export interface ReportRow {
+  document_id: string;
   original_filename: string;
-  file_path: string;
-  file_type: string;
-  mime_type: string | null;
-  file_size_bytes: number;
-  page_count: number | null;
-  checksum: string | null;
-  source: string;
+  agent_id: string;
   predicted_type: string | null;
   status: string;
-  overall_confidence: number | null;
-  uploaded_by: string | null;
+  overall_confidence: number | null; // percentage 0–100
+  uploaded_at: string;
   processing_started_at: string | null;
-  processing_completed_at: string | null;
-  failed_at: string | null;
-  created_at: string;
-  updated_at: string;
-  review_draft?: boolean; // reviewer saved edits as a draft (not yet submitted)
+  pipeline_completed_at: string | null;
+  processing_time_ms: number | null;
+  reviewer: string | null;
+  reviewed_at: string | null;
+  review_final_status: string | null;
+  header_count: number;
+  line_item_count: number;
+  has_log: boolean;
 }
 
-export interface ProcessedDocPage {
-  items: ProcessedDoc[];
+export interface ReportPage {
+  items: ReportRow[];
   total: number;
   page: number;
   size: number;
   pages: number;
 }
 
-export interface GetProcessedDocsParams {
+export interface GetReportParams {
   page?: number;
   size?: number;
   status_filter?: string;
   agent_id?: string;
   predicted_type?: string;
-  confidence_min?: number;
-  confidence_max?: number;
+  created_start?: string;
+  created_end?: string;
 }
 
-export const useGetProcessedDocs: useQueryFunctionType<
-  GetProcessedDocsParams,
-  ProcessedDocPage
-> = (params, options?) => {
+export const useGetReport: useQueryFunctionType<GetReportParams, ReportPage> = (
+  params,
+  options?,
+) => {
   const { query } = UseRequestProcessor();
 
-  const getFn = async (): Promise<ProcessedDocPage> => {
+  const getFn = async (): Promise<ReportPage> => {
     const qp: Record<string, string> = {};
     if (params?.page !== undefined) qp.page = String(params.page);
     if (params?.size !== undefined) qp.size = String(params.size);
     if (params?.status_filter) qp.status_filter = params.status_filter;
     if (params?.agent_id) qp.agent_id = params.agent_id;
     if (params?.predicted_type) qp.predicted_type = params.predicted_type;
-    if (params?.confidence_min !== undefined) qp.confidence_min = String(params.confidence_min);
-    if (params?.confidence_max !== undefined) qp.confidence_max = String(params.confidence_max);
+    if (params?.created_start) qp.created_start = params.created_start;
+    if (params?.created_end) qp.created_end = params.created_end;
 
-    const res = await api.get(`${getURL("IDP_PROCESSED_DOCS")}/`, {
+    const res = await api.get(`${getURL("IDP_REPORTS")}/processed-docs`, {
       params: Object.keys(qp).length > 0 ? qp : undefined,
     });
     return res.data;
   };
 
-  const queryResult: UseQueryResult<ProcessedDocPage, any> = query(
+  const queryResult: UseQueryResult<ReportPage, any> = query(
     [
-      "useGetProcessedDocs",
+      "useGetReport",
       params?.status_filter ?? "all",
       params?.agent_id ?? "all",
+      params?.predicted_type ?? "all",
+      params?.created_start ?? "",
+      params?.created_end ?? "",
       params?.page ?? 1,
-      params?.size ?? 50,
+      params?.size ?? 25,
     ],
     getFn,
     { refetchOnMount: true, ...options },

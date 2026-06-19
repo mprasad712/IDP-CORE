@@ -11,6 +11,7 @@ export interface FieldUpdateItem {
 export interface HumanFieldsUpdatePayload {
   headers?: FieldUpdateItem[];
   line_items?: FieldUpdateItem[];
+  draft?: boolean; // when true, persist edits but keep the doc in Pending Review (Save as Draft)
 }
 
 export const usePatchProcessedDocFields = (id: string) => {
