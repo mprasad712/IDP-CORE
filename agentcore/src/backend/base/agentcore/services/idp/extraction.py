@@ -198,6 +198,51 @@ def _expand_extraction(parsed: Any) -> Dict[str, Any]:
 
     return {"headers": headers, "line_items": line_items}
 
+def _extract_usage_from_response(response: Any, model_fallback: str | None = None) -> Dict[str, Any]:
+    """Helper to extract token usage and model name from a Langchain response object."""
+    usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "model": model_fallback,
+    }
+    if not response:
+        return usage
+
+    # 1. Try usage_metadata (standard in modern Langchain)
+    if hasattr(response, "usage_metadata") and response.usage_metadata:
+        um = response.usage_metadata
+        usage["input_tokens"] = um.get("input_tokens") or um.get("prompt_tokens") or 0
+        usage["output_tokens"] = um.get("output_tokens") or um.get("completion_tokens") or 0
+        usage["total_tokens"] = um.get("total_tokens") or 0
+
+    # 2. Try response_metadata (provider-specific fields)
+    elif hasattr(response, "response_metadata") and response.response_metadata:
+        rm = response.response_metadata
+        tu = rm.get("token_usage")
+        if isinstance(tu, dict):
+            usage["input_tokens"] = tu.get("prompt_tokens") or tu.get("input_tokens") or 0
+            usage["output_tokens"] = tu.get("completion_tokens") or tu.get("output_tokens") or 0
+            usage["total_tokens"] = tu.get("total_tokens") or 0
+        else:
+            usage["input_tokens"] = rm.get("prompt_tokens") or rm.get("input_tokens") or 0
+            usage["output_tokens"] = rm.get("completion_tokens") or rm.get("output_tokens") or 0
+            usage["total_tokens"] = rm.get("total_tokens") or 0
+
+    if usage["total_tokens"] == 0:
+        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+
+    # Extract model name
+    if hasattr(response, "response_metadata") and isinstance(response.response_metadata, dict):
+        model_name = response.response_metadata.get("model_name") or response.response_metadata.get("model")
+        if model_name:
+            usage["model"] = str(model_name)
+
+    if not usage["model"] and hasattr(response, "model"):
+        usage["model"] = str(response.model)
+
+    return usage
+
 async def extract_dynamic(
     ocr_text: str,
     prompt: str,
@@ -227,7 +272,9 @@ async def extract_dynamic(
             response = await asyncio.wait_for(llm_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
             raw_content = response.content if hasattr(response, "content") else str(response)
             parsed = json.loads(_strip_code_fences(raw_content))
-            return _expand_extraction(parsed)
+            res = _expand_extraction(parsed)
+            res["_usage"] = _extract_usage_from_response(response, model_fallback=getattr(llm_model, "model_name", None))
+            return res
         except Exception as e:
             logger.error(f"[Extraction] compact extraction parsing failed: {e}")
             return {"headers": {}, "line_items": [], "error": f"Extraction parsing failed: {str(e)}"}
@@ -241,16 +288,32 @@ async def extract_dynamic(
     # Attempt structured output (tool-calling capable models)
     if hasattr(llm_model, "with_structured_output"):
         try:
-            structured_model = llm_model.with_structured_output(StructuredExtractionResult)
-            result = await asyncio.wait_for(structured_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
+            try:
+                structured_model = llm_model.with_structured_output(StructuredExtractionResult, include_raw=True)
+                res_dict = await asyncio.wait_for(structured_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
+                if isinstance(res_dict, dict):
+                    result = res_dict.get("parsed")
+                    raw_response = res_dict.get("raw")
+                else:
+                    result = res_dict
+                    raw_response = None
+            except TypeError:
+                structured_model = llm_model.with_structured_output(StructuredExtractionResult)
+                result = await asyncio.wait_for(structured_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
+                raw_response = None
+
             if isinstance(result, StructuredExtractionResult):
                 if not result.headers and not result.line_items:
                     raise ValueError("Structured output returned empty headers and line items")
-                return result.model_dump()
+                res = result.model_dump()
+                res["_usage"] = _extract_usage_from_response(raw_response, model_fallback=getattr(llm_model, "model_name", None))
+                return res
             if isinstance(result, dict):
                 if not result.get("headers") and not result.get("line_items"):
                     raise ValueError("Structured output returned empty headers and line items")
-                return result
+                res = dict(result)
+                res["_usage"] = _extract_usage_from_response(raw_response, model_fallback=getattr(llm_model, "model_name", None))
+                return res
         except Exception as e:
             logger.warning(f"[LLM] with_structured_output failed: {e}. Falling back to raw JSON parsing.")
 
@@ -302,7 +365,9 @@ async def extract_dynamic(
             })
         clean_line_items.append({"row_index": int(row_idx), "columns": clean_cols})
 
-    return {"headers": clean_headers, "line_items": clean_line_items}
+    res = {"headers": clean_headers, "line_items": clean_line_items}
+    res["_usage"] = _extract_usage_from_response(response, model_fallback=getattr(llm_model, "model_name", None))
+    return res
 
 
 async def _compact_invoke(system: str, user: str, llm_model: Any) -> Dict[str, Any]:
@@ -319,7 +384,9 @@ async def _compact_invoke(system: str, user: str, llm_model: Any) -> Dict[str, A
         response = await llm_model.ainvoke(messages)
         raw_content = response.content if hasattr(response, "content") else str(response)
         parsed = json.loads(_strip_code_fences(raw_content))
-        return _expand_extraction(parsed)
+        res = _expand_extraction(parsed)
+        res["_usage"] = _extract_usage_from_response(response, model_fallback=getattr(llm_model, "model_name", None))
+        return res
     except Exception as e:
         logger.error(f"[Extraction] compact named-config parsing failed: {e}")
         return {"headers": {}, "line_items": [], "error": f"Extraction parsing failed: {str(e)}"}
@@ -399,10 +466,13 @@ async def extract_named_config(
             "columns": clean_cols
         })
 
-    return {
+    final_res = {
         "headers": filtered_headers,
         "line_items": filtered_line_items
     }
+    if "_usage" in raw_result:
+        final_res["_usage"] = raw_result["_usage"]
+    return final_res
 
 
 async def extract_multimodal(
@@ -493,18 +563,33 @@ async def extract_multimodal(
 
     # 4. Invoke the Vision LLM model (structured output → raw JSON fallback)
     raw_result = None
+    usage_info = None
     if hasattr(llm_model, "with_structured_output"):
         try:
-            structured_model = llm_model.with_structured_output(StructuredExtractionResult)
-            result = await structured_model.ainvoke(messages)
+            try:
+                structured_model = llm_model.with_structured_output(StructuredExtractionResult, include_raw=True)
+                res_dict = await structured_model.ainvoke(messages)
+                if isinstance(res_dict, dict):
+                    result = res_dict.get("parsed")
+                    raw_response = res_dict.get("raw")
+                else:
+                    result = res_dict
+                    raw_response = None
+            except TypeError:
+                structured_model = llm_model.with_structured_output(StructuredExtractionResult)
+                result = await structured_model.ainvoke(messages)
+                raw_response = None
+
             if isinstance(result, StructuredExtractionResult):
                 if not result.headers and not result.line_items:
                     raise ValueError("Structured output returned empty headers and line items")
                 raw_result = result.model_dump()
+                usage_info = _extract_usage_from_response(raw_response, model_fallback=getattr(llm_model, "model_name", None))
             elif isinstance(result, dict):
                 if not result.get("headers") and not result.get("line_items"):
                     raise ValueError("Structured output returned empty headers and line items")
                 raw_result = result
+                usage_info = _extract_usage_from_response(raw_response, model_fallback=getattr(llm_model, "model_name", None))
         except Exception as e:
             logger.warning(f"[Multimodal] with_structured_output failed: {e}. Falling back to raw JSON.")
 
@@ -548,6 +633,7 @@ async def extract_multimodal(
                     for c in row.get("columns", []) if isinstance(c, dict)
                 ]})
             raw_result = {"headers": clean_h, "line_items": clean_li}
+            usage_info = _extract_usage_from_response(response, model_fallback=getattr(llm_model, "model_name", None))
         except Exception as e:
             logger.error(f"[Multimodal] parsing failed: {e}")
             raw_result = {"headers": {}, "line_items": [], "error": f"Multimodal extraction failed: {str(e)}"}
@@ -590,11 +676,16 @@ async def extract_multimodal(
                 "columns": clean_cols
             })
 
-        return {
+        final_res = {
             "headers": filtered_headers,
             "line_items": filtered_line_items
         }
+        if usage_info:
+            final_res["_usage"] = usage_info
+        return final_res
 
+    if usage_info and isinstance(raw_result, dict):
+        raw_result["_usage"] = usage_info
     return raw_result
 
 

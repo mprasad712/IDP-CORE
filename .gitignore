@@ -19,3 +19,12 @@ ENV/
 
 # Local storage and keys
 **/knowledge_base_storage/
+
+# System-specific files
+.DS_Store
+**/.DS_Store
+
+# Temporary developer scratch scripts
+agentcore/src/backend/scratch/
+agentcore/src/backend/dump_models.py
+

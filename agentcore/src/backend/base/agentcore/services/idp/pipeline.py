@@ -53,6 +53,7 @@ from agentcore.services.idp.pre_processing import (
 )
 from agentcore.services.idp.restruct import build_merged_text
 from agentcore.services.idp.rules_engine import evaluate_rules
+from agentcore.services.idp.idp_tracing import create_idp_trace, end_idp_trace, start_span, end_span
 
 
 def _utcnow() -> datetime:
@@ -420,6 +421,11 @@ async def _hook_classify(session, document_id: UUID, base_agent, merged_text: st
             )
         result = result if isinstance(result, dict) else {}
 
+        # Sync predicted_type back to main session's doc object without full refresh
+        main_doc = await session.get(IdpDocument, document_id)
+        if main_doc and "predicted_type" in result:
+            main_doc.predicted_type = result["predicted_type"]
+
         # Hard-skip gate: classification returned a skip signal (type not in selected types)
         if result.get("skip"):
             flow.step("classify", "skip",
@@ -501,6 +507,7 @@ async def process_document(document_id: UUID, job_id: UUID | None = None) -> Non
 
 async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
     t0 = time.monotonic()
+    trace_ctx = None
     doc = await session.get(IdpDocument, document_id)
     if doc is None:
         logger.warning(f"[pipeline] document {document_id} not found; nothing to process")
@@ -566,6 +573,35 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         if not cfg.model_id:
             raise PipelineError("no model configured in agent graph")
 
+        # Resolve user name if document was uploaded by a user
+        user_name = None
+        if doc.uploaded_by:
+            try:
+                from agentcore.services.database.models.user.model import User
+                user_obj = await session.get(User, doc.uploaded_by)
+                if user_obj:
+                    user_name = user_obj.email or user_obj.username or str(doc.uploaded_by)
+            except Exception:
+                pass
+
+        try:
+            trace_ctx = await create_idp_trace(
+                session=session,
+                document_id=document_id,
+                job_id=job.id,
+                agent_id=base_agent.id,
+                agent_name=base_agent.name,
+                user_id=doc.uploaded_by,
+                user_name=user_name,
+                original_filename=doc.original_filename,
+                file_type=doc.file_type,
+                environment=getattr(cfg, "environment", "production"),
+                org_id=base_agent.org_id,
+                dept_id=base_agent.dept_id,
+            )
+        except Exception as tr_err:
+            logger.debug(f"Failed to start IDP Langfuse trace: {tr_err}")
+
         # Log the resolved agent configuration so the trail shows EXACTLY what this agent is set
         # to do for this document (which steps/features run, the model, the extraction mode).
         _features = [
@@ -612,9 +648,14 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         # 2. detect digital/scanned (per page)
         logger.info(f"[pipeline] {document_id}: classifying document (digital/scanned)")
         original_bytes = file_bytes
+        if trace_ctx:
+            start_span(trace_ctx, "detect_page_kind", inputs={"file_type": file_type, "size_bytes": len(original_bytes)})
         overall_kind, page_status = text_layer.classify_document(
             original_bytes, file_type, min_text_length=cfg.min_text_length
         )
+        if trace_ctx:
+            end_span(trace_ctx, "detect_page_kind", outputs={"overall_kind": overall_kind, "pages": len(page_status)})
+
         flow.step("detect", "ok", f"{overall_kind} ({len(page_status)} page(s))", page_status=page_status)
         logger.info(f"[pipeline] {document_id}: detected as {overall_kind} ({len(page_status)} pages)")
 
@@ -626,23 +667,54 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         # OCR runs only when scanned pages exist and never replaces native digital text.
         tokens: list[dict] = []
         if overall_kind == text_layer.DIGITAL:
+            if trace_ctx:
+                start_span(trace_ctx, "extract_native_text", inputs={"file_type": file_type})
             _, tokens = text_layer.extract_native_text(original_bytes, file_type)
+            if trace_ctx:
+                end_span(trace_ctx, "extract_native_text", outputs={"token_count": len(tokens)})
+
             _chars = sum(len(str(t.get("text", ""))) for t in tokens)
             flow.step("native", "ok", f"digital — native text layer used (no OCR): {len(tokens)} token(s), {_chars} chars",
                       io={"output": {"char_count": _chars, "token_count": len(tokens),
                                      "text_sample": _clip(" ".join(str(t.get("text", "")) for t in tokens))}})
         elif overall_kind == text_layer.SCANNED:
+            if trace_ctx:
+                start_span(trace_ctx, "preprocessing", inputs={"file_type": file_type})
             ocr_bytes = await _maybe_preprocess(original_bytes, file_type, cfg, flow)
+            if trace_ctx:
+                end_span(trace_ctx, "preprocessing", outputs={"bytes_length": len(ocr_bytes)})
+
+            if trace_ctx:
+                start_span(trace_ctx, "ocr", inputs={"ocr_lang": cfg.ocr_lang})
             tokens = await run_paddle_ocr(ocr_bytes, file_type, cfg.ocr_lang)
+            if trace_ctx:
+                end_span(trace_ctx, "ocr", outputs={"token_count": len(tokens)})
+
             _chars = sum(len(str(t.get("text", ""))) for t in tokens)
             flow.step("ocr", "ok", f"PaddleOCR ({cfg.ocr_lang}) output: {len(tokens)} token(s), {_chars} chars",
                       io={"output": {"char_count": _chars, "token_count": len(tokens),
                                      "text_sample": _clip(" ".join(str(t.get("text", "")) for t in tokens))}})
         else:  # mixed: native text for digital pages, OCR for scanned pages
+            if trace_ctx:
+                start_span(trace_ctx, "extract_native_text", inputs={"file_type": file_type})
             _, native = text_layer.extract_native_text(original_bytes, file_type)
+            if trace_ctx:
+                end_span(trace_ctx, "extract_native_text", outputs={"token_count": len(native)})
+
             tokens += [t for t in native if int(t.get("page_number", 1) or 1) in digital_pages]
+
+            if trace_ctx:
+                start_span(trace_ctx, "preprocessing", inputs={"file_type": file_type})
             ocr_bytes = await _maybe_preprocess(original_bytes, file_type, cfg, flow)
+            if trace_ctx:
+                end_span(trace_ctx, "preprocessing", outputs={"bytes_length": len(ocr_bytes)})
+
+            if trace_ctx:
+                start_span(trace_ctx, "ocr", inputs={"ocr_lang": cfg.ocr_lang})
             ocr = await run_paddle_ocr(ocr_bytes, file_type, cfg.ocr_lang)
+            if trace_ctx:
+                end_span(trace_ctx, "ocr", outputs={"token_count": len(ocr)})
+
             tokens += [t for t in ocr if int(t.get("page_number", 1) or 1) in scanned_pages]
             flow.step("ocr", "ok", f"mixed: native {len(digital_pages)} digital + OCR {len(scanned_pages)} scanned page(s)",
                       io={"output": {"token_count": len(tokens),
@@ -681,10 +753,16 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             await _save_artifact(
                 storage, agent_scope, f"flow_logs/{document_id}/flow.log", flow.render().encode("utf-8")
             )
+            if trace_ctx:
+                await end_idp_trace(trace_ctx, outputs={"status": "split", "child_ids": [str(cid) for cid in child_ids]})
             return
 
         # HOOK: B30 visual element detection — uses the original bytes (rasterised internally).
+        if trace_ctx:
+            start_span(trace_ctx, "visual_element_detection", inputs={"detect_enabled": cfg.detect_enabled})
         await _hook_detect(session, document_id, original_bytes, file_type, cfg, flow)
+        if trace_ctx:
+            end_span(trace_ctx, "visual_element_detection", outputs={"detect_enabled": cfg.detect_enabled})
 
         # Authoritative page count = max(classified pages, highest token page) so multi-sheet
         # office files (one classification entry, many token "pages") are NOT truncated.
@@ -703,7 +781,12 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         flow.step("pages", status, detail)
 
         # merged, page-numbered, layout-reconstructed text (citation-friendly)
+        if trace_ctx:
+            start_span(trace_ctx, "text_merge", inputs={"token_count": len(tokens)})
         merged_text = build_merged_text(tokens)
+        if trace_ctx:
+            end_span(trace_ctx, "text_merge", outputs={"char_count": len(merged_text)})
+
         await _save_artifact(
             storage, agent_scope, f"ocr_output/{document_id}/ocr_text.txt", merged_text.encode("utf-8")
         )
@@ -726,7 +809,27 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         # HOOK: B29 classification — may set cfg.predicted_type + auto-select a Named Config
         # (mutates cfg.field_config_id / cfg.extraction_mode) before extraction runs.
         # Returns True when doc_types filter is active and document type is not in selected list.
+        if trace_ctx:
+            start_span(trace_ctx, "classification", inputs={"classify_enabled": cfg.classify_enabled})
         classify_skip = await _hook_classify(session, document_id, base_agent, merged_text, cfg, flow)
+        
+        classify_usage = None
+        classify_model = None
+        # Extract classification token usage if available in the classification result or in the session context
+        # (We can pass it if we intercept the result; since _hook_classify returns bool, we don't have the result dict.
+        # But wait! We can update _hook_classify or just let the span record the classification step. Let's keep it simple.)
+        
+        if trace_ctx:
+            end_span(
+                trace_ctx, "classification",
+                outputs={
+                    "classify_skip": classify_skip,
+                    "predicted_type": doc.predicted_type if doc else None,
+                    "extraction_mode": cfg.extraction_mode,
+                    "field_config_id": str(cfg.field_config_id) if cfg.field_config_id else None
+                }
+            )
+
         if classify_skip:
             doc.status = "skipped"
             doc.processing_completed_at = _utcnow()
@@ -737,6 +840,8 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             session.add(doc)
             session.add(job)
             await session.commit()
+            if trace_ctx:
+                await end_idp_trace(trace_ctx, outputs={"status": "skipped"})
             return
 
         logger.info(f"[pipeline] {document_id}: starting extraction (mode={cfg.extraction_mode})")
@@ -764,18 +869,47 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                     overlap_tokens=cfg.long_doc_overlap_tokens,
                 )
                 flow.step("long_doc", "ok", f"{len(sections)} section(s) -> {len(chunk_texts)} chunk(s)")
+                
+                if trace_ctx:
+                    start_span(trace_ctx, "extraction", inputs={"chunk_count": len(chunk_texts), "long_doc": True}, observation_type="generation")
+
                 results: list[dict] = []
                 last_err: str | None = None
+                aggregated_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                models_used = set()
+
                 for i, ct in enumerate(chunk_texts):
+                    if trace_ctx:
+                        start_span(trace_ctx, f"extraction_chunk_{i+1}", inputs={"chunk_index": i}, observation_type="generation")
                     try:
                         res = await _extract_text(session, cfg, llm, ct)
+                        
+                        usage = None
+                        model = None
+                        if isinstance(res, dict) and "_usage" in res:
+                            usage = res.pop("_usage")
+                            if usage:
+                                model = usage.get("model")
+                                aggregated_usage["input_tokens"] += usage.get("input_tokens", 0)
+                                aggregated_usage["output_tokens"] += usage.get("output_tokens", 0)
+                                aggregated_usage["total_tokens"] += usage.get("total_tokens", 0)
+                                if model:
+                                    models_used.add(model)
+                                    
+                        if trace_ctx:
+                            end_span(trace_ctx, f"extraction_chunk_{i+1}", outputs=res, usage=usage, model=model)
+
                         if isinstance(res, dict) and res.get("error"):
                             last_err = str(res.get("error"))
                             flow.step("long_doc", "warn", f"chunk {i + 1}/{len(chunk_texts)} error: {last_err}")
                         results.append(res)
                     except PipelineError:
+                        if trace_ctx:
+                            end_span(trace_ctx, f"extraction_chunk_{i+1}", error="PipelineError")
                         raise
                     except Exception as e:
+                        if trace_ctx:
+                            end_span(trace_ctx, f"extraction_chunk_{i+1}", error=str(e))
                         last_err = str(e)
                         flow.step("long_doc", "warn", f"chunk {i + 1}/{len(chunk_texts)} failed ({e})")
                 if chunk_texts and not results:
@@ -785,11 +919,36 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                     if results
                     else {"headers": {}, "line_items": []}
                 )
+                if trace_ctx:
+                    primary_model = list(models_used)[0] if models_used else None
+                    end_span(
+                        trace_ctx, "extraction",
+                        outputs=extracted,
+                        usage=aggregated_usage if aggregated_usage["total_tokens"] > 0 else None,
+                        model=primary_model
+                    )
             else:
+                if trace_ctx:
+                    start_span(trace_ctx, "extraction", inputs={"text_length": len(merged_text), "long_doc": False}, observation_type="generation")
+
                 extracted = await _extract_text(session, cfg, llm, merged_text)
+                
+                usage = None
+                model = None
+                if isinstance(extracted, dict) and "_usage" in extracted:
+                    usage = extracted.pop("_usage")
+                    if usage:
+                        model = usage.get("model")
+
+                if trace_ctx:
+                    end_span(trace_ctx, "extraction", outputs=extracted, usage=usage, model=model)
         except PipelineError:
+            if trace_ctx:
+                end_span(trace_ctx, "extraction", error="PipelineError")
             raise
         except Exception as e:
+            if trace_ctx:
+                end_span(trace_ctx, "extraction", error=str(e))
             raise PipelineError(f"extraction failed: {e}") from e
 
         # Unify failure semantics across extraction modes: extract_dynamic swallows
@@ -803,11 +962,34 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             flow.step("extract", "warn", f"partial extraction: {extracted.get('error')}")
 
         # HOOK: B31 math reconcile — re-prompt the LLM to fix arithmetic BEFORE saving.
+        if trace_ctx:
+            start_span(trace_ctx, "math_reconcile", inputs={"attempts_max": cfg.math_reconcile_max_attempts}, observation_type="generation")
         extracted = await _hook_math_reconcile(extracted, llm, job, cfg, flow)
+        
+        reconcile_usage = None
+        reconcile_model = None
+        if isinstance(extracted, dict) and "_usage" in extracted:
+            reconcile_usage = extracted.pop("_usage")
+            if reconcile_usage:
+                reconcile_model = reconcile_usage.get("model")
+                
+        if trace_ctx:
+            end_span(
+                trace_ctx, "math_reconcile",
+                outputs=extracted,
+                usage=reconcile_usage,
+                model=reconcile_model
+            )
 
         # 6. save. NOTE: save_extraction_results commits internally, so extracted rows
         # persist even if a later step fails — intentional partial-result persistence
         # (the failure path also saves partials; the HITL review flow handles partials).
+        _headers = extracted.get("headers", {}) if isinstance(extracted, dict) else {}
+        n_head = len(_headers)
+        n_line = len(extracted.get("line_items", [])) if isinstance(extracted, dict) else 0
+        
+        if trace_ctx:
+            start_span(trace_ctx, "save_results", inputs={"n_headers": n_head, "n_line_items": n_line})
         overall_conf = await save_extraction_results(
             session=session,
             document_id=document_id,
@@ -815,9 +997,9 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             extraction_result=extracted if isinstance(extracted, dict) else {},
             ocr_tokens=tokens,
         )
-        _headers = extracted.get("headers", {}) if isinstance(extracted, dict) else {}
-        n_head = len(_headers)
-        n_line = len(extracted.get("line_items", [])) if isinstance(extracted, dict) else 0
+        if trace_ctx:
+            end_span(trace_ctx, "save_results", outputs={"overall_confidence": overall_conf})
+            
         _names = list(_headers.keys())
         _preview = ", ".join(_names[:12]) + ("…" if len(_names) > 12 else "")
         job.extraction_mode_used = cfg.extraction_mode
@@ -844,17 +1026,26 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         if cfg.entity_linking_enabled:
             try:
                 from agentcore.services.idp.entity_linking import link_entities
-
+                if trace_ctx:
+                    start_span(trace_ctx, "entity_linking")
                 n_links = await link_entities(
                     session, document_id, extracted if isinstance(extracted, dict) else {}, tokens
                 )
+                if trace_ctx:
+                    end_span(trace_ctx, "entity_linking", outputs={"links_count": n_links})
                 if n_links:
                     flow.step("entity_link", "ok", f"{n_links} cross-page entity link(s)")
             except Exception as e:  # pragma: no cover - linking must never fail the doc
+                if trace_ctx:
+                    end_span(trace_ctx, "entity_linking", error=str(e))
                 flow.step("entity_link", "warn", f"skipped ({e})")
 
         # 7. route — the rules engine (B17) decides auto_approve vs pending_review.
+        if trace_ctx:
+            start_span(trace_ctx, "rules_evaluation", inputs={"overall_confidence": overall_conf})
         new_status = await _route(session, document_id, job.id, idp_agent.id, overall_conf, cfg, flow)
+        if trace_ctx:
+            end_span(trace_ctx, "rules_evaluation", outputs={"new_status": new_status})
 
         # 8. finalize
         doc = await session.get(IdpDocument, document_id)  # refresh (save committed)
@@ -873,8 +1064,15 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         await _save_artifact(
             storage, agent_scope, f"flow_logs/{document_id}/flow.log", flow.render().encode("utf-8")
         )
+        if trace_ctx:
+            await end_idp_trace(trace_ctx, outputs={"status": new_status}, processing_time_ms=ms)
 
     except Exception as e:
+        if trace_ctx:
+            try:
+                await end_idp_trace(trace_ctx, error=e)
+            except Exception as tr_err:
+                logger.debug(f"Error ending IDP trace: {tr_err}")
         message = str(e)
         if not isinstance(e, PipelineError):
             logger.exception(f"[pipeline] unexpected error processing {document_id}")

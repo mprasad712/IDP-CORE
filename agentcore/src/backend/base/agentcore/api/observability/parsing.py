@@ -33,6 +33,20 @@ def clear_request_caches() -> None:
     _REQUEST_METRICS_CACHE.clear()
 
 
+def is_http_trace_name(name: Any) -> bool:
+    """Return True if the trace name represents an HTTP request method (e.g. GET, POST)."""
+    if not name or not isinstance(name, str):
+        return False
+    name_upper = name.upper().strip()
+    methods = {"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"}
+    if name_upper in methods:
+        return True
+    for method in methods:
+        if name_upper.startswith(method + " "):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Attribute helpers
 # ---------------------------------------------------------------------------
@@ -633,7 +647,7 @@ def fetch_observations_for_trace(client: Any, trace_id: str) -> list:
     if observations:
         _cache_and_return_observations(trace_id_str, observations, cache_key=obs_cache_key)
     else:
-        logger.info(
+        logger.debug(
             "fetch_obs[{}]: ALL methods failed — returning empty (is_v3={}, has_api={}, has_fetch_obs={})",
             trace_id_str[:8],
             is_v3_client(client),

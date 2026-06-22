@@ -46,10 +46,16 @@ def _get_fastapi_excluded_urls() -> str:
     2) default: exclude only infra endpoints so API routes are traced
     """
     explicit_excluded_urls = os.getenv("OTEL_FASTAPI_EXCLUDED_URLS", "").strip()
+    
+    # Exclude polling and internal utility URLs to prevent trace storms
+    internal_exclusions = (
+        ".*dashboard.*,.*whoami.*,.*store/check.*,.*observability.*,.*notifications.*,.*ready.*,.*config.*,.*version.*,.*cost-limits.*"
+    )
+    
     if explicit_excluded_urls:
-        return explicit_excluded_urls
+        return f"{explicit_excluded_urls},{internal_exclusions}"
 
-    return "/health,/health_check,/metrics"
+    return f"/health,/health_check,/metrics,{internal_exclusions}"
 
 
 def _setup_sqlalchemy_instrumentation() -> None:
