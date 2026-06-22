@@ -285,26 +285,45 @@ async def test_report_export_summary_formats(setup_report_data):
 
 
 @pytest.mark.anyio
-async def test_report_export_data_combined(setup_report_data):
+async def test_report_export_data_wide(setup_report_data):
+    """All-data export is the per-file WIDE layout: header fields as columns (first row only),
+    line items as table_* rows, files stacked. doc1 = 2 line rows + reviewed vendor; doc2 = 1
+    header-only row; doc3 hidden."""
     global mock_user
     data = setup_report_data
     mock_user = data["user"]
     app, client = _client()
 
-    # both (default): predicted/audited/is_reviewed columns present
+    # both (default): each header/line field → value + (audited) + (conf) columns
     both = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv"})
     assert both.status_code == 200
     text = both.content.decode("utf-8-sig")
-    header = next(csv.reader(io.StringIO(text)))
-    assert "predicted_value" in header and "audited_value" in header and "is_reviewed" in header
-    assert "Acme Corp" in text   # the reviewed vendor field's audited value
+    rows = list(csv.reader(io.StringIO(text)))
+    header = rows[0]
+    assert "file name" in header
+    assert "vendor" in header and "vendor (audited)" in header and "vendor (conf)" in header
+    assert "table_item" in header and "table_qty" in header
+    assert "Acme" in text and "Acme Corp" in text   # predicted + audited vendor value
+    assert "po_alpha.pdf" in text and "po_beta.pdf" in text
     assert "po_hidden" not in text
+    # doc1 → 2 line-item rows, doc2 → 1 header-only row = 3 data rows
+    assert len(rows) - 1 == 3
 
-    # final: a single 'value' column
-    final = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv", "values": "final"})
+    # final: a single value per field, no (audited)/(conf) variants
+    final = client.get(
+        "/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv", "values": "final"}
+    )
     assert final.status_code == 200
-    fheader = next(csv.reader(io.StringIO(final.content.decode("utf-8-sig"))))
-    assert "value" in fheader and "predicted_value" not in fheader
+    ftext = final.content.decode("utf-8-sig")
+    fheader = next(csv.reader(io.StringIO(ftext)))
+    assert "vendor" in fheader and "table_item" in fheader
+    assert "vendor (audited)" not in fheader and "predicted_value" not in fheader
+    assert "Acme Corp" in ftext       # vendor final value = reviewed
+
+    # excel + xml still produce valid attachments
+    xl = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "excel"})
+    assert xl.status_code == 200 and xl.content[:2] == b"PK"
+    assert client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "xml"}).status_code == 200
 
     # bad values → 400
     assert client.get("/api/v1/idp/reports/processed-docs/export-data", params={"values": "nope"}).status_code == 400
