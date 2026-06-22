@@ -285,40 +285,42 @@ async def test_report_export_summary_formats(setup_report_data):
 
 
 @pytest.mark.anyio
-async def test_report_export_data_wide(setup_report_data):
-    """All-data export is the per-file WIDE layout: header fields as columns (first row only),
-    line items as table_* rows, files stacked. doc1 = 2 line rows + reviewed vendor; doc2 = 1
-    header-only row; doc3 hidden."""
+async def test_report_export_data_sectioned(setup_report_data):
+    """All-data export = sectioned per-file blocks (file-info + HEADER FIELDS table beside a
+    LINE ITEMS table), stacked. doc1 = 2 line rows + reviewed vendor; doc2 = header-only; doc3 hidden.
+    Line items are audit-aware just like headers."""
     global mock_user
     data = setup_report_data
     mock_user = data["user"]
     app, client = _client()
 
-    # both (default): each header/line field → value + (audited) + (conf) columns
+    # both (default): each header + line field shows Predicted / Audited / Reviewed / Confidence
     both = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv"})
     assert both.status_code == 200
     text = both.content.decode("utf-8-sig")
-    rows = list(csv.reader(io.StringIO(text)))
-    header = rows[0]
-    assert "file name" in header
-    assert "vendor" in header and "vendor (audited)" in header and "vendor (conf)" in header
-    assert "table_item" in header and "table_qty" in header
-    assert "Acme" in text and "Acme Corp" in text   # predicted + audited vendor value
-    assert "po_alpha.pdf" in text and "po_beta.pdf" in text
-    assert "po_hidden" not in text
-    # doc1 → 2 line-item rows, doc2 → 1 header-only row = 3 data rows
-    assert len(rows) - 1 == 3
+    cells = [c for row in csv.reader(io.StringIO(text)) for c in row]
+    # per-file sections + side-by-side table labels
+    assert "FILE  po_alpha.pdf" in cells and "FILE  po_beta.pdf" in cells
+    assert "FILE  po_hidden.pdf" not in cells          # hidden doc excluded
+    assert "HEADER FIELDS" in cells and "LINE ITEMS" in cells
+    # header table sub-headers + line-item audit columns (line items audited like headers)
+    assert "Field" in cells and "Predicted" in cells and "Audited" in cells and "Confidence" in cells
+    assert "item" in cells and "item (audited)" in cells and "qty (conf)" in cells
+    # vendor predicted + audited both present
+    assert "Acme" in text and "Acme Corp" in text
+    # file-info block carries metadata + reviewer (doc1 has a review session)
+    assert "Reviewed by" in cells and "Confidence" in cells
 
-    # final: a single value per field, no (audited)/(conf) variants
+    # final: single value per field/cell, no audited/conf variants
     final = client.get(
         "/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv", "values": "final"}
     )
     assert final.status_code == 200
     ftext = final.content.decode("utf-8-sig")
-    fheader = next(csv.reader(io.StringIO(ftext)))
-    assert "vendor" in fheader and "table_item" in fheader
-    assert "vendor (audited)" not in fheader and "predicted_value" not in fheader
-    assert "Acme Corp" in ftext       # vendor final value = reviewed
+    fcells = [c for row in csv.reader(io.StringIO(ftext)) for c in row]
+    assert "Field" in fcells and "Value" in fcells
+    assert "Predicted" not in fcells and "item (audited)" not in fcells
+    assert "Acme Corp" in ftext        # vendor final value = the reviewed value
 
     # excel + xml still produce valid attachments
     xl = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "excel"})

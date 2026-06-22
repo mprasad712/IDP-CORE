@@ -11,6 +11,9 @@ from typing import Iterable, Sequence
 
 from agentcore.services.idp.output.schema import build_doc_payload
 from agentcore.services.idp.output.serializers import (
+    matrix_to_csv,
+    matrix_to_xlsx,
+    matrix_to_xml,
     tabular_to_csv,
     tabular_to_xlsx,
     tabular_to_xml,
@@ -25,6 +28,7 @@ __all__ = [
     "build_doc_payload",
     "serialize_document",
     "serialize_table",
+    "serialize_matrix",
     "SUPPORTED_FORMATS",
     "SUPPORTED_TABULAR_FORMATS",
 ]
@@ -50,6 +54,12 @@ _TABULAR_SERIALIZERS = {
     "csv": (tabular_to_csv, "text/csv"),
     "excel": (tabular_to_xlsx, _XLSX_MEDIA),
     "xml": (tabular_to_xml, "application/xml"),
+}
+
+_MATRIX_SERIALIZERS = {
+    "csv": (matrix_to_csv, "text/csv"),
+    "excel": (matrix_to_xlsx, _XLSX_MEDIA),
+    "xml": (matrix_to_xml, "application/xml"),
 }
 
 
@@ -90,4 +100,20 @@ def serialize_table(
         data = fn(columns, rows, root_tag=root_tag, row_tag=row_tag)
     else:
         data = fn(columns, rows)
+    return data, media, _EXT[key]
+
+
+def serialize_matrix(matrix, fmt: str, *, sheet_name: str = "Data") -> tuple[bytes, str, str]:
+    """Serialize a positional matrix (list of ragged rows) → ``(bytes, media_type, ext)``.
+
+    Used for the sectioned "Download all data" export. Raises ``ValueError`` for a format
+    not in :data:`SUPPORTED_TABULAR_FORMATS`.
+    """
+    key = (fmt or "").lower()
+    if key not in _MATRIX_SERIALIZERS:
+        raise ValueError(
+            f"Unsupported matrix format: {fmt!r}. Supported: {sorted(SUPPORTED_TABULAR_FORMATS)}"
+        )
+    fn, media = _MATRIX_SERIALIZERS[key]
+    data = fn(matrix, sheet_name=sheet_name) if key == "excel" else fn(matrix)
     return data, media, _EXT[key]

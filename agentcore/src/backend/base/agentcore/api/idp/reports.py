@@ -18,9 +18,16 @@ from fastapi.responses import StreamingResponse
 from fastapi_pagination import Page, Params
 from fastapi_pagination.ext.sqlmodel import apaginate
 from pydantic import BaseModel
+from sqlmodel import select
 
 from agentcore.api.utils import CurrentActiveUser, DbSession
-from agentcore.services.idp.output import SUPPORTED_TABULAR_FORMATS, serialize_table
+from agentcore.services.database.models.idp.config import IdpReviewSession
+from agentcore.services.database.models.user.model import User
+from agentcore.services.idp.output import (
+    SUPPORTED_TABULAR_FORMATS,
+    serialize_matrix,
+    serialize_table,
+)
 from agentcore.services.idp.reports import (
     MAX_EXPORT_ROWS,
     build_header_export_query,
@@ -63,10 +70,10 @@ REPORT_COLUMNS = [
     "header_count", "line_item_count", "has_log",
 ]
 
-# "Download all data" wide layout: per-file block — header fields as columns (filled on the
-# file's first row, blank below), line items as `table_*` columns (one row per line item),
-# files stacked in a single sheet. These metadata columns lead every block.
-_WIDE_META = ["file name", "document_id", "status", "uploaded", "processed"]
+# "Download all data" = sectioned layout: one block per file (file-info → header-fields table
+# beside a line-items table), blocks stacked down a single sheet. Each block carries only that
+# file's own fields, so mixed document types render correctly (no global union heading).
+_GAP = 1  # blank spacer column(s) between the header table (left) and line-items table (right)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -126,106 +133,150 @@ def _report_export_dict(row) -> dict:
     }
 
 
-def _put_value(row: dict, base: str, rec, values: str) -> None:
-    """Write a header field / line-item cell into ``row`` under column(s) derived from ``base``.
+def _group_docs(hrows, lrows):
+    """Group export rows by document → ``OrderedDict[doc_id] = {meta, headers, lines}``.
 
-    ``values='final'`` → one column (audited-or-predicted value). ``values='both'`` → three
-    columns: ``base`` (predicted), ``base (audited)`` (only when reviewed, else blank), and
-    ``base (conf)`` (confidence %). A missing field/cell (``rec is None``) leaves blanks.
-    """
-    if values == "final":
-        row[base] = "" if rec is None else (rec.reviewed_value if rec.is_reviewed else rec.extracted_value)
-        return
-    if rec is None:
-        row[base] = ""
-        row[f"{base} (audited)"] = ""
-        row[f"{base} (conf)"] = ""
-    else:
-        row[base] = rec.extracted_value
-        row[f"{base} (audited)"] = rec.reviewed_value if rec.is_reviewed else None
-        row[f"{base} (conf)"] = _pct(rec.confidence_score)
-
-
-def _wide_columns(header_fields: list[str], line_cols: list[str], values: str) -> list[str]:
-    cols = list(_WIDE_META)
-    if values == "final":
-        cols += list(header_fields) + [f"table_{c}" for c in line_cols]
-    else:
-        for f in header_fields:
-            cols += [f, f"{f} (audited)", f"{f} (conf)"]
-        for c in line_cols:
-            tc = f"table_{c}"
-            cols += [tc, f"{tc} (audited)", f"{tc} (conf)"]
-    return cols
-
-
-def _wide_rows(hrows, lrows, values: str) -> tuple[list[str], list[dict]]:
-    """Build the per-file wide layout. Returns ``(columns, rows)``.
-
-    Header fields and line-item columns are the (alphabetically sorted) union across all
-    in-range files, so files with different schemas still line up. For each file: metadata +
-    header values go on the FIRST row; each line item is its own row (``table_*`` columns);
-    ``file name`` repeats on every row; the header columns stay blank below the first row.
+    ``headers`` is ``{field_name: rec}``; ``lines`` is ``{row_index: {column_name: rec}}``.
+    Each file keeps only its OWN fields (no cross-file union), so mixed doc types stay clean.
     """
     from collections import OrderedDict
 
     docs: "OrderedDict[str, dict]" = OrderedDict()
-    header_fields: list[str] = []
-    line_cols: list[str] = []
-    seen_h: set[str] = set()
-    seen_l: set[str] = set()
 
     def _doc(r) -> dict:
         did = str(r.document_id)
         d = docs.get(did)
         if d is None:
+            conf = _pct(getattr(r, "overall_confidence", None))
             d = {
                 "meta": {
                     "file name": r.filename,
-                    "document_id": did,
+                    "type": r.predicted_type or "—",
                     "status": r.doc_status,
-                    "uploaded": _iso(getattr(r, "uploaded_at", None)),
-                    "processed": _iso(getattr(r, "processed_at", None)),
+                    "confidence": f"{conf}%" if conf is not None else "—",
+                    "uploaded": _iso(getattr(r, "uploaded_at", None)) or "—",
+                    "processed": _iso(getattr(r, "processed_at", None)) or "—",
                 },
-                "headers": {},   # field_name -> rec
-                "lines": {},     # row_index -> {column_name -> rec}
+                "headers": {},
+                "lines": {},
             }
             docs[did] = d
         return d
 
     for r in hrows:
-        d = _doc(r)
-        d["headers"][r.name] = r
-        if r.name not in seen_h:
-            seen_h.add(r.name)
-            header_fields.append(r.name)
+        _doc(r)["headers"][r.name] = r
     for r in lrows:
-        d = _doc(r)
-        d["lines"].setdefault(r.row_index, {})[r.name] = r
-        if r.name not in seen_l:
-            seen_l.add(r.name)
-            line_cols.append(r.name)
+        _doc(r)["lines"].setdefault(r.row_index, {})[r.name] = r
+    return docs
 
-    header_fields.sort()
-    line_cols.sort()
-    columns = _wide_columns(header_fields, line_cols, values)
 
-    out: list[dict] = []
-    for d in docs.values():
-        row_indexes = sorted(d["lines"].keys())
-        n = max(1, len(row_indexes))  # a header-only file still gets one row
-        for i in range(n):
-            row: dict = {"file name": d["meta"]["file name"]}  # file name on every row
-            if i == 0:
-                row.update(d["meta"])  # metadata + header values only on the first row
-                for f in header_fields:
-                    _put_value(row, f, d["headers"].get(f), values)
-            if i < len(row_indexes):
-                cells = d["lines"][row_indexes[i]]
-                for c in line_cols:
-                    _put_value(row, f"table_{c}", cells.get(c), values)
-            out.append(row)
-    return columns, out
+async def _latest_reviews(session, doc_ids: list) -> dict:
+    """Map ``str(doc_id) -> {reviewer, reviewed_at, final_status}`` from the latest review session."""
+    if not doc_ids:
+        return {}
+    rows = (
+        await session.exec(
+            select(
+                IdpReviewSession.document_id,
+                IdpReviewSession.review_completed_at,
+                IdpReviewSession.final_status,
+                User.username,
+            )
+            .join(User, IdpReviewSession.reviewed_by == User.id, isouter=True)
+            .where(IdpReviewSession.document_id.in_(doc_ids))
+            .order_by(IdpReviewSession.document_id, IdpReviewSession.created_at.desc())
+        )
+    ).all()
+    out: dict = {}
+    for did, completed_at, final_status, username in rows:
+        key = str(did)
+        if key not in out:  # first per doc = latest (created_at desc)
+            out[key] = {
+                "reviewer": username or "—",
+                "reviewed_at": _iso(completed_at) or "—",
+                "final_status": final_status or "—",
+            }
+    return out
+
+
+def _hdr_subheader(values: str) -> list[str]:
+    return ["Field", "Value"] if values == "final" else ["Field", "Predicted", "Audited", "Reviewed", "Confidence"]
+
+
+def _hdr_row(field_name: str, rec, values: str) -> list:
+    if values == "final":
+        val = "" if rec is None else (rec.reviewed_value if rec.is_reviewed else rec.extracted_value)
+        return [field_name, val]
+    if rec is None:
+        return [field_name, "", "", "", ""]
+    return [
+        field_name,
+        rec.extracted_value,
+        rec.reviewed_value if rec.is_reviewed else "",
+        "yes" if rec.is_reviewed else "no",
+        _pct(rec.confidence_score),
+    ]
+
+
+def _line_subheader(line_cols: list[str], values: str) -> list[str]:
+    if values == "final":
+        return ["Row", *line_cols]
+    cols = ["Row"]
+    for c in line_cols:
+        cols += [c, f"{c} (audited)", f"{c} (conf)"]
+    return cols
+
+
+def _line_row(row_index, cells: dict, line_cols: list[str], values: str) -> list:
+    out: list = [row_index]
+    for c in line_cols:
+        rec = cells.get(c)
+        if values == "final":
+            out.append("" if rec is None else (rec.reviewed_value if rec.is_reviewed else rec.extracted_value))
+        elif rec is None:
+            out += ["", "", ""]
+        else:
+            out += [rec.extracted_value, rec.reviewed_value if rec.is_reviewed else "", _pct(rec.confidence_score)]
+    return out
+
+
+def _section_matrix(docs, review_map: dict, values: str) -> list[list]:
+    """Build the full sheet as a positional matrix: one stacked section per file."""
+    matrix: list[list] = []
+    hdr_sub = _hdr_subheader(values)
+    left_w = len(hdr_sub)
+
+    for did, d in docs.items():
+        m = d["meta"]
+        rv = review_map.get(did)
+        # File-info block
+        matrix.append([f"FILE  {m['file name']}"])
+        matrix.append(["Type", m["type"], "", "Status", m["status"]])
+        matrix.append(["Confidence", m["confidence"], "", "Uploaded", m["uploaded"]])
+        matrix.append(["Processed", m["processed"], "", "Reviewed by", rv["reviewer"] if rv else "—"])
+        matrix.append(["Review", rv["final_status"] if rv else "—", "", "Reviewed at", rv["reviewed_at"] if rv else "—"])
+        matrix.append([])  # blank
+
+        # Per-file fields (this file's own columns only)
+        header_fields = sorted(d["headers"].keys())
+        line_cols = sorted({c for cells in d["lines"].values() for c in cells}) if d["lines"] else []
+
+        # Section labels + sub-headers, header table beside line-items table
+        label = [""] * (left_w + _GAP)
+        label[0] = "HEADER FIELDS"
+        label.append("LINE ITEMS")
+        matrix.append(label)
+        matrix.append([*hdr_sub, *([""] * _GAP), *_line_subheader(line_cols, values)])
+
+        hdr_rows = [_hdr_row(f, d["headers"][f], values) for f in header_fields]
+        li_rows = [_line_row(ri, d["lines"][ri], line_cols, values) for ri in sorted(d["lines"])]
+        for i in range(max(len(hdr_rows), len(li_rows))):
+            left = hdr_rows[i] if i < len(hdr_rows) else [""] * left_w
+            right = li_rows[i] if i < len(li_rows) else []
+            matrix.append([*left, *([""] * _GAP), *right])
+
+        matrix.append([])  # separator before the next file's section
+    return matrix
 
 
 def _filters(agent_id, status_filter, predicted_type, created_start, created_end) -> dict:
@@ -324,12 +375,13 @@ async def export_processed_docs_data(
     created_start: datetime | None = None,
     created_end: datetime | None = None,
 ):
-    """Download every in-range PO's extracted data in the per-file WIDE layout.
+    """Download every in-range PO's extracted data in the per-file SECTIONED layout.
 
-    One single sheet/file with each PO as a block: header fields as columns (filled on the
-    file's first row, blank below) + line items as ``table_*`` columns (one row per line item),
-    files stacked. ``values='final'`` → one value per field; ``values='both'`` adds an
-    ``(audited)`` and ``(conf)`` column per field.
+    One single sheet with a self-contained block per file: a file-info header (type · status ·
+    confidence · uploaded · processed · reviewed by/at) above a HEADER FIELDS table beside a
+    LINE ITEMS table, files stacked. Each file carries only its own fields, so mixed document
+    types render cleanly. ``values='final'`` → one value per field/cell; ``values='both'`` →
+    Predicted · Audited · Reviewed · Confidence on every header field AND every line-item cell.
     """
     fmt = (format or "").lower()
     if fmt not in SUPPORTED_TABULAR_FORMATS:
@@ -341,8 +393,7 @@ async def export_processed_docs_data(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="values must be 'both' or 'final'.")
 
     is_root, org_ids = await resolve_org_scope(session, current_user)
-    columns: list[str] = _wide_columns([], [], values)
-    rows: list[dict] = []
+    matrix: list[list] = []
     if is_root or org_ids:
         filters = _filters(agent_id, status_filter, predicted_type, created_start, created_end)
         hstmt = build_header_export_query(is_root, org_ids, filters)
@@ -355,8 +406,9 @@ async def export_processed_docs_data(
             )
         hrows = (await session.exec(hstmt.limit(MAX_EXPORT_ROWS))).all()
         lrows = (await session.exec(lstmt.limit(MAX_EXPORT_ROWS))).all()
-        columns, rows = _wide_rows(hrows, lrows, values)
-    data, media, ext = serialize_table(
-        columns, rows, fmt, sheet_name="All Data", root_tag="data", row_tag="row"
-    )
+        docs = _group_docs(hrows, lrows)
+        doc_ids = list({r.document_id for r in hrows} | {r.document_id for r in lrows})
+        review_map = await _latest_reviews(session, doc_ids)
+        matrix = _section_matrix(docs, review_map, values)
+    data, media, ext = serialize_matrix(matrix, fmt, sheet_name="All Data")
     return _attachment(data, media, f"processed_docs_data.{ext}")

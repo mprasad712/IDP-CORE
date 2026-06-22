@@ -205,3 +205,39 @@ def tabular_to_xml(
             val = r.get(c)
             cel.text = None if val is None else str(val)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+# ───────────────── matrix serializers (positional grids — sectioned exports) ─────────────────
+# A "matrix" is a list of rows, each row a list of raw cell values (ragged rows allowed). Used
+# for the sectioned "Download all data" layout where each file is its own block (file-info +
+# header table beside a line-items table), so there is no single uniform column set.
+
+def matrix_to_csv(matrix: Iterable[Sequence]) -> bytes:
+    out = io.StringIO()
+    w = csv.writer(out)
+    for row in matrix:
+        w.writerow([_scalar(c) for c in row])
+    return out.getvalue().encode("utf-8-sig")
+
+
+def matrix_to_xlsx(matrix: Iterable[Sequence], *, sheet_name: str = "Data") -> bytes:
+    # write_only streams rows to disk → bounded memory for large stacked exports.
+    wb = openpyxl.Workbook(write_only=True)
+    ws = wb.create_sheet(title=str(sheet_name)[:31])
+    for row in matrix:
+        ws.append([_scalar(c) for c in row])
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+def matrix_to_xml(
+    matrix: Iterable[Sequence], *, root_tag: str = "data", row_tag: str = "row", cell_tag: str = "c"
+) -> bytes:
+    root = ET.Element(root_tag)
+    for row in matrix:
+        rel = ET.SubElement(root, row_tag)
+        for c in row:
+            cel = ET.SubElement(rel, cell_tag)
+            cel.text = None if c is None or c == "" else str(c)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
