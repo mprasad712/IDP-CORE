@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from uuid import UUID, uuid4
 from loguru import logger
 from pydantic import BaseModel, Field
 from typing import Dict, Optional
 from sqlmodel import select
+
+_LLM_TIMEOUT = 120  # seconds
 
 from agentcore.services.database.models.idp.documents import IdpDocument, IdpDocumentClassification
 from agentcore.services.database.models.idp.config import (
@@ -17,6 +20,7 @@ from agentcore.services.database.models.idp.config import (
 from agentcore.services.database.models.agent.model import Agent
 from agentcore.services.idp.agent_config import resolve_pipeline_config
 from agentcore.services.idp.catalogue import DEFAULT_TEMPLATES
+from agentcore.services.idp.extraction import _extract_usage_from_response
 
 
 class ClassificationResult(BaseModel):
@@ -33,6 +37,7 @@ async def classify_and_persist(
     *,
     auto_select: bool,
     threshold: float,
+    doc_types: Optional[list[str]] = None,
 ) -> dict:
     """Classify the document type from layout text, persisting results and auto-configuring templates.
 
@@ -43,9 +48,13 @@ async def classify_and_persist(
         org_id: The organization UUID scoping this action.
         auto_select: If True, resolves or clones the Named Config when confidence is high.
         threshold: The confidence limit above which auto-selection takes effect.
+        doc_types: If non-empty, restrict classification to only these types. Documents that
+            do not match any selected type are skipped (result["skip"] = True). When None or
+            empty, all DEFAULT_TEMPLATES types are used as candidates (unchanged behaviour).
 
     Returns:
         A dict matching {"predicted_type", "confidence", "candidates", "selected_config_id"}.
+        When the document is filtered out, the dict also contains {"skip": True}.
     """
     # 1. Resolve Document and Agent Config
     doc = await session.get(IdpDocument, document_id)
@@ -84,7 +93,12 @@ async def classify_and_persist(
     )
 
     # 3. Build Prompt
-    types_list = [t["name"] for t in DEFAULT_TEMPLATES]
+    # If the canvas DocumentClassifier has specific types selected, use only those;
+    # otherwise fall back to the full DEFAULT_TEMPLATES catalogue.
+    if doc_types:
+        types_list = doc_types
+    else:
+        types_list = [t["name"] for t in DEFAULT_TEMPLATES]
     types_desc = ", ".join(types_list)
 
     system_prompt = (
@@ -104,16 +118,30 @@ async def classify_and_persist(
 
     # 4. Invoke LLM and Parse
     result = None
+    usage_info = None
     if hasattr(llm_model, "with_structured_output"):
         try:
-            structured_model = llm_model.with_structured_output(ClassificationResult)
-            result = await structured_model.ainvoke(messages)
+            try:
+                structured_model = llm_model.with_structured_output(ClassificationResult, include_raw=True)
+                res_dict = await asyncio.wait_for(structured_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
+                if isinstance(res_dict, dict):
+                    result = res_dict.get("parsed")
+                    raw_response = res_dict.get("raw")
+                else:
+                    result = res_dict
+                    raw_response = None
+            except TypeError:
+                structured_model = llm_model.with_structured_output(ClassificationResult)
+                result = await asyncio.wait_for(structured_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
+                raw_response = None
+            usage_info = _extract_usage_from_response(raw_response, model_fallback=getattr(llm_model, "model_name", None))
         except Exception as e:
             logger.warning(f"[Classification] structured output failed: {e}. Falling back to standard JSON parsing.")
 
     if result is None:
         try:
-            response = await llm_model.ainvoke(messages)
+            response = await asyncio.wait_for(llm_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
+            usage_info = _extract_usage_from_response(response, model_fallback=getattr(llm_model, "model_name", None))
             content = response.content if hasattr(response, "content") else str(response)
             content = content.strip()
             if content.startswith("```"):
@@ -145,7 +173,7 @@ async def classify_and_persist(
     except (TypeError, ValueError):
         conf = 0.0
 
-    # Normalize prediction to match catalog template casing
+    # Normalize prediction casing: try DEFAULT_TEMPLATES first, then user doc_types list
     predicted_type = result.predicted_type
     matched_template = None
     for t in DEFAULT_TEMPLATES:
@@ -153,6 +181,43 @@ async def classify_and_persist(
             matched_template = t
             predicted_type = t["name"]
             break
+    if matched_template is None and doc_types:
+        for dt in doc_types:
+            if dt.strip().lower() == predicted_type.strip().lower():
+                predicted_type = dt
+                break
+
+    # Hard-skip gate: if doc_types filter is active and the classified type is not in the
+    # selected list (including "unknown"), mark the document as skipped and abort the pipeline.
+    if doc_types:
+        type_matched = any(dt.strip().lower() == predicted_type.strip().lower() for dt in doc_types)
+        if not type_matched:
+            logger.info(
+                f"[Classification] doc {document_id}: predicted_type={predicted_type!r} "
+                f"not in selected types {doc_types!r} — skipping document."
+            )
+            doc.predicted_type = predicted_type
+            session.add(doc)
+            session.add(IdpDocumentClassification(
+                id=uuid4(),
+                document_id=document_id,
+                predicted_type=predicted_type,
+                confidence=conf,
+                candidates=result.candidates,
+                selected_config_id=None,
+                is_selected=False,
+            ))
+            await session.commit()
+            res = {
+                "predicted_type": predicted_type,
+                "confidence": conf,
+                "candidates": result.candidates,
+                "selected_config_id": None,
+                "skip": True,
+            }
+            if usage_info:
+                res["_usage"] = usage_info
+            return res
 
     selected_config_id = None
 
@@ -242,9 +307,12 @@ async def classify_and_persist(
     session.add(doc)
     await session.commit()
 
-    return {
+    res = {
         "predicted_type": predicted_type,
         "confidence": conf,
         "candidates": result.candidates,
         "selected_config_id": selected_config_id
     }
+    if usage_info:
+        res["_usage"] = usage_info
+    return res

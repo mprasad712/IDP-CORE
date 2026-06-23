@@ -14,15 +14,16 @@ from agentcore.services.database.models.user.model import User, UserUpdate
 
 
 def _role_priority(role: str | None) -> int:
-    normalized = normalize_role(role or "consumer")
+    normalized = normalize_role(role or "doc_submitter")
     priorities = {
         "root": 500,
         "super_admin": 400,
-        "leader_executive": 350,
+        "idp_auditor": 350,
         "department_admin": 300,
-        "developer": 200,
-        "business_user": 200,
-        "consumer": 100,
+        "idp_configurator": 200,
+        "doc_reviewer": 200,
+        "doc_submitter": 100,
+        "doc_approver": 150,
     }
     return priorities.get(normalized, 0)
 

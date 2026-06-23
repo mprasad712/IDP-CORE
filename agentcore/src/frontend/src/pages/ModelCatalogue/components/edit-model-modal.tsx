@@ -228,7 +228,7 @@ export default function EditModelModal({
 
   useEffect(() => {
     if (!open) return;
-    if ((normalizedRole === "developer" || normalizedRole === "department_admin") && visibilityOptions.departments.length > 0) {
+    if ((normalizedRole === "idp_configurator" || normalizedRole === "department_admin") && visibilityOptions.departments.length > 0) {
       const firstDept = visibilityOptions.departments[0];
       if (!deptId) setDeptId(firstDept.id);
       if (!orgId) setOrgId(firstDept.org_id);
@@ -838,7 +838,7 @@ export default function EditModelModal({
                     value={orgId}
                     onChange={(e) => setOrgId(e.target.value)}
                     className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    disabled={normalizedRole === "developer" || normalizedRole === "department_admin"}
+                    disabled={normalizedRole === "idp_configurator" || normalizedRole === "department_admin"}
                   >
                     <option value="">{t("Select organization")}</option>
                     {visibilityOptions.organizations.map((org) => (
@@ -887,7 +887,7 @@ export default function EditModelModal({
                       value={deptId}
                       onChange={(e) => setDeptId(e.target.value)}
                       className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                      disabled={normalizedRole === "developer" || normalizedRole === "department_admin"}
+                      disabled={normalizedRole === "idp_configurator" || normalizedRole === "department_admin"}
                     >
                       <option value="">{t("Select department")}</option>
                       {departmentsForSelectedOrg.map((dept) => (

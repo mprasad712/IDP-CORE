@@ -14,6 +14,7 @@ from .endpoints.metrics import router as metrics_router
 from .endpoints.sessions import router as sessions_router
 from .endpoints.agents import router as agents_router
 from .endpoints.projects import router as projects_router
+from .endpoints.users import router as users_router
 
 # Backward-compat re-exports consumed by evaluation.py and others
 from .trace_store import fetch_traces_from_langfuse  # noqa: F401
@@ -35,3 +36,4 @@ router.include_router(metrics_router)
 router.include_router(sessions_router)
 router.include_router(agents_router)
 router.include_router(projects_router)
+router.include_router(users_router)

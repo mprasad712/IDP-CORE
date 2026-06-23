@@ -151,6 +151,28 @@ function output(name: string, display_name: string, types: string[] = ["Message"
   };
 }
 
+// Gate a field so it only renders when the selected connector is an Outlook/email connector
+// (the IDPConnectorDropdown writes the chosen connector's provider into `connector_provider`).
+// Future SharePoint/OneDrive connectors won't show these email-only options.
+const EMAIL_ONLY = { field: "connector_provider", value: "outlook" } as const;
+function emailOnly<T>(field: T): T & { show_when: typeof EMAIL_ONLY } {
+  return { ...field, show_when: EMAIL_ONLY };
+}
+
+// Gate a field so it only renders when the selected connector is a SharePoint connector.
+// SharePoint connectors process files from a chosen library/folder (no email filters apply).
+const SHAREPOINT_ONLY = { field: "connector_provider", value: "sharepoint" } as const;
+function sharepointOnly<T>(field: T): T & { show_when: typeof SHAREPOINT_ONLY } {
+  return { ...field, show_when: SHAREPOINT_ONLY };
+}
+
+// Gate a field so it only renders when the selected connector is a OneDrive connector.
+// OneDrive processes files from a chosen folder within the signed-in account's drive.
+const ONEDRIVE_ONLY = { field: "connector_provider", value: "onedrive" } as const;
+function onedriveOnly<T>(field: T): T & { show_when: typeof ONEDRIVE_ONLY } {
+  return { ...field, show_when: ONEDRIVE_ONLY };
+}
+
 // ─── node definitions ─────────────────────────────────────────────────────────
 
 export const IDP_NODES: IDPData = {
@@ -195,15 +217,165 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 1,
       base_classes: ["Message"],
-      field_order: ["connector_name", "attachment_filter"],
+      field_order: [
+        "connector_name",
+        // SharePoint (shown when a SharePoint connector is selected)
+        "sharepoint_library",
+        "sharepoint_folder",
+        "sharepoint_file_types",
+        "sharepoint_poll_interval",
+        // OneDrive (shown when a OneDrive connector is selected)
+        "onedrive_folder",
+        "onedrive_file_types",
+        "onedrive_poll_interval",
+        // Outlook / email
+        "folder",
+        "filter_subject",
+        "filter_sender",
+        "filter_has_attachments",
+        "unread_only",
+        "max_emails",
+        "poll_interval_seconds",
+        "account_email",
+        "filter_body",
+        "filter_to",
+        "filter_cc",
+        "filter_importance",
+        "mark_as_read",
+        "fetch_full_body",
+        "attachment_filter",
+      ],
       template: {
-        connector_name: strField(
-          "connector_name",
-          "Connector",
-          "",
-          "Name of the configured connector (e.g. mail connector) to pull attachments from.",
-          true,
-        ),
+        connector_name: {
+          _input_type: "StrInput",
+          idp_connector_fetch: true,
+          advanced: false,
+          display_name: "Connector",
+          dynamic: false,
+          info: "Select a connected mail connector to pull attachments from. The email filters below apply when the published agent polls this mailbox.",
+          list: false,
+          name: "connector_name",
+          placeholder: "Select a connector...",
+          required: true,
+          show: true,
+          title_case: false,
+          type: "str",
+          value: "",
+        },
+        // Hidden state: the connector's provider (set by IDPConnectorDropdown on selection). Drives
+        // show_when for the email-only fields so they appear only for Outlook/email connectors.
+        connector_provider: {
+          _input_type: "StrInput",
+          advanced: false,
+          display_name: "Connector Provider",
+          dynamic: false,
+          info: "",
+          list: false,
+          name: "connector_provider",
+          placeholder: "",
+          required: false,
+          show: false,
+          title_case: false,
+          type: "str",
+          value: "",
+        },
+        // SharePoint document-library options — the published agent's background monitor polls the
+        // chosen library/folder and ingests new files into Processed Docs (ingest_mode=idp_pipeline).
+        // sharepointOnly() => only shown when the selected connector is a SharePoint connector.
+        sharepoint_library: sharepointOnly(strField(
+          "sharepoint_library", "Library Name", "Shared Documents",
+          "SharePoint document library to read from (e.g. 'Shared Documents').",
+        )),
+        sharepoint_folder: sharepointOnly(strField(
+          "sharepoint_folder", "Folder Path", "",
+          "Folder within the library to process (e.g. 'Invoices/2024'). Leave empty for the library root.",
+        )),
+        sharepoint_file_types: sharepointOnly(strField(
+          "sharepoint_file_types", "File Type Filter", "pdf,png,jpg,docx",
+          "Comma-separated list of file extensions to process. Leave empty for all supported types.",
+        )),
+        sharepoint_poll_interval: sharepointOnly(intField(
+          "sharepoint_poll_interval", "Poll Interval (seconds)", 300,
+          "How often the published agent checks this folder for new files.",
+        )),
+        // OneDrive options — the published agent's background monitor polls the chosen folder in the
+        // signed-in account's drive and ingests new files into Processed Docs (ingest_mode=idp_pipeline).
+        onedrive_folder: onedriveOnly({
+          // idp_onedrive_folder_fetch → custom renderer lists the account's folders to pick from
+          // (still a combobox, so a deeper path can be typed manually).
+          ...strField(
+            "onedrive_folder", "Folder", "",
+            "Pick a folder from your OneDrive to process. Leave empty for the drive root.",
+          ),
+          idp_onedrive_folder_fetch: true,
+        }),
+        onedrive_file_types: onedriveOnly(strField(
+          "onedrive_file_types", "File Type Filter", "pdf,png,jpg,docx",
+          "Comma-separated list of file extensions to process. Leave empty for all supported types.",
+        )),
+        onedrive_poll_interval: onedriveOnly(intField(
+          "onedrive_poll_interval", "Poll Interval (seconds)", 300,
+          "How often the published agent checks this folder for new files.",
+        )),
+        // Email filters / polling — the published agent's background monitor reads these (subject /
+        // sender / folder / poll interval, etc.). Modeled on the MiCore Outlook connector options;
+        // the backend (sync_email_monitors_for_agent) reads each by these exact field names.
+        // emailOnly() => only shown when the selected connector is Outlook/email.
+        folder: emailOnly(dropdownField(
+          "folder", "Mail Folder", ["inbox", "sentitems", "drafts", "archive"], "inbox",
+          "Mailbox folder to poll for new email.",
+        )),
+        filter_subject: emailOnly(strField(
+          "filter_subject", "Subject contains", "",
+          "Only process emails whose subject contains this text.",
+        )),
+        filter_sender: emailOnly(strField(
+          "filter_sender", "Filter by Sender", "",
+          "Only process emails FROM this exact address.",
+        )),
+        filter_has_attachments: emailOnly(boolField(
+          "filter_has_attachments", "Has Attachments Only", true,
+          "Only process emails that have attachments.",
+        )),
+        unread_only: emailOnly(boolField(
+          "unread_only", "Unread Only", false, "Only process unread emails.",
+        )),
+        max_emails: emailOnly(intField(
+          "max_emails", "Max Emails", 10, "Maximum number of recent emails to scan per poll.",
+        )),
+        poll_interval_seconds: emailOnly(intField(
+          "poll_interval_seconds", "Poll Interval (seconds)", 60,
+          "How often the published agent checks this mailbox for new mail.",
+        )),
+        account_email: emailOnly(strField(
+          "account_email", "Account / Mailbox", "",
+          "Linked mailbox to read from. Leave empty to use the first linked account.",
+          false, true,
+        )),
+        filter_body: emailOnly(strField(
+          "filter_body", "Body contains", "",
+          "Only process emails whose body contains this text.", false, true,
+        )),
+        filter_to: emailOnly(strField(
+          "filter_to", "Filter by Recipient (To)", "",
+          "Only process emails sent TO this address.", false, true,
+        )),
+        filter_cc: emailOnly(strField(
+          "filter_cc", "Filter by CC", "",
+          "Only process emails with this address in CC.", false, true,
+        )),
+        filter_importance: emailOnly(dropdownField(
+          "filter_importance", "Importance", ["all", "low", "normal", "high"], "all",
+          "Only process emails of this importance.", true,
+        )),
+        mark_as_read: emailOnly(boolField(
+          "mark_as_read", "Mark as Read After Processing", false,
+          "Mark emails as read once processed.", true,
+        )),
+        fetch_full_body: emailOnly(boolField(
+          "fetch_full_body", "Fetch Full Body", false,
+          "Fetch the full email body (otherwise a short preview is used).", true,
+        )),
         attachment_filter: strField(
           "attachment_filter",
           "File Type Filter",
@@ -627,43 +799,9 @@ export const IDP_NODES: IDPData = {
     },
 
 
-    Multimodal: {
-      display_name: "Multimodal",
-      description: "Vision LLM reads the document image directly without requiring an OCR step.",
-      icon: "Layers",
-      documentation: "",
-      beta: false,
-      legacy: false,
-      official: true,
-      priority: 2,
-      base_classes: ["Data"],
-      field_order: ["document", "model_name", "prompt"],
-      template: {
-        document: {
-          _input_type: "MessageInput",
-          advanced: false,
-          display_name: "Document Image",
-          dynamic: false,
-          info: "Raw document image (PDF, PNG, JPG) passed directly to the vision model.",
-          input_types: ["Message"],
-          list: false,
-          name: "document",
-          placeholder: "",
-          required: true,
-          show: true,
-          type: "other",
-          value: "",
-        },
-        model_name: strField("model_name", "Vision LLM Model", "gpt-4o", "Vision-capable model for extraction.", false, true),
-        prompt: promptField(
-          "prompt",
-          "Extraction Instruction",
-          "",
-          "Instruction sent to the vision model describing what to extract.",
-        ),
-      },
-      outputs: [output("extracted_data", "Extracted Data", ["Data"])],
-    },
+    // Multimodal node hidden — the backend currently parks multimodal extraction (downgrades to
+    // text), so exposing a "Vision LLM" node would mislead users. Re-add the node definition here
+    // when the vision extraction path is actually implemented in the pipeline.
   },
 
   // ── Rules ─────────────────────────────────────────────────────────────────
@@ -902,7 +1040,10 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 0,
       base_classes: ["Message", "Data"],
-      field_order: ["document", "detect_signatures", "detect_stamps", "detect_checkboxes", "detect_qr", "detect_logos", "detect_handwriting"],
+      // Only the element types the backend actually detects are exposed (signature / checkbox /
+      // QR-barcode). Stamps, logos and handwriting are not yet implemented, so their toggles are
+      // removed to avoid promising unsupported detection.
+      field_order: ["document", "detect_signatures", "detect_checkboxes", "detect_qr"],
       template: {
         document: {
           _input_type: "MessageInput",
@@ -920,11 +1061,9 @@ export const IDP_NODES: IDPData = {
           value: "",
         },
         detect_signatures: boolField("detect_signatures", "Detect Signatures", true),
-        detect_stamps: boolField("detect_stamps", "Detect Stamps / Seals", true),
         detect_checkboxes: boolField("detect_checkboxes", "Detect Checkboxes", true),
         detect_qr: boolField("detect_qr", "Detect QR / Barcodes", true),
-        detect_logos: boolField("detect_logos", "Detect Logos", false, "", true),
-        detect_handwriting: boolField("detect_handwriting", "Detect Handwriting", false, "", true),
+        // detect_stamps / detect_logos / detect_handwriting removed — not supported by the backend detector.
       },
       outputs: [
         output("document_with_annotations", "Document + Annotations", ["Message"]),

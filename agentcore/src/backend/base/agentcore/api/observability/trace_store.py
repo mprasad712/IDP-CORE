@@ -36,6 +36,7 @@ from .parsing import (
     call_with_rate_limit_retry,
     _OBSERVATIONS_CACHE,
     _REQUEST_OBSERVATIONS_CACHE,
+    is_http_trace_name,
 )
 
 from loguru import logger
@@ -344,6 +345,9 @@ def _fetch_scoped_traces(
     for client_idx, client in enumerate(clients):
         broad_traces = _fetch_client_traces_broad(client, broad_limit)
         for trace in broad_traces:
+            trace_name = get_attr(trace, "name")
+            if is_http_trace_name(trace_name):
+                continue
             extracted_uids = extract_trace_user_ids(trace)
             if extracted_uids and not extracted_uids.intersection(allowed_user_ids):
                 continue
@@ -493,6 +497,9 @@ def _pre_enrich_traces(
     for trace in traces:
         trace_id = get_trace_id(trace)
         if not trace_id:
+            continue
+        trace_name = get_attr(trace, "name")
+        if is_http_trace_name(trace_name):
             continue
         trace_client = _resolve_trace_client(trace, scoped_clients) or primary_client
 

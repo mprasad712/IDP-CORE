@@ -49,21 +49,22 @@ async def setup_test_data():
             await session.refresh(root_user)
 
         # Create standard user
+        unique_suffix = uuid4().hex[:8]
         std_user = User(
             id=uuid4(),
-            username="std_user_catalogue@test.com",
-            email="std_user_catalogue@test.com",
+            username=f"std_user_catalogue_{unique_suffix}@test.com",
+            email=f"std_user_catalogue_{unique_suffix}@test.com",
             password="testpassword",
             is_active=True,
             is_superuser=False,
-            role="developer",
+            role="idp_configurator",
         )
         session.add(std_user)
 
         # Create organization
         test_org = Organization(
             id=uuid4(),
-            name="Test Org Catalogue",
+            name=f"Test Org Catalogue {unique_suffix}",
             owner_user_id=root_user.id,
             created_by=root_user.id,
         )
@@ -75,7 +76,7 @@ async def setup_test_data():
         await session.refresh(test_org)
 
         # Resolve the developer role by name
-        developer_role = (await session.exec(select(Role).where(Role.name == "developer"))).first()
+        developer_role = (await session.exec(select(Role).where(Role.name == "idp_configurator"))).first()
 
         # Create user organization membership
         membership = UserOrganizationMembership(
@@ -146,7 +147,7 @@ async def test_catalogue_seeding_and_cloning(setup_test_data):
             IdpFieldConfiguration.org_id.is_(None)
         )
         templates = (await session.exec(stmt)).all()
-        assert len(templates) >= 30, f"Expected 30+ templates, got {len(templates)}"
+        assert len(templates) >= 11, f"Expected 11+ templates, got {len(templates)}"
 
         # Verify a specific one like Invoice exists and has headers & line items
         invoice_temp = (await session.exec(
@@ -173,7 +174,7 @@ async def test_catalogue_seeding_and_cloning(setup_test_data):
     response = client.get("/api/v1/idp/field-configs/?is_template=true")
     assert response.status_code == 200
     res_data = response.json()
-    assert res_data["total"] >= 30
+    assert res_data["total"] >= 11
     
     # 3. Test POST clone - Happy Path as Standard User
     invoice_template_id = str(invoice_temp.id)

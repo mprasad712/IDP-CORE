@@ -43,37 +43,67 @@ def deskew_image(image: np.ndarray) -> tuple[np.ndarray, float]:
 
     return rotated, angle
 
-def detect_rotation_angle(image: np.ndarray) -> int:
-    """Detect document page orientation/rotation (0, 90, 180, or 270 degrees).
-
-    Uses bounding box aspect ratios of connected components (words/lines) to
-    differentiate horizontal text layouts from vertical ones.
-    """
+def _is_vertical_layout(image: np.ndarray) -> bool:
+    """Coarse orientation: True if text blocks are predominantly vertical (page rotated 90/270),
+    False if horizontal (0/180). Uses connected-component aspect ratios. This CANNOT tell 0 from
+    180 or 90 from 270 — that needs reading direction (see ``detect_rotation_angle``)."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
     thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-
-    # Dilate horizontally to merge characters into text lines
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
     dilated = cv2.dilate(thresh, kernel, iterations=2)
-
     contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    horiz_count = 0
-    vert_count = 0
-
+    horiz_count = vert_count = 0
     for c in contours:
-        x, y, w, h = cv2.boundingRect(c)
+        _, _, w, h = cv2.boundingRect(c)
         if w > 30 and h > 10:
             if w > h * 1.5:
                 horiz_count += 1
             elif h > w * 1.5:
                 vert_count += 1
+    return vert_count > horiz_count
 
-    # If vertical blocks are dominant, the page is likely rotated 90 or 270 degrees.
-    if vert_count > horiz_count:
-        # Default correction is 90 degrees clockwise rotation.
-        return 90
-    return 0
+
+def _ocr_text_score(image: np.ndarray) -> float:
+    """Sum of OCR token confidences for ``image`` (higher = reads better in this orientation).
+
+    Uses the shared PaddleOCR instance with the angle classifier DISABLED (cls=False) so the raw
+    page orientation actually matters. Returns -1.0 if OCR is unavailable (e.g. no paddle locally)."""
+    try:
+        from agentcore.services.idp.ocr import get_ocr_instance
+        model = get_ocr_instance("en")
+        if model is None:
+            return -1.0  # signal "OCR unavailable" to the caller
+        res = model.ocr(image, cls=False)
+        lines = res[0] if res and res[0] else []
+        return sum(float(ln[1][1]) for ln in lines if ln and len(ln) > 1 and len(ln[1]) > 1)
+    except Exception as e:  # pragma: no cover - OCR is best-effort here
+        logger.debug(f"[Rotation] OCR orientation scoring failed: {e}")
+        return -1.0
+
+
+def detect_rotation_angle(image: np.ndarray) -> int:
+    """Detect the rotation (0/90/180/270) that must be APPLIED to make the page upright.
+
+    When OCR is available it scores all four orientations and returns whichever reads best — this
+    reliably distinguishes 0 from 180 (upside-down) and 90 from 270, independent of any heuristic.
+    When OCR is unavailable (e.g. PaddleOCR not installed locally) it falls back to a coarse
+    connected-component heuristic that can only tell 0 from 90 — it CANNOT detect 180/270 (a
+    documented limitation; correct on OCR-equipped machines).
+    """
+    best_angle, best_score = 0, -1.0
+    ocr_available = False
+    for angle in (0, 90, 180, 270):
+        rotated = rotate_image(image, angle) if angle else image
+        score = _ocr_text_score(rotated)
+        if score >= 0.0:
+            ocr_available = True
+            if score > best_score:
+                best_score, best_angle = score, angle
+
+    if ocr_available:
+        return best_angle
+    # OCR unavailable -> coarse heuristic (0 vs 90 only; the 180-flip is not resolvable here).
+    return 90 if _is_vertical_layout(image) else 0
 
 def rotate_image(image: np.ndarray, angle: int) -> np.ndarray:
     """Rotate image by 90, 180, or 270 degrees."""

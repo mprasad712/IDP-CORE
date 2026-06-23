@@ -25,6 +25,7 @@ export interface ProcessedDoc {
   failed_at: string | null;
   created_at: string;
   updated_at: string;
+  review_draft?: boolean; // reviewer saved edits as a draft (not yet submitted)
 }
 
 export interface ProcessedDocPage {

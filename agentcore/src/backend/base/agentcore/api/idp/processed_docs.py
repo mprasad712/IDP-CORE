@@ -1,7 +1,13 @@
+import io
+import mimetypes
+import os
+import re
 from datetime import datetime, timezone
+from loguru import logger
 from typing import Annotated
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Response
+from fastapi.responses import StreamingResponse
 from fastapi_pagination import Params, Page
 from fastapi_pagination.ext.sqlmodel import apaginate
 from sqlmodel import select, or_, and_
@@ -18,6 +24,12 @@ from agentcore.services.database.models.idp.config import IdpAgent, IdpReviewSes
 from agentcore.services.database.models.agent.model import Agent
 from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
 from agentcore.services.auth.permissions import normalize_role
+from agentcore.services.deps import get_storage_service
+from agentcore.services.idp.output import (
+    SUPPORTED_FORMATS,
+    build_doc_payload,
+    serialize_document,
+)
 
 router = APIRouter(prefix="/processed-docs", tags=["IDP Processed Documents"])
 
@@ -46,6 +58,7 @@ class ProcessedDocRead(BaseModel):
     failed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    review_draft: bool = False  # reviewer saved edits as a draft (not yet submitted)
 
     class Config:
         from_attributes = True
@@ -82,6 +95,22 @@ class ProcessedDocDetailRead(ProcessedDocRead):
     line_items: list[ExtractedLineItemRead] = []
     error_message: str | None = None
 
+# Key used inside IdpDocument.extra (JSONB) to mark a saved-but-not-submitted review draft.
+REVIEW_DRAFT_KEY = "review_draft"
+
+
+def _clear_review_draft(doc: IdpDocument) -> None:
+    """Remove the review-draft marker from ``doc.extra`` when finalizing the document.
+
+    ``extra`` is a plain JSONB column (not MutableDict), so we reassign a fresh dict for
+    SQLAlchemy change detection. Used by both POST /review and POST /approve.
+    """
+    if doc.extra and REVIEW_DRAFT_KEY in doc.extra:
+        new_extra = dict(doc.extra)
+        new_extra.pop(REVIEW_DRAFT_KEY, None)
+        doc.extra = new_extra
+
+
 class FieldUpdateItem(BaseModel):
     id: UUID
     value: str | None
@@ -89,6 +118,7 @@ class FieldUpdateItem(BaseModel):
 class HumanFieldsUpdateRequest(BaseModel):
     headers: list[FieldUpdateItem] | None = None
     line_items: list[FieldUpdateItem] | None = None
+    draft: bool = False  # when True, mark the doc as a saved draft (edits persisted, not finalized)
 
 class DocumentReviewRequest(BaseModel):
     notes: str | None = None
@@ -150,12 +180,19 @@ async def list_processed_docs(
     role = normalize_role(getattr(current_user, "role", None))
     org_ids = await _get_scope_memberships(session, current_user.id)
 
-    # Base query joining IdpDocument -> IdpAgent -> Agent to enforce scoping
+    # Base query joining IdpDocument -> IdpAgent -> Agent to enforce scoping.
+    # Only include docs from agents whose canvas has the "Processed Docs Output" node wired up
+    # (stored as extra->>'has_processed_docs_output' = 'true' on the IdpAgent row).
     stmt = select(IdpDocument)
     if role != "root":
         stmt = stmt.join(IdpAgent, IdpDocument.agent_id == IdpAgent.id)
         stmt = stmt.join(Agent, IdpAgent.agent_id == Agent.id)
         stmt = stmt.where(Agent.org_id.in_(list(org_ids)))
+        stmt = stmt.where(IdpAgent.extra["has_processed_docs_output"].astext == "true")
+    else:
+        # root sees all — but still scope to agents with the output node wired up
+        stmt = stmt.join(IdpAgent, IdpDocument.agent_id == IdpAgent.id)
+        stmt = stmt.where(IdpAgent.extra["has_processed_docs_output"].astext == "true")
 
     # Apply query filters
     if status_filter:
@@ -223,6 +260,152 @@ async def get_processed_doc(
     return detail
 
 
+def _storage_parts(file_path: str) -> tuple[str, str]:
+    """Split '{scope}/{name}' → (scope, name). Uses the scope from file_path, not doc.agent_id,
+    because the file was saved under this exact scope at upload/split time."""
+    if "/" in file_path:
+        scope, name = file_path.split("/", 1)
+        return scope, name
+    return "", file_path
+
+
+@router.get("/{id}/file")
+async def get_processed_doc_file(
+    *,
+    session: DbSession,
+    id: UUID,
+    current_user: CurrentActiveUser,
+):
+    """Stream the raw document file (PDF, image, etc.) for inline preview.
+
+    Falls back to the parent document's file when a split child document's own
+    page-range PDF is not found in storage (child page files may not be persisted
+    on all deployment configurations).
+    """
+    doc = await session.get(IdpDocument, id)
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if not await _can_access_document(session, current_user, doc):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    storage = get_storage_service()
+
+    async def _fetch(d: IdpDocument) -> bytes | None:
+        scope, fname = _storage_parts(d.file_path)
+        # Use scope from file_path (set at upload time) — more reliable than str(d.agent_id)
+        # which could drift if the agent config was ever remapped.
+        agent_scope = scope or str(d.agent_id)
+        try:
+            return await storage.get_file(agent_scope, fname)
+        except Exception as exc:
+            logger.warning(
+                f"[processed-docs/file] doc={d.id} scope={agent_scope!r} file={fname!r} → {exc}"
+            )
+            return None
+
+    file_bytes = await _fetch(doc)
+    serving_doc = doc
+
+    # If the document's own file is missing and it's a split child, try the parent.
+    if file_bytes is None and doc.parent_document_id is not None:
+        parent = await session.get(IdpDocument, doc.parent_document_id)
+        if parent:
+            file_bytes = await _fetch(parent)
+            if file_bytes is not None:
+                serving_doc = parent
+
+    if file_bytes is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found in storage")
+
+    mime_type = (
+        serving_doc.mime_type
+        or mimetypes.guess_type(serving_doc.original_filename)[0]
+        or "application/octet-stream"
+    )
+    return StreamingResponse(
+        io.BytesIO(file_bytes),
+        media_type=mime_type,
+        headers={"Content-Disposition": f'inline; filename="{serving_doc.original_filename}"'},
+    )
+
+
+@router.get("/{id}/export")
+async def export_processed_doc(
+    *,
+    session: DbSession,
+    id: UUID,
+    current_user: CurrentActiveUser,
+    format: str = "csv",
+    values: str = "both",
+):
+    """Download one processed document's extracted data in the chosen format.
+
+    Mirrors the review/detail view (WYSIWYG): the very same header + line-item rows shown on
+    the Processed Docs screen, serialized to CSV / Excel / XML / JSON / TXT. ``values=both``
+    (default) keeps the full audit trail — predicted + audited + reviewed-flag columns;
+    ``values=final`` collapses to a single value per field (audited if reviewed, else predicted).
+    Read-only; requires only ``view_idp`` (this router's read permission).
+    """
+    fmt = (format or "").lower()
+    if fmt not in SUPPORTED_FORMATS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported format '{format}'. Supported: {', '.join(sorted(SUPPORTED_FORMATS))}",
+        )
+    if values not in ("both", "final"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="values must be 'both' or 'final'.",
+        )
+
+    doc = await session.get(IdpDocument, id)
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if not await _can_access_document(session, current_user, doc):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    # Same row sources as get_processed_doc (the detail view) → the export equals what's on screen.
+    # By design we read ALL rows for this document_id (not filtered to the latest job) so the file
+    # matches exactly what the reviewer saw and approved. A reprocessed doc can therefore carry rows
+    # from more than one job — that pre-existing behavior is shared with the detail view; the proper
+    # fix (cleaning old jobs' rows on reprocess) is a pipeline-level change tracked as deferred.
+    headers = (
+        await session.exec(
+            select(IdpExtractedHeader)
+            .where(IdpExtractedHeader.document_id == id)
+            .order_by(IdpExtractedHeader.field_name.asc())
+        )
+    ).all()
+    line_items = (
+        await session.exec(
+            select(IdpExtractedLineItem)
+            .where(IdpExtractedLineItem.document_id == id)
+            .order_by(IdpExtractedLineItem.row_index.asc(), IdpExtractedLineItem.column_name.asc())
+        )
+    ).all()
+    # Latest review session (created_at desc == latest finalize). Usually 0 or 1 per doc.
+    review_session = (
+        await session.exec(
+            select(IdpReviewSession)
+            .where(IdpReviewSession.document_id == id)
+            .order_by(IdpReviewSession.created_at.desc(), IdpReviewSession.id.desc())
+            .limit(1)
+        )
+    ).first()
+
+    payload = build_doc_payload(doc, headers, line_items, review_session, values=values)
+    data, media_type, ext = serialize_document(payload, fmt)
+
+    base = os.path.splitext(os.path.basename(doc.original_filename or "document"))[0]
+    safe_name = re.sub(r'[\r\n";]', "_", f"{base}_export.{ext}")
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
+
+
 @router.patch("/{id}/fields", response_model=ProcessedDocDetailRead)
 async def update_extracted_fields(
     *,
@@ -264,6 +447,14 @@ async def update_extracted_fields(
             line.reviewed_value = item.value
             line.is_reviewed = True
             session.add(line)
+
+    # "Save as Draft": persist a marker so the UI can flag the doc as a saved draft.
+    # JSONB is a plain column (no MutableDict) → reassign the whole dict for change detection.
+    # Only mark a doc that is genuinely in review — a finalized doc (reviewed/auto_approved)
+    # must not acquire a draft marker that no submit/approve path would later clear.
+    # A non-draft PATCH (draft=False, the default) leaves the marker untouched → prior behavior.
+    if payload.draft and doc.status == "pending_review":
+        doc.extra = {**(doc.extra or {}), REVIEW_DRAFT_KEY: True}
 
     doc.updated_at = datetime.now(timezone.utc)
     session.add(doc)
@@ -318,6 +509,9 @@ async def review_processed_doc(
     )
     session.add(review_session)
 
+    # Submit clears any "draft" marker left by a prior Save-as-Draft.
+    _clear_review_draft(doc)
+
     # Transition status
     doc.status = "reviewed"
     doc.updated_at = datetime.now(timezone.utc)
@@ -343,7 +537,8 @@ async def approve_processed_doc(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to approve this document.")
 
     # Mark as approved by transitioning status
-    # If the document is currently in review, we mark it reviewed
+    # Approving also finalizes the doc, so clear any leftover draft marker (same as POST /review).
+    _clear_review_draft(doc)
     doc.status = "reviewed"
     doc.updated_at = datetime.now(timezone.utc)
     session.add(doc)

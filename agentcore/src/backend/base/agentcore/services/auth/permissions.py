@@ -5,6 +5,7 @@ from loguru import logger
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
+from redis.exceptions import RedisClusterException
 
 from agentcore.services.settings.service import SettingsService
 from agentcore.services.cache.redis_client import get_redis_client, reset_redis_client
@@ -211,7 +212,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "approve_documents",
         "view_idp_analytics",
     ],
-    "leader_executive": [
+    "idp_auditor": [
         "view_dashboard",
         # IDP: read-only reporting and audit
         "view_idp",
@@ -331,7 +332,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "approve_documents",
         "view_idp_analytics",
     ],
-    "developer": [
+    "idp_configurator": [
         "view_dashboard",
         "view_projects_page",
         "view_published_agents",
@@ -366,7 +367,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "manage_idp",
         "submit_documents",
     ],
-    "business_user": [
+    "doc_reviewer": [
         "view_dashboard",
         "view_projects_page",
         "view_published_agents",
@@ -400,7 +401,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_idp",
         "review_docs",
     ],
-    "consumer": [
+    "doc_submitter": [
         "view_published_agents",
         "view_registry_agent",
         "view_orchastration_page",
@@ -409,7 +410,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "view_idp",
         "submit_documents",
     ],
-    "document_approver": [
+    "doc_approver": [
         "view_dashboard",
         "view_hitl_approvals_page",
         # IDP: final approval gate after HITL review
@@ -419,7 +420,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
     ],
 }
 
-PERMISSION_VERSION = "v24"  # bump when permissions change (v24: IDP role redesign — submit_documents, approve_documents, view_idp_analytics, document_approver role)
+PERMISSION_VERSION = "v26"  # bump when permissions change (v26: invalidate stale IDP role caches after the idp_b24 role-redesign grants — super_admin/department_admin gained submit_documents/approve_documents/view_idp_analytics; v25: IDP-native role key renames — doc_submitter, doc_reviewer, doc_approver, idp_auditor, idp_configurator)
 
 
 class PermissionCacheService:
@@ -437,7 +438,7 @@ class PermissionCacheService:
     ) -> Any:
         try:
             return await call(self.redis)
-        except (RedisConnectionError, RedisTimeoutError, RedisError, OSError) as exc:
+        except (RedisConnectionError, RedisTimeoutError, RedisError, RedisClusterException, OSError) as exc:
             logger.warning(
                 f"RBAC cache {action} failed for {key}: {exc}. "
                 "Resetting Redis client and retrying once."

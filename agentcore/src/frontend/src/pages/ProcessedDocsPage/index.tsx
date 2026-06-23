@@ -1,11 +1,8 @@
 import {
   Search,
   Download,
-  Trash2,
   Eye,
   ChevronLeft,
-  ZoomIn,
-  ZoomOut,
   Maximize2,
   FileText,
   CheckCircle2,
@@ -13,12 +10,13 @@ import {
   AlertCircle,
   MinusCircle,
   X,
-  Plus,
   RotateCcw,
-  ChevronUp,
-  ChevronDown,
+  Info,
+  ListTree,
+  Save,
 } from "lucide-react";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -48,9 +46,14 @@ import { cn } from "@/utils/utils";
 import {
   useGetProcessedDocs,
   useGetProcessedDoc,
+  usePatchProcessedDocFields,
+  usePostProcessedDocReview,
   type ProcessedDoc as ApiProcessedDoc,
   type ProcessedDocDetail,
+  type FieldUpdateItem,
 } from "@/controllers/API/queries/idp";
+import { api } from "@/controllers/API/api";
+import { ProcessingTrace } from "@/components/core/idpProcessingTrace";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -61,6 +64,9 @@ interface ExtractedField {
   value: string;
   confidence: number;
   changed?: boolean;
+  fieldId?: string;   // idp_extracted_headers.id — needed to PATCH the reviewed value
+  reasoning?: string | null;                       // model's evidence/why for this value
+  source?: Record<string, unknown> | null;         // {page_number, bounding_box} where it was found
 }
 
 interface LineItem {
@@ -74,6 +80,7 @@ interface ProcessedDoc {
   sourceAgent: string;
   dateProcessed: string;
   documentType: string;
+  fileType: string;
   overallConfidence: number;
   status: DocStatus;
   headerFields: ExtractedField[];
@@ -81,6 +88,9 @@ interface ProcessedDoc {
   lineItemColumns: string[];
   reviewer?: string;
   reviewedAt?: string;
+  reviewDraft?: boolean; // reviewer saved edits as a draft (pending, not yet submitted)
+  // rowId -> (columnName -> idp_extracted_line_items.id), so edited cells can be PATCHed.
+  cellIds?: Record<string, Record<string, string>>;
 }
 
 // ─── API → page adapters ──────────────────────────────────────────────────────
@@ -99,8 +109,10 @@ function listDocToPage(d: ApiProcessedDoc): ProcessedDoc {
     sourceAgent: d.agent_id.slice(0, 8),
     dateProcessed: (d.processing_completed_at ?? d.created_at ?? "").slice(0, 10),
     documentType: d.predicted_type ?? d.file_type ?? "—",
+    fileType: (d.file_type ?? "").toLowerCase().replace(/^\./, ""),
     overallConfidence: Math.round((d.overall_confidence ?? 0) * 100),
     status: mapApiStatus(d.status),
+    reviewDraft: d.review_draft ?? false,
     headerFields: [],
     lineItems: [],
     lineItemColumns: [],
@@ -117,14 +129,80 @@ function enrichWithDetail(
     key: h.field_name,
     value: h.reviewed_value ?? h.extracted_value ?? "",
     confidence: Math.round((h.confidence_score ?? 0) * 100),
+    fieldId: h.id,
+    reasoning: h.reasoning_trace,
+    source: h.source_location,
   }));
   const cols = Array.from(new Set(detail.line_items.map((li) => li.column_name)));
   const rows: Record<number, LineItem> = {};
+  const cellIds: Record<string, Record<string, string>> = {};
   detail.line_items.forEach((li) => {
-    rows[li.row_index] = rows[li.row_index] ?? ({ id: String(li.row_index) } as LineItem);
+    const rowId = String(li.row_index);
+    rows[li.row_index] = rows[li.row_index] ?? ({ id: rowId } as LineItem);
     rows[li.row_index][li.column_name] = li.reviewed_value ?? li.extracted_value ?? "";
+    (cellIds[rowId] = cellIds[rowId] ?? {})[li.column_name] = li.id;
   });
-  return { ...base, headerFields, lineItems: Object.values(rows), lineItemColumns: cols };
+  return {
+    ...base,
+    reviewDraft: detail.review_draft ?? base.reviewDraft,
+    headerFields,
+    lineItems: Object.values(rows),
+    lineItemColumns: cols,
+    cellIds,
+  };
+}
+
+// ─── CSV export (client-side; no backend export endpoint) ──────────────────────
+
+function _csvEscape(v: unknown): string {
+  return `"${String(v ?? "").replace(/"/g, '""')}"`;
+}
+
+/** Download a summary CSV of the given processed docs (filename, agent, date, type, confidence, status). */
+function exportDocsToCsv(rows: ProcessedDoc[], filename: string): void {
+  const header = ["Document", "Agent", "Date", "Type", "Confidence", "Status"];
+  const lines = [header.join(",")];
+  rows.forEach((d) => {
+    lines.push(
+      [d.name, d.sourceAgent, d.dateProcessed, d.documentType, `${d.overallConfidence}%`, d.status]
+        .map(_csvEscape)
+        .join(","),
+    );
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Download the per-document processing-log artifact (text flow.log) via the authenticated API. */
+async function downloadDocLog(doc: ProcessedDoc): Promise<void> {
+  try {
+    const res = await api.get(`/api/v1/idp/documents/${doc.id}/log/download`, { responseType: "blob" });
+    const url = URL.createObjectURL(res.data as Blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${doc.name || "document"}_processing_log.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error("[ProcessedDocs] processing-log download failed", e);
+  }
+}
+
+/** Build the reasoning + source-location tooltip text for a field (audit/evidence trail). */
+function evidenceTitle(f: ExtractedField): string {
+  const parts: string[] = [];
+  if (f.reasoning) parts.push(`Why: ${f.reasoning}`);
+  const src = f.source as { page_number?: number; bounding_box?: unknown } | null | undefined;
+  if (src?.page_number != null) {
+    const bbox = Array.isArray(src.bounding_box) ? "  ·  located on page" : "";
+    parts.push(`Source: page ${src.page_number}${bbox}`);
+  }
+  return parts.join("\n");
 }
 
 // ─── Seed data ────────────────────────────────────────────────────────────────
@@ -136,6 +214,7 @@ const SEED_DOCS: ProcessedDoc[] = [
     sourceAgent: "Invoice Processor",
     dateProcessed: "2026-06-04 09:12",
     documentType: "Invoice",
+    fileType: "pdf",
     overallConfidence: 92,
     status: "auto_approved",
     headerFields: [
@@ -158,6 +237,7 @@ const SEED_DOCS: ProcessedDoc[] = [
     sourceAgent: "KYC Extractor",
     dateProcessed: "2026-06-04 09:45",
     documentType: "PAN Card",
+    fileType: "png",
     overallConfidence: 61,
     status: "pending",
     headerFields: [
@@ -175,6 +255,7 @@ const SEED_DOCS: ProcessedDoc[] = [
     sourceAgent: "Receipt Scanner",
     dateProcessed: "2026-06-03 17:20",
     documentType: "Receipt",
+    fileType: "jpg",
     overallConfidence: 88,
     status: "reviewed",
     reviewer: "jane.doe@pwc.com",
@@ -238,60 +319,150 @@ function StatusChip({ status }: { status: DocStatus }) {
 
 // ─── Document Viewer ──────────────────────────────────────────────────────────
 
+const IMAGE_TYPES = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif"]);
+const PDF_TYPES   = new Set(["pdf"]);
+
 function DocumentViewer({ doc }: { doc: ProcessedDoc }) {
-  const [zoom, setZoom] = useState(100);
+  const ft = doc.fileType.toLowerCase();
+  const isSeedDoc = ["1", "2", "3"].includes(doc.id);
+
+  // Fetch the file via the authenticated axios client to avoid credential errors
+  // when using a raw <iframe src> or <img src> (those requests don't carry auth headers).
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [fetchError, setFetchError] = useState(false);
+
+  useEffect(() => {
+    if (isSeedDoc) return;
+    let revoked = false;
+    setFetchError(false);
+    setBlobUrl(null);
+    api
+      .get(`/api/v1/idp/processed-docs/${doc.id}/file`, { responseType: "blob" })
+      .then((res) => {
+        if (revoked) return;
+        const url = URL.createObjectURL(res.data as Blob);
+        setBlobUrl(url);
+      })
+      .catch(() => {
+        if (!revoked) setFetchError(true);
+      });
+    return () => {
+      revoked = true;
+      setBlobUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; });
+    };
+  }, [doc.id, isSeedDoc]);
+
+  const handleDownload = () => {
+    if (!blobUrl) return;
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = doc.name;
+    a.click();
+  };
+
+  const toolbar = (
+    <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/5 bg-[#111]/60 backdrop-blur-sm flex-shrink-0">
+      <span className="text-xs font-medium text-white/60 truncate max-w-[200px]">{doc.name}</span>
+      <div className="flex items-center gap-0.5">
+        {blobUrl && (
+          <>
+            <button
+              onClick={handleDownload}
+              className="p-1.5 rounded text-white/40 hover:text-white/80 hover:bg-white/5 transition-colors"
+              title="Download"
+            >
+              <Download className="h-3.5 w-3.5" />
+            </button>
+            <a
+              href={blobUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="p-1.5 rounded text-white/40 hover:text-white/80 hover:bg-white/5 transition-colors"
+              title="Open in new tab"
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+            </a>
+          </>
+        )}
+      </div>
+    </div>
+  );
+
+  if (isSeedDoc) {
+    return (
+      <div className="flex flex-col h-full bg-[#1a1a1a]">
+        {toolbar}
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-white/30">
+          <FileText className="h-12 w-12" />
+          <p className="text-xs tracking-wide">Sample document — no file stored</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!blobUrl && !fetchError) {
+    return (
+      <div className="flex flex-col h-full bg-[#1a1a1a]">
+        {toolbar}
+        <div className="flex-1 flex items-center justify-center">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-white/60" />
+        </div>
+      </div>
+    );
+  }
+
+  if (fetchError) {
+    return (
+      <div className="flex flex-col h-full bg-[#1a1a1a]">
+        {toolbar}
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-white/40">
+          <FileText className="h-10 w-10 text-white/20" />
+          <p className="text-xs">Could not load document</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (PDF_TYPES.has(ft)) {
+    return (
+      <div className="flex flex-col h-full bg-[#1a1a1a]">
+        {toolbar}
+        <iframe
+          src={blobUrl!}
+          className="flex-1 w-full border-0"
+          title={doc.name}
+        />
+      </div>
+    );
+  }
+
+  if (IMAGE_TYPES.has(ft)) {
+    return (
+      <div className="flex flex-col h-full bg-[#1a1a1a]">
+        {toolbar}
+        <div className="flex-1 flex items-center justify-center p-6 overflow-auto min-h-0">
+          <img
+            src={blobUrl!}
+            alt={doc.name}
+            className="max-w-full max-h-full object-contain shadow-2xl rounded-sm"
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full bg-[#1a1a1a]">
-      {/* toolbar */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/5 bg-[#111]/60 backdrop-blur-sm flex-shrink-0">
-        <span className="text-xs font-medium text-white/60 truncate max-w-[200px]">{doc.name}</span>
-        <div className="flex items-center gap-0.5">
-          <button
-            onClick={() => setZoom((z) => Math.max(40, z - 10))}
-            className="p-1.5 rounded text-white/40 hover:text-white/80 hover:bg-white/5 transition-colors"
-          >
-            <ZoomOut className="h-3.5 w-3.5" />
-          </button>
-          <span className="text-xs text-white/50 w-10 text-center tabular-nums">{zoom}%</span>
-          <button
-            onClick={() => setZoom((z) => Math.min(200, z + 10))}
-            className="p-1.5 rounded text-white/40 hover:text-white/80 hover:bg-white/5 transition-colors"
-          >
-            <ZoomIn className="h-3.5 w-3.5" />
-          </button>
-          <div className="w-px h-4 bg-white/10 mx-1" />
-          <button className="p-1.5 rounded text-white/40 hover:text-white/80 hover:bg-white/5 transition-colors">
-            <Maximize2 className="h-3.5 w-3.5" />
-          </button>
-          <button className="p-1.5 rounded text-white/40 hover:text-white/80 hover:bg-white/5 transition-colors">
-            <Download className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      </div>
-
-      {/* viewer — fills all remaining height */}
-      <div className="flex-1 flex items-center justify-center p-6 overflow-auto min-h-0">
-        <div
-          className="relative bg-white shadow-2xl rounded-sm flex items-center justify-center transition-all duration-150 ease-out"
-          style={{
-            width: `${zoom}%`,
-            maxWidth: "640px",
-            aspectRatio: "1 / 1.414",
-          }}
+      {toolbar}
+      <div className="flex-1 flex flex-col items-center justify-center gap-4 text-white/50">
+        <FileText className="h-12 w-12 text-white/20" />
+        <p className="text-sm font-medium">{doc.name}</p>
+        <button
+          onClick={handleDownload}
+          className="px-4 py-2 rounded-lg bg-white/10 hover:bg-white/15 text-white/70 hover:text-white text-sm transition-colors flex items-center gap-2"
         >
-          {/* watermark / placeholder */}
-          <div className="absolute inset-0 flex flex-col items-center justify-center select-none">
-            <FileText className="h-12 w-12 text-gray-200" />
-            <p className="mt-2 text-[10px] text-gray-300 tracking-wide">Document preview</p>
-          </div>
-          {/* subtle page lines */}
-          <div className="absolute inset-x-8 top-10 space-y-3 pointer-events-none">
-            {Array.from({ length: 14 }).map((_, i) => (
-              <div key={i} className="h-px bg-gray-100" />
-            ))}
-          </div>
-        </div>
+          <Download className="h-4 w-4" /> Download file
+        </button>
       </div>
     </div>
   );
@@ -311,29 +482,103 @@ function DocDetailView({
   const [fields, setFields]       = useState<ExtractedField[]>(doc.headerFields);
   const [lineItems, setLineItems] = useState<LineItem[]>(doc.lineItems);
   const [notes, setNotes]         = useState("");
+  const [saving, setSaving]       = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [showTrace, setShowTrace] = useState(false);
   const isReadOnly = doc.status === "auto_approved" || doc.status === "reviewed";
 
-  const updateField = (key: string, value: string) =>
+  // Persistence: PATCH edited field values, then POST the review (records reviewer + timestamp,
+  // moves the doc to the Reviewed tab). The hooks invalidate the queries on success so the list
+  // and detail refetch automatically.
+  const patchFields = usePatchProcessedDocFields(doc.id);
+  const postReview  = usePostProcessedDocReview(doc.id);
+
+  // Sync local state when the detail data arrives after initial render.
+  // useState only uses the prop value on mount; subsequent prop updates are ignored
+  // unless we explicitly sync here. We only overwrite when the incoming data is
+  // richer (non-empty) so in-progress user edits are never discarded.
+  const userHasEdited = useRef(false);
+  useEffect(() => {
+    if (!userHasEdited.current && doc.headerFields.length > 0) {
+      setFields(doc.headerFields);
+    }
+  }, [doc.headerFields.length]);
+  useEffect(() => {
+    if (!userHasEdited.current && doc.lineItems.length > 0) {
+      setLineItems(doc.lineItems);
+    }
+  }, [doc.lineItems.length]);
+
+  const updateField = (key: string, value: string) => {
+    userHasEdited.current = true;
     setFields((prev) => prev.map((f) => f.key === key ? { ...f, value, changed: f.value !== value } : f));
-
-  const updateCell = (id: string, col: string, value: string) =>
-    setLineItems((prev) => prev.map((r) => r.id === id ? { ...r, [col]: value } : r));
-
-  const addRow = () => {
-    const empty: LineItem = { id: `r${Date.now()}` };
-    doc.lineItemColumns.forEach((col) => { empty[col] = ""; });
-    setLineItems((prev) => [...prev, empty]);
   };
 
-  const handleSave = () => {
-    onSave({
-      ...doc,
-      headerFields: fields,
-      lineItems,
-      status: "reviewed",
-      reviewer: "me",
-      reviewedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
-    });
+  const updateCell = (id: string, col: string, value: string) => {
+    userHasEdited.current = true;
+    setLineItems((prev) => prev.map((r) => r.id === id ? { ...r, [col]: value } : r));
+  };
+
+
+  // draft=true → "Save as Draft": persist edits only, keep the doc in Pending Review.
+  // draft=false → "Submit": persist edits + finalize (records reviewer, moves to Reviewed).
+  const handleSave = async (draft: boolean) => {
+    setSaving(true);
+    setSaveError(null);
+    let editsSaved = false;
+    try {
+      // Build the field-update payload from the DB ids carried through enrichWithDetail.
+      // (Add Row / row-delete are disabled for backend docs — there are no create/delete
+      // line-item endpoints — so only existing cells are edited, and every cell id resolves.)
+      const headers: FieldUpdateItem[] = fields
+        .filter((f) => f.fieldId)
+        .map((f) => ({ id: f.fieldId as string, value: f.value === "" ? null : f.value }));
+      const line_items: FieldUpdateItem[] = [];
+      lineItems.forEach((row) => {
+        const ids = doc.cellIds?.[row.id];
+        if (!ids) return;
+        doc.lineItemColumns.forEach((col) => {
+          const cellId = ids[col];
+          if (cellId) line_items.push({ id: cellId, value: (row[col] ?? "") === "" ? null : row[col] });
+        });
+      });
+
+      // Always persist the edited values. For a draft, pass draft:true so the backend
+      // tags the doc (review_draft) and leaves it in Pending Review.
+      if (headers.length || line_items.length || draft) {
+        await patchFields.mutateAsync({ headers, line_items, draft });
+        editsSaved = true;
+      }
+
+      if (draft) {
+        // Reflect the draft locally + close back to Pending (the hooks already refetched the list).
+        onSave({ ...doc, headerFields: fields, lineItems, status: "pending", reviewDraft: true });
+        return;
+      }
+
+      await postReview.mutateAsync({ notes: notes || null });
+      // Only on success: reflect the review locally + close (the hooks already refetched).
+      onSave({
+        ...doc,
+        headerFields: fields,
+        lineItems,
+        status: "reviewed",
+        reviewDraft: false,
+        reviewer: "me",
+        reviewedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
+      });
+    } catch (e) {
+      console.error("[ProcessedDocs] save review failed", e);
+      setSaveError(
+        draft
+          ? "Could not save the draft — nothing was persisted. Please try again."
+          : editsSaved
+            ? "Your field edits were saved, but submitting the review failed. Please reopen the document and try again."
+            : "Could not submit the review — nothing was persisted. Please try again.",
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -355,6 +600,11 @@ function DocDetailView({
                 <Badge variant="outline" className="text-[11px] px-1.5 py-0">{doc.documentType}</Badge>
                 <ConfidencePill score={doc.overallConfidence} />
                 <StatusChip status={doc.status} />
+                {doc.reviewDraft && doc.status === "pending" && (
+                  <Badge variant="outline" className="text-[11px] px-1.5 py-0 border-amber-400 text-amber-600">
+                    Draft
+                  </Badge>
+                )}
               </div>
               {doc.status === "reviewed" && (
                 <p className="text-[11px] text-muted-foreground">
@@ -401,7 +651,14 @@ function DocDetailView({
                       className="h-7 text-sm bg-transparent border-transparent hover:border-input focus:border-[#D04A02] transition-colors px-2"
                     />
                   )}
-                  <ConfidencePill score={f.confidence} />
+                  <div className="flex items-center gap-1.5 justify-end">
+                    {(f.reasoning || f.source) && (
+                      <span title={evidenceTitle(f)} className="text-muted-foreground/40 hover:text-foreground cursor-help" aria-label={`Extraction evidence — ${evidenceTitle(f)}`}>
+                        <Info className="h-3.5 w-3.5" />
+                      </span>
+                    )}
+                    <ConfidencePill score={f.confidence} />
+                  </div>
                 </div>
               ))}
             </div>
@@ -420,7 +677,6 @@ function DocDetailView({
                       {doc.lineItemColumns.map((col) => (
                         <TableHead key={col} className="text-[11px] font-semibold uppercase tracking-wide py-2">{col}</TableHead>
                       ))}
-                      {!isReadOnly && <TableHead className="w-8" />}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -439,33 +695,40 @@ function DocDetailView({
                             )}
                           </TableCell>
                         ))}
-                        {!isReadOnly && (
-                          <TableCell className="py-2">
-                            <button
-                              onClick={() => setLineItems((p) => p.filter((r) => r.id !== row.id))}
-                              className="text-muted-foreground/40 hover:text-destructive transition-colors"
-                            >
-                              <X className="h-3.5 w-3.5" />
-                            </button>
-                          </TableCell>
-                        )}
                       </TableRow>
                     ))}
                   </TableBody>
                 </Table>
               </div>
-              {!isReadOnly && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={addRow}
-                  className="mt-2 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-                >
-                  <Plus className="h-3.5 w-3.5" /> Add Row
-                </Button>
-              )}
+              {/* Add Row / row-delete removed: editing existing cell values persists via PATCH,
+                  but there is no backend endpoint to create or delete line-item rows yet. */}
             </section>
           )}
+
+          {/* Processing trace — the complete per-component cycle (input → output) for this document. */}
+          <section>
+            <div className="flex items-center justify-between gap-2">
+              <button
+                onClick={() => setShowTrace((v) => !v)}
+                className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 hover:text-foreground transition-colors"
+              >
+                <ListTree className="h-3.5 w-3.5" />
+                {showTrace ? "Hide" : "View"} Processing Logs
+              </button>
+              <button
+                onClick={() => downloadDocLog(doc)}
+                title="Download processing log"
+                className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground/60 hover:text-foreground transition-colors"
+              >
+                <Download className="h-3 w-3" /> Download log
+              </button>
+            </div>
+            {showTrace && (
+              <div className="mt-2 rounded-xl border bg-muted/5 overflow-hidden">
+                <ProcessingTrace docId={doc.id} />
+              </div>
+            )}
+          </section>
 
           {/* Review actions */}
           {!isReadOnly && (
@@ -480,12 +743,26 @@ function DocDetailView({
                 placeholder="Add review notes (optional)…"
                 className="w-full rounded-xl border bg-background/50 text-sm px-4 py-3 resize-none focus:outline-none focus:ring-2 focus:ring-[#D04A02]/30 focus:border-[#D04A02] transition-all placeholder:text-muted-foreground/40"
               />
-              <Button
-                onClick={handleSave}
-                className="bg-[#D04A02] hover:bg-[#B84000] text-white gap-2 rounded-lg font-medium"
-              >
-                <CheckCircle2 className="h-4 w-4" /> Save Review
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => handleSave(true)}
+                  disabled={saving}
+                  className="gap-2 rounded-lg font-medium disabled:opacity-60"
+                >
+                  <Save className="h-4 w-4" /> {saving ? "Saving…" : "Save as Draft"}
+                </Button>
+                <Button
+                  onClick={() => handleSave(false)}
+                  disabled={saving}
+                  className="bg-[#D04A02] hover:bg-[#B84000] text-white gap-2 rounded-lg font-medium disabled:opacity-60"
+                >
+                  <CheckCircle2 className="h-4 w-4" /> {saving ? "Saving…" : "Submit"}
+                </Button>
+              </div>
+              {saveError && (
+                <p className="text-xs text-destructive mt-1">{saveError}</p>
+              )}
             </section>
           )}
 
@@ -570,7 +847,14 @@ function DocTable({
                 <ConfidencePill score={doc.overallConfidence} />
               </TableCell>
               <TableCell>
-                <StatusChip status={doc.status} />
+                <div className="flex items-center gap-1.5">
+                  <StatusChip status={doc.status} />
+                  {doc.reviewDraft && doc.status === "pending" && (
+                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-400 text-amber-600">
+                      Draft
+                    </Badge>
+                  )}
+                </div>
               </TableCell>
               <TableCell>
                 <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -582,19 +866,13 @@ function DocTable({
                     <Eye className="h-3.5 w-3.5" />
                   </button>
                   <button
-                    title="Export"
-                    onClick={(e) => e.stopPropagation()}
+                    title="Export CSV"
+                    onClick={(e) => { e.stopPropagation(); exportDocsToCsv([doc], `${doc.name || "document"}.csv`); }}
                     className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                   >
                     <Download className="h-3.5 w-3.5" />
                   </button>
-                  <button
-                    title="Delete"
-                    onClick={(e) => e.stopPropagation()}
-                    className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-destructive transition-colors"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  {/* Delete hidden: no backend DELETE endpoint for processed docs yet. */}
                 </div>
               </TableCell>
             </TableRow>
@@ -608,19 +886,29 @@ function DocTable({
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function ProcessedDocsPage() {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
   const [search, setSearch]         = useState("");
   const [activeTab, setActiveTab]   = useState<DocStatus>("pending");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filterDocType, setFilterDocType] = useState("all");
 
-  // Live data from the IDP backend, plus Manas's demo docs (SEED_DOCS) kept as samples.
+  // Open a specific document when navigated here with ?doc=<id>
+  useEffect(() => {
+    const docId = searchParams.get("doc");
+    if (docId) setSelectedId(docId);
+  }, []);
+
+  // Live data from the IDP backend only. (Demo SEED_DOCS removed so review queues / counts /
+  // tabs / search reflect real documents, not samples. SEED_DOCS definition kept but unused.)
   const { data: docsPage } = useGetProcessedDocs({ size: 100 });
   const docs: ProcessedDoc[] = useMemo(
-    () => [...(docsPage?.items ?? []).map(listDocToPage), ...SEED_DOCS],
+    () => [...(docsPage?.items ?? []).map(listDocToPage) /*, ...SEED_DOCS */],
     [docsPage],
   );
   // Extracted fields/line-items come from the detail endpoint, fetched on select.
-  const { data: detail } = useGetProcessedDoc({ id: selectedId ?? "" });
+  const { data: detail, isLoading: isLoadingDetail } = useGetProcessedDoc({ id: selectedId ?? "" });
   const selectedDoc = useMemo(
     () => (selectedId ? enrichWithDetail(docs.find((d) => d.id === selectedId), detail) : null),
     [selectedId, docs, detail],
@@ -657,19 +945,39 @@ export default function ProcessedDocsPage() {
   };
 
   // ── Split-view (detail) ──
-  if (selectedDoc) {
+  if (selectedId) {
+    const backBar = (
+      <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b bg-muted/5">
+        <button
+          onClick={() => { setSelectedId(null); navigate("/processed-docs", { replace: true }); }}
+          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ChevronLeft className="h-4 w-4" />
+          Back to list
+        </button>
+      </div>
+    );
+
+    // Show a skeleton while the detail API call is in-flight so the user never
+    // sees the view open with empty fields and then populate a moment later.
+    if (isLoadingDetail || !selectedDoc) {
+      return (
+        <div className="flex flex-col h-full bg-background overflow-hidden">
+          {backBar}
+          <div className="flex-1 flex items-center justify-center">
+            <div className="flex flex-col items-center gap-3 text-muted-foreground">
+              <div className="h-6 w-6 animate-spin rounded-full border-2 border-[#D04A02] border-t-transparent" />
+              <p className="text-sm">Loading document…</p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="flex flex-col h-full bg-background overflow-hidden">
         {/* back bar */}
-        <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b bg-muted/5">
-          <button
-            onClick={() => setSelectedId(null)}
-            className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <ChevronLeft className="h-4 w-4" />
-            Back to list
-          </button>
-        </div>
+        {backBar}
         <div className="flex-1 overflow-hidden">
           <DocDetailView
             doc={selectedDoc}
@@ -700,8 +1008,9 @@ export default function ProcessedDocsPage() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem>Export as CSV</DropdownMenuItem>
-            <DropdownMenuItem>Export as Excel</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => exportDocsToCsv(docs, "processed-docs.csv")}>
+              Export as CSV
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

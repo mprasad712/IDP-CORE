@@ -600,7 +600,7 @@ export const CONTROL_NEW_USER = {
   username: "",
   is_active: false,
   is_superuser: false,
-  role: "business_user",
+  role: "doc_reviewer",
   department_admin_email: "",
   department_name: "",
   organization_name: "",
@@ -758,6 +758,7 @@ export const AUTHORIZED_DUPLICATE_REQUESTS = [
   "/logout",
   "/refresh",
   "/login",
+  "/file",
 ];
 
 export const BROKEN_EDGES_WARNING =

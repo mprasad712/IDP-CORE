@@ -4,3 +4,5 @@ export * from "./use-patch-processed-doc-fields";
 export * from "./use-post-processed-doc-review";
 export * from "./use-post-processed-doc-approve";
 export * from "./use-upload-and-process";
+export * from "./use-get-document-log";
+export * from "./use-get-report";

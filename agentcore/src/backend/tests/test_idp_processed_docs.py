@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 from sqlmodel import select
@@ -6,7 +7,7 @@ from sqlmodel import select
 from agentcore.main import create_app
 from agentcore.services.deps import session_scope
 from agentcore.services.auth.utils import get_current_active_user
-from agentcore.api.idp import idp_rbac
+from agentcore.api.idp import idp_rbac, _idp_review_rbac
 from agentcore.services.database.models.user.model import User
 from agentcore.services.database.models.organization.model import Organization
 from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
@@ -37,7 +38,7 @@ async def setup_test_data():
     """Sets up user, organization, base agent, field config, document, job, and extraction details."""
     async with session_scope() as session:
         # Resolve developer role
-        developer_role = (await session.exec(select(Role).where(Role.name == "developer"))).first()
+        developer_role = (await session.exec(select(Role).where(Role.name == "idp_configurator"))).first()
 
         # Create user
         unique_suffix = uuid4().hex[:8]
@@ -48,7 +49,7 @@ async def setup_test_data():
             password="testpassword",
             is_active=True,
             is_superuser=False,
-            role="developer",
+            role="idp_configurator",
         )
         session.add(user)
         await session.flush()
@@ -101,6 +102,7 @@ async def setup_test_data():
             extraction_mode="dynamic_prompting",
             default_rule_action="pending_review",
             is_active=True,
+            extra={"has_processed_docs_output": "true"},
         )
         session.add(idp_agent)
         await session.commit()
@@ -248,6 +250,7 @@ async def test_processed_docs_flow(setup_test_data):
     app = create_app()
     app.dependency_overrides[get_current_active_user] = get_mock_user
     app.dependency_overrides[idp_rbac] = get_mock_user
+    app.dependency_overrides[_idp_review_rbac] = get_mock_user
     
     client = TestClient(app)
     mock_user = user
@@ -320,3 +323,193 @@ async def test_processed_docs_flow(setup_test_data):
     app_result = response_app.json()
     assert app_result["status"] == "success"
     assert app_result["document_status"] == "reviewed"
+
+
+@pytest.mark.anyio
+async def test_review_draft_then_submit_flow(setup_test_data):
+    """Save-as-Draft persists edits + a draft marker WITHOUT finalizing; Submit clears it and finalizes."""
+    global mock_user
+    data = setup_test_data
+    user = data["user"]
+    doc = data["doc"]
+    header_1 = data["header_1"]
+
+    app = create_app()
+    app.dependency_overrides[get_current_active_user] = get_mock_user
+    app.dependency_overrides[idp_rbac] = get_mock_user
+    app.dependency_overrides[_idp_review_rbac] = get_mock_user
+
+    client = TestClient(app)
+    mock_user = user
+
+    # (c) REGRESSION: a PATCH WITHOUT draft behaves exactly as before — no draft marker set.
+    resp_plain = client.patch(
+        f"/api/v1/idp/processed-docs/{doc.id}/fields",
+        json={"headers": [{"id": str(header_1.id), "value": "Tesco Corp"}]},
+    )
+    assert resp_plain.status_code == 200
+    assert resp_plain.json()["review_draft"] is False
+    async with session_scope() as session:
+        db_doc = await session.get(IdpDocument, doc.id)
+        assert not (db_doc.extra or {}).get("review_draft")
+        assert db_doc.status == "pending_review"
+
+    # (a) SAVE AS DRAFT: edits persist, draft marker set, status stays pending_review, NO review session.
+    resp_draft = client.patch(
+        f"/api/v1/idp/processed-docs/{doc.id}/fields",
+        json={"headers": [{"id": str(header_1.id), "value": "Tesco Corp India"}], "draft": True},
+    )
+    assert resp_draft.status_code == 200
+    body = resp_draft.json()
+    assert body["review_draft"] is True
+    assert body["status"] == "pending_review"
+    h = next(h for h in body["headers"] if h["id"] == str(header_1.id))
+    assert h["reviewed_value"] == "Tesco Corp India" and h["is_reviewed"] is True
+
+    # list + detail surface the draft flag
+    assert client.get(f"/api/v1/idp/processed-docs/{doc.id}").json()["review_draft"] is True
+
+    async with session_scope() as session:
+        sessions = (await session.exec(select(IdpReviewSession).where(IdpReviewSession.document_id == doc.id))).all()
+        assert len(sessions) == 0  # draft does NOT create a review session
+
+    # (b) SUBMIT: finalizes → reviewed, draft marker cleared, review session created.
+    resp_submit = client.post(f"/api/v1/idp/processed-docs/{doc.id}/review", json={"notes": "ok"})
+    assert resp_submit.status_code == 200
+    assert resp_submit.json()["document_status"] == "reviewed"
+
+    detail = client.get(f"/api/v1/idp/processed-docs/{doc.id}").json()
+    assert detail["status"] == "reviewed"
+    assert detail["review_draft"] is False  # marker cleared on submit
+
+    async with session_scope() as session:
+        sessions = (await session.exec(select(IdpReviewSession).where(IdpReviewSession.document_id == doc.id))).all()
+        assert len(sessions) == 1
+
+
+@pytest.mark.anyio
+async def test_approve_clears_draft(setup_test_data):
+    """Approving a drafted doc finalizes it AND clears the draft marker (parity with Submit)."""
+    global mock_user
+    data = setup_test_data
+    user = data["user"]
+    doc = data["doc"]
+    header_1 = data["header_1"]
+
+    app = create_app()
+    app.dependency_overrides[get_current_active_user] = get_mock_user
+    app.dependency_overrides[idp_rbac] = get_mock_user
+    app.dependency_overrides[_idp_review_rbac] = get_mock_user
+    client = TestClient(app)
+    mock_user = user
+
+    # Save a draft, then approve (not submit).
+    client.patch(f"/api/v1/idp/processed-docs/{doc.id}/fields",
+                 json={"headers": [{"id": str(header_1.id), "value": "Acme"}], "draft": True})
+    assert client.get(f"/api/v1/idp/processed-docs/{doc.id}").json()["review_draft"] is True
+
+    resp = client.post(f"/api/v1/idp/processed-docs/{doc.id}/approve")
+    assert resp.status_code == 200
+    detail = client.get(f"/api/v1/idp/processed-docs/{doc.id}").json()
+    assert detail["status"] == "reviewed"
+    assert detail["review_draft"] is False  # approve cleared the draft marker
+
+
+@pytest.mark.anyio
+async def test_draft_ignored_on_finalized_doc(setup_test_data):
+    """A draft PATCH on an already-finalized doc saves edits but must NOT plant a stale draft marker."""
+    global mock_user
+    data = setup_test_data
+    user = data["user"]
+    doc = data["doc"]
+    header_1 = data["header_1"]
+
+    # Finalize the document first.
+    async with session_scope() as session:
+        db_doc = await session.get(IdpDocument, doc.id)
+        db_doc.status = "reviewed"
+        session.add(db_doc)
+        await session.commit()
+
+    app = create_app()
+    app.dependency_overrides[get_current_active_user] = get_mock_user
+    app.dependency_overrides[idp_rbac] = get_mock_user
+    app.dependency_overrides[_idp_review_rbac] = get_mock_user
+    client = TestClient(app)
+    mock_user = user
+
+    resp = client.patch(f"/api/v1/idp/processed-docs/{doc.id}/fields",
+                        json={"headers": [{"id": str(header_1.id), "value": "Edited"}], "draft": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["review_draft"] is False  # no marker planted on a finalized doc
+    # the field edit still persisted
+    h = next(h for h in body["headers"] if h["id"] == str(header_1.id))
+    assert h["reviewed_value"] == "Edited"
+
+    async with session_scope() as session:
+        db_doc = await session.get(IdpDocument, doc.id)
+        assert not (db_doc.extra or {}).get("review_draft")
+
+
+@pytest.mark.anyio
+async def test_export_processed_doc_all_formats(setup_test_data):
+    """Per-PO export returns 200 + an attachment with non-empty body in every format."""
+    global mock_user
+    data = setup_test_data
+    user = data["user"]
+    doc = data["doc"]
+
+    app = create_app()
+    app.dependency_overrides[get_current_active_user] = get_mock_user
+    app.dependency_overrides[idp_rbac] = get_mock_user
+    app.dependency_overrides[_idp_review_rbac] = get_mock_user
+    client = TestClient(app)
+    mock_user = user
+
+    for fmt, ext in [("csv", "csv"), ("excel", "xlsx"), ("xml", "xml"), ("json", "json"), ("txt", "txt")]:
+        r = client.get(f"/api/v1/idp/processed-docs/{doc.id}/export", params={"format": fmt})
+        assert r.status_code == 200, f"{fmt}: {r.text}"
+        assert r.content, f"{fmt}: empty body"
+        cd = r.headers.get("content-disposition", "")
+        assert "attachment" in cd and f".{ext}" in cd, f"{fmt}: {cd}"
+
+    # values=final collapses the predicted/audited pair (verify via JSON payload)
+    rj = client.get(
+        f"/api/v1/idp/processed-docs/{doc.id}/export", params={"format": "json", "values": "final"}
+    )
+    assert rj.status_code == 200
+    body = rj.json()
+    assert body["values_mode"] == "final"
+    assert body["header_columns"] == ["field_name", "value", "confidence"]
+    # the seeded doc has 2 header fields + 1 line item
+    assert len(body["headers"]) == 2
+    assert len(body["line_items"]) == 1
+
+    # unknown format → 400
+    rbad = client.get(f"/api/v1/idp/processed-docs/{doc.id}/export", params={"format": "docx"})
+    assert rbad.status_code == 400
+    # bad values → 400
+    rbad2 = client.get(
+        f"/api/v1/idp/processed-docs/{doc.id}/export", params={"format": "csv", "values": "nope"}
+    )
+    assert rbad2.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_export_cross_org_forbidden(setup_test_data):
+    """A user outside the doc's org cannot export it (404 — same as the detail view)."""
+    global mock_user
+    data = setup_test_data
+    doc = data["doc"]
+
+    app = create_app()
+    app.dependency_overrides[get_current_active_user] = get_mock_user
+    app.dependency_overrides[idp_rbac] = get_mock_user
+    app.dependency_overrides[_idp_review_rbac] = get_mock_user
+    client = TestClient(app)
+
+    # A non-root user with NO org memberships → _can_access_document is False → 404.
+    mock_user = SimpleNamespace(id=uuid4(), role="idp_configurator")
+    r = client.get(f"/api/v1/idp/processed-docs/{doc.id}/export", params={"format": "csv"})
+    assert r.status_code == 404

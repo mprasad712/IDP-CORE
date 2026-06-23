@@ -36,6 +36,7 @@ const ListComponent = ({
   shiftPressed,
   index,
   disabled = false,
+  view = "list",
 }: {
   agentData: AgentType;
   selected: boolean;
@@ -43,6 +44,7 @@ const ListComponent = ({
   shiftPressed: boolean;
   index: number;
   disabled?: boolean;
+  view?: "grid" | "list";
 }) => {
   const navigate = useCustomNavigate();
   const [openDelete, setOpenDelete] = useState(false);
@@ -224,6 +226,224 @@ const ListComponent = ({
   const avatarInitials = agentData.name.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("");
   const envLabel = getDeploymentEnvLabel();
 
+  /* ── Reusable actions dropdown ── */
+  const actionsMenu = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild disabled={effectiveDisabled}>
+        <Button
+          variant="ghost"
+          size="iconMd"
+          data-testid="home-dropdown-menu"
+          onClick={(e) => e.stopPropagation()}
+          className="opacity-0 transition-opacity group-hover:opacity-100"
+          disabled={effectiveDisabled}
+        >
+          <ForwardedIconComponent name="Ellipsis" aria-hidden="true" className="h-4 w-4 text-muted-foreground" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent className="w-[185px]" sideOffset={5} side="bottom">
+        <DropdownComponent
+          agentData={agentData}
+          setOpenDelete={setOpenDelete}
+          handleExport={handleExport}
+          handleEdit={() => setOpenSettings(true)}
+          canModifyAgent={canModifyAgent}
+          canDuplicateAgent={canDuplicateAgent}
+          canCopyAgent={canCopyAgent}
+          canMoveAgent={canMoveAgent}
+          onCopyToProject={() => handleOpenTransfer("copy")}
+          onMoveToProject={() => handleOpenTransfer("move")}
+        />
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  /* ── Status / env pills (shared) ── */
+  const statusPills = (
+    <>
+      {showRequesterBadge && !!badgeLabel && (
+        <ShadTooltip
+          content={
+            workflowLocked ? "PROD request is awaiting approval."
+            : latestDecision === "REJECTED" ? "Your PROD publish request was rejected."
+            : latestProdStatus === "PUBLISHED" ? "Your PROD publish request is approved."
+            : ""
+          }
+        >
+          <span
+            className={cn(
+              "rounded-full px-2 py-0.5 text-[10px] font-semibold leading-4",
+              workflowLocked && "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+              !workflowLocked && latestProdStatus === "PUBLISHED" && "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+              !workflowLocked && latestDecision === "REJECTED" && "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+            )}
+          >
+            {badgeLabel}
+          </span>
+        </ShadTooltip>
+      )}
+      {envLabel && !showRequesterBadge && (
+        <span
+          className={cn(
+            "rounded-full px-2 py-0.5 text-[10px] font-semibold",
+            envLabel === "PROD"
+              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+              : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+          )}
+        >
+          {envLabel}
+        </span>
+      )}
+      <span
+        className="rounded-full px-2 py-0.5 text-[10px] font-medium"
+        style={{ background: `${avatarColor}12`, color: avatarColor }}
+      >
+        {isComponent ? "Component" : "Agent"}
+      </span>
+    </>
+  );
+
+  /* ══════════════ GRID CARD ══════════════ */
+  if (view === "grid") {
+    return (
+      <>
+        <div
+          key={agentData.id}
+          draggable={!effectiveDisabled}
+          onDragStart={effectiveDisabled ? undefined : onDragStart}
+          onClick={handleClick}
+          data-testid="list-card"
+          className={cn(
+            "group relative flex h-full flex-col gap-3 overflow-hidden rounded-2xl border border-border bg-card p-4",
+            "transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_12px_32px_-14px_rgba(0,0,0,0.22)]",
+            isComponent || effectiveDisabled ? "cursor-default" : "cursor-pointer",
+            effectiveDisabled && "opacity-60",
+          )}
+          style={selected ? { boxShadow: `0 0 0 2px ${avatarColor}` } : undefined}
+        >
+          {/* top accent bar on hover */}
+          <div
+            className="pointer-events-none absolute inset-x-0 top-0 h-1 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+            style={{ background: avatarColor }}
+          />
+
+          {/* header row: avatar + checkbox/menu */}
+          <div className="flex items-start justify-between">
+            <div className="relative flex-shrink-0">
+              <div
+                className="flex h-11 w-11 items-center justify-center rounded-xl text-sm font-bold text-white shadow-sm"
+                style={{ background: `linear-gradient(135deg, ${avatarColor} 0%, ${avatarColor}CC 100%)` }}
+              >
+                {avatarInitials}
+              </div>
+              {envLabel && (
+                <span
+                  className={cn(
+                    "absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-card",
+                    envLabel === "PROD" ? "bg-emerald-500" : "bg-amber-400",
+                  )}
+                />
+              )}
+            </div>
+            <div className="flex items-center gap-1">
+              <div className={cn("transition-opacity", selected ? "opacity-100" : "opacity-0 group-hover:opacity-100")}>
+                <Checkbox
+                  checked={selected}
+                  onCheckedChange={(v) => setSelected(v as boolean)}
+                  onClick={(e) => e.stopPropagation()}
+                  disabled={effectiveDisabled}
+                  className="focus-visible:ring-0"
+                  data-testid={`checkbox-${agentData.id}`}
+                />
+              </div>
+              {actionsMenu}
+            </div>
+          </div>
+
+          {/* name + pills */}
+          <div className="flex flex-col gap-1.5">
+            <span
+              className="truncate text-sm font-semibold text-foreground"
+              data-testid={`agent-name-${agentData.id}`}
+            >
+              {agentData.name}
+            </span>
+            <div className="flex flex-wrap items-center gap-1.5">{statusPills}</div>
+          </div>
+
+          {/* description */}
+          <p className="line-clamp-2 min-h-[2rem] text-xs leading-relaxed text-muted-foreground" title={agentData.description || undefined}>
+            {agentData.description?.trim() || "No description provided."}
+          </p>
+
+          {/* tags */}
+          {(agentData.tags ?? []).length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {(agentData.tags ?? []).slice(0, 3).map((tag) => (
+                <span
+                  key={tag}
+                  className="rounded-md border border-border/50 bg-muted/50 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                >
+                  {tag}
+                </span>
+              ))}
+              {(agentData.tags ?? []).length > 3 && (
+                <span className="rounded-md border border-border/50 bg-muted/50 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  +{(agentData.tags ?? []).length - 3}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* footer */}
+          <div className="mt-auto flex items-center justify-between border-t border-border/60 pt-3">
+            <div className="flex min-w-0 items-center gap-2">
+              {createdByLabel && (
+                <>
+                  <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-muted-foreground">
+                    {createdByLabel.slice(0, 2).toUpperCase()}
+                  </div>
+                  <span className="truncate text-xs text-muted-foreground" title={creatorEmail || undefined}>
+                    {createdByLabel}
+                  </span>
+                </>
+              )}
+            </div>
+            <span className="flex-shrink-0 whitespace-nowrap text-xs text-muted-foreground/60">
+              {timeElapsed(agentData.updated_at)} ago
+            </span>
+          </div>
+        </div>
+
+        {openDelete && (
+          <DeleteConfirmationModal
+            open={openDelete}
+            setOpen={setOpenDelete}
+            onConfirm={handleDelete}
+            description={descriptionModal}
+            note={!agentData.is_component ? "and its message history" : ""}
+            errorMessage={deleteError ?? undefined}
+            closeOnConfirm={false}
+            loading={isDeleting}
+          />
+        )}
+        <ExportModal open={openExportModal} setOpen={setOpenExportModal} agentData={agentData} />
+        <AgentSettingsModal open={openSettings} setOpen={setOpenSettings} agentData={agentData} />
+        {transferMode && (
+          <AgentTransferModal
+            open={transferOpen}
+            setOpen={handleTransferOpenChange}
+            mode={transferMode}
+            agent={agentData}
+            currentProjectId={folderId}
+            deploymentWarning={hasDeployment}
+          />
+        )}
+      </>
+    );
+  }
+
+  /* ══════════════ LIST ROW ══════════════ */
   return (
     <>
       <div

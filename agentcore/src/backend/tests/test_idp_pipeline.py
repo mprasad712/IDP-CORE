@@ -194,7 +194,7 @@ async def test_pipeline_routing_auto_approve(monkeypatch):
 
     # high-confidence result + auto_approve policy => auto_approved
     _patch_extraction(monkeypatch, result={
-        "headers": {"f": {"value": "x", "confidence": 0.99}}, "line_items": [],
+        "headers": {"f": {"value": "INV-001", "confidence": 0.99}}, "line_items": [],
     })
     async with session_scope() as session:
         agent_id, doc_id = await _setup_document(
@@ -502,7 +502,7 @@ async def test_process_endpoint(monkeypatch):
     from fastapi.testclient import TestClient
     from agentcore.main import create_app
     from agentcore.services.auth.utils import get_current_active_user
-    from agentcore.api.idp import idp_rbac
+    from agentcore.api.idp import idp_rbac, _idp_submit_rbac
     from agentcore.api.idp import documents as documents_api
     from agentcore.services.database.models.idp.documents import IdpProcessingJob
     from agentcore.services.deps import session_scope
@@ -524,6 +524,7 @@ async def test_process_endpoint(monkeypatch):
     app = create_app()
     app.dependency_overrides[get_current_active_user] = mock_user
     app.dependency_overrides[idp_rbac] = mock_user
+    app.dependency_overrides[_idp_submit_rbac] = mock_user
     client = TestClient(app)
     try:
         r = client.post(f"/api/v1/idp/documents/{doc_id}/process")
@@ -844,7 +845,7 @@ async def test_pipeline_fires_classification_hook(monkeypatch):
 
     _patch_extraction(monkeypatch)
 
-    async def fake_classify(session, document_id, merged_text, org_id, *, auto_select, threshold):
+    async def fake_classify(session, document_id, merged_text, org_id, *, auto_select, threshold, doc_types=None):
         session.add(IdpDocumentClassification(
             document_id=document_id, predicted_type="Invoice", confidence=0.95, is_selected=False,
         ))
@@ -1201,6 +1202,58 @@ async def test_document_log_endpoint(monkeypatch):
         await _cleanup(agent_id, doc_id)
 
 
+@pytest.mark.anyio
+async def test_document_log_download_endpoint(monkeypatch):
+    """GET /documents/{id}/log/download streams the flow.log artifact; 404 when absent."""
+    from fastapi.testclient import TestClient
+    from agentcore.main import create_app
+    from agentcore.services.auth.utils import get_current_active_user
+    from agentcore.api.idp import idp_rbac
+    from agentcore.services.deps import session_scope, get_storage_service
+
+    def mock_user():
+        from types import SimpleNamespace
+        return SimpleNamespace(id=uuid4(), role="root")  # root bypasses org scoping
+
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=b"%PDF-1.4 x")
+
+    expected_path = f"flow_logs/{doc_id}/flow.log"
+
+    class FileStore:
+        async def get_file(self, agent_id, file_name):
+            if file_name == expected_path:
+                return b"load | ok | input received\nextract | ok | 3 headers\nfinalize | ok"
+            raise FileNotFoundError(file_name)
+
+    class EmptyStore:
+        async def get_file(self, agent_id, file_name):
+            raise FileNotFoundError(file_name)
+
+    app = create_app()
+    app.dependency_overrides[get_current_active_user] = mock_user
+    app.dependency_overrides[idp_rbac] = mock_user
+    try:
+        # artifact present → 200 + attachment + text body
+        app.dependency_overrides[get_storage_service] = lambda: FileStore()
+        client = TestClient(app)
+        r = client.get(f"/api/v1/idp/documents/{doc_id}/log/download")
+        assert r.status_code == 200, r.text
+        assert b"input received" in r.content
+        assert "text/plain" in r.headers.get("content-type", "")
+        assert "attachment" in r.headers.get("content-disposition", "")
+        assert "_processing_log.txt" in r.headers.get("content-disposition", "")
+
+        # artifact missing → graceful 404 (never 500)
+        app.dependency_overrides[get_storage_service] = lambda: EmptyStore()
+        client = TestClient(app)
+        r2 = client.get(f"/api/v1/idp/documents/{doc_id}/log/download")
+        assert r2.status_code == 404, r2.text
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup(agent_id, doc_id)
+
+
 @pytest.mark.skipif(
     not __import__("agentcore.services.idp.ocr", fromlist=["_paddle_ocr_available"])._paddle_ocr_available,
     reason="PaddleOCR not installed (runs on M4/NVIDIA/Docker/CI)",
@@ -1231,3 +1284,245 @@ async def test_pipeline_scanned_path(monkeypatch):
             assert doc.status in ("auto_approved", "pending_review", "failed")
     finally:
         await _cleanup(agent_id, doc_id)
+
+
+def test_flow_log_io_helpers_are_bounded():
+    """_clip caps text; _io_sample_rows/_io_headers cap rows/headers for the JSONB log."""
+    assert pipeline._clip("x" * 5000).startswith("x" * pipeline._IO_TEXT_SAMPLE)
+    assert "+" in pipeline._clip("x" * 5000)  # truncation marker
+    assert pipeline._clip("short") == "short"
+
+    # Create well above the caps so the clamp is exercised regardless of the cap values.
+    extracted = {
+        "headers": {f"h{i}": {"value": str(i)} for i in range(pipeline._IO_MAX_HEADERS + 20)},
+        "line_items": [{"columns": [{"column_name": "a", "value": str(i)}]} for i in range(pipeline._IO_MAX_ROWS + 20)],
+    }
+    assert len(pipeline._io_headers(extracted)) == pipeline._IO_MAX_HEADERS
+    assert len(pipeline._io_sample_rows(extracted)) == pipeline._IO_MAX_ROWS
+    assert pipeline._io_sample_rows(extracted)[0] == {"a": "0"}
+
+
+@pytest.mark.anyio
+async def test_pipeline_flow_log_carries_io_payloads(monkeypatch):
+    """The flow log must carry per-component input/output payloads for the UI to render
+    the 'complete cycle' (input received, OCR/text output, what the LLM returned)."""
+    from agentcore.services.database.models.idp.documents import IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    _patch_extraction(monkeypatch, result={
+        "headers": {"invoice_number": {"value": "INV-IO", "confidence": 0.95}},
+        "line_items": [
+            {"columns": [{"column_name": "description", "value": "Row A"}, {"column_name": "amount", "value": "10"}]},
+            {"columns": [{"column_name": "description", "value": "Row B"}, {"column_name": "amount", "value": "20"}]},
+        ],
+    })
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=_digital_pdf())
+
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            job = (await session.exec(select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id))).first()
+            by_step = {e["step"]: e for e in job.log}
+
+            # load -> input payload
+            assert by_step["load"]["io"]["input"]["filename"]
+            # native (digital) -> output text sample (string, bounded)
+            nat = by_step["native"]["io"]["output"]
+            assert isinstance(nat["text_sample"], str) and len(nat["text_sample"]) <= pipeline._IO_TEXT_SAMPLE + 32
+            # extract -> the "what the LLM gave" payload
+            ex = by_step["extract"]["io"]["output"]
+            assert ex["headers"]["invoice_number"] == "INV-IO"
+            assert ex["line_item_rows"] == 2
+            assert ex["sample_rows"][0] == {"description": "Row A", "amount": "10"}
+            # route -> decision payload
+            assert by_step["route"]["io"]["output"]["decision"] in ("auto_approved", "pending_review")
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_named_config_resolution_prefers_real_over_template(monkeypatch):
+    """When two active configs share a name (a catalogue template + a real config), resolution is
+    deterministic and picks the REAL config (is_template False), never the template — and never an
+    arbitrary .first() over unordered rows."""
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent, IdpFieldConfiguration
+    from agentcore.services.deps import session_scope
+
+    name = f"ResolveTest-{uuid4().hex[:8]}"
+    template_id, real_id = uuid4(), uuid4()
+    async with session_scope() as session:
+        # Insert the TEMPLATE first (older) ...
+        session.add(IdpFieldConfiguration(id=template_id, name=name, is_active=True, is_template=True))
+        await session.commit()
+    async with session_scope() as session:
+        # ... then the REAL config (newer, non-template).
+        session.add(IdpFieldConfiguration(id=real_id, name=name, is_active=True, is_template=False))
+        await session.commit()
+
+    try:
+        graph = {
+            "nodes": [
+                _node("AI Field Extractor", {"extraction_mode": "field_configuration", "config_name": name, "prompt": ""}),
+                _node("Large Language Model", {"registry_model": f"GPT | gpt-4o | {uuid4()}"}),
+            ],
+            "edges": [],
+        }
+        idp_agent = IdpAgent(id=uuid4(), agent_id=uuid4(), extraction_mode="named_config")
+        base_agent = Agent(id=uuid4(), name="x", data=graph)  # org_id None -> fallback ranking path
+
+        async with session_scope() as session:
+            cfg = await resolve_pipeline_config(session, idp_agent, base_agent)
+        assert cfg.field_config_id == real_id  # real config wins over the template
+    finally:
+        async with session_scope() as session:
+            for cid in (template_id, real_id):
+                row = await session.get(IdpFieldConfiguration, cid)
+                if row:
+                    await session.delete(row)
+            await session.commit()
+
+
+@pytest.mark.anyio
+async def test_named_config_resolution_never_leaks_another_orgs_config():
+    """Tenant safety: an agent with no org must NOT resolve to ANOTHER org's private config of the
+    same name — only global (org_id NULL) configs are eligible in the fallback."""
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent, IdpFieldConfiguration
+    from agentcore.services.database.models.organization.model import Organization
+    from agentcore.services.database.models.user.model import User
+    from agentcore.services.deps import session_scope
+
+    name = f"TenantTest-{uuid4().hex[:8]}"
+    user_id, org_id = uuid4(), uuid4()
+    global_id, foreign_id = uuid4(), uuid4()
+    async with session_scope() as session:
+        session.add(User(id=user_id, username=f"tt_{user_id.hex[:8]}@t.com", email=f"tt_{user_id.hex[:8]}@t.com",
+                         password="x", is_active=True, is_superuser=False, role="developer"))
+        await session.flush()
+        session.add(Organization(id=org_id, name=f"TenantOrg-{org_id.hex[:8]}", owner_user_id=user_id, created_by=user_id))
+        await session.flush()
+        # Org B's PRIVATE config (newer) + a GLOBAL config (older), same name.
+        session.add(IdpFieldConfiguration(id=global_id, name=name, is_active=True, is_template=False, org_id=None))
+        await session.flush()
+        session.add(IdpFieldConfiguration(id=foreign_id, name=name, is_active=True, is_template=False, org_id=org_id))
+        await session.commit()
+
+    try:
+        graph = {
+            "nodes": [
+                _node("AI Field Extractor", {"extraction_mode": "field_configuration", "config_name": name, "prompt": ""}),
+                _node("Large Language Model", {"registry_model": f"GPT | gpt-4o | {uuid4()}"}),
+            ],
+            "edges": [],
+        }
+        idp_agent = IdpAgent(id=uuid4(), agent_id=uuid4(), extraction_mode="named_config")
+        base_agent = Agent(id=uuid4(), name="x", data=graph)  # NO org -> must not see org B's config
+
+        async with session_scope() as session:
+            cfg = await resolve_pipeline_config(session, idp_agent, base_agent)
+        assert cfg.field_config_id == global_id        # the global config, ...
+        assert cfg.field_config_id != foreign_id       # ... never the other org's private config
+    finally:
+        async with session_scope() as session:
+            for cid in (global_id, foreign_id):
+                row = await session.get(IdpFieldConfiguration, cid)
+                if row:
+                    await session.delete(row)
+            org = await session.get(Organization, org_id)
+            if org:
+                await session.delete(org)
+            usr = await session.get(User, user_id)
+            if usr:
+                await session.delete(usr)
+            await session.commit()
+
+
+def test_resolve_model_id_scans_all_llm_nodes():
+    """A graph with several 'Large Language Model' nodes (the universal pipeline has 2-3, one per
+    consumer) must resolve the model from ANY node that carries one — not only the first node,
+    which may be empty. (Universal-agent blocker fix.)"""
+    from agentcore.services.idp.agent_config import _resolve_model_id_from_graph
+
+    mid = str(uuid4())
+    data = {
+        "nodes": [
+            _node("Large Language Model", {"registry_model": ""}),                      # first: empty
+            _node("Large Language Model", {"registry_model": f"Groq | llama-3.3 | {mid}"}),  # second: filled
+        ],
+        "edges": [],
+    }
+    assert _resolve_model_id_from_graph(data) == mid
+    # No LLM node carries a model -> None.
+    empty = {"nodes": [_node("Large Language Model", {"registry_model": ""})], "edges": []}
+    assert _resolve_model_id_from_graph(empty) is None
+    # A malformed (non-UUID) third part is skipped, not returned.
+    bad = {"nodes": [_node("Large Language Model", {"registry_model": "G | m | not-a-uuid"})], "edges": []}
+    assert _resolve_model_id_from_graph(bad) is None
+    # {"nodes": None} must not raise.
+    assert _resolve_model_id_from_graph({"nodes": None, "edges": None}) is None
+
+
+def test_resolve_model_id_prefers_edge_connected_llm():
+    """With multiple LLM nodes carrying DIFFERENT models, resolve the one EDGE-CONNECTED to the
+    extractor (the model that actually drives extraction), not merely the first node."""
+    from agentcore.services.idp.agent_config import _resolve_model_id_from_graph
+
+    model_a, model_b = str(uuid4()), str(uuid4())
+
+    def _llm(node_id, mid):
+        return {"id": node_id, "type": "genericNode",
+                "data": {"node": {"display_name": "Large Language Model",
+                                  "template": {"registry_model": {"value": f"G | m | {mid}"}}}}}
+
+    ext = {"id": "ext1", "type": "genericNode",
+           "data": {"node": {"display_name": "AI Field Extractor", "template": {"config_name": {"value": ""}}}}}
+    data = {
+        "nodes": [_llm("llmA", model_a), _llm("llmB", model_b), ext],   # A is first by order
+        "edges": [{"source": "llmB", "target": "ext1"}],                # ...but B feeds the extractor
+    }
+    assert _resolve_model_id_from_graph(data) == model_b   # edge-connected wins over node order
+
+
+@pytest.mark.anyio
+async def test_named_config_inferred_when_config_name_set_without_mode():
+    """An AI Field Extractor node that has a Field Configuration selected but NO extraction_mode
+    field (the universal pipeline node) must resolve to named_config — a chosen config is never
+    silently ignored. (Universal-agent blocker fix.)"""
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent, IdpFieldConfiguration, IdpFieldConfigHeader
+    from agentcore.services.deps import session_scope
+
+    name = f"InferTest-{uuid4().hex[:8]}"
+    config_id = uuid4()
+    async with session_scope() as session:
+        session.add(IdpFieldConfiguration(id=config_id, name=name, is_active=True, is_template=False))
+        await session.flush()
+        session.add(IdpFieldConfigHeader(id=uuid4(), config_id=config_id, field_name="total", field_type="number", display_order=0))
+        await session.commit()
+
+    try:
+        # extractor node carries ONLY config_name (no extraction_mode key) — exactly the universal template.
+        graph = {
+            "nodes": [
+                _node("AI Field Extractor", {"config_name": name}),
+                _node("Large Language Model", {"registry_model": f"Groq | m | {uuid4()}"}),
+            ],
+            "edges": [],
+        }
+        # IdpAgent default mode is dynamic — the node's config selection must still win.
+        idp_agent = IdpAgent(id=uuid4(), agent_id=uuid4(), extraction_mode="dynamic_prompting")
+        base_agent = Agent(id=uuid4(), name="x", data=graph)
+
+        async with session_scope() as session:
+            cfg = await resolve_pipeline_config(session, idp_agent, base_agent)
+        assert cfg.extraction_mode == "named_config"      # inferred from config_name
+        assert cfg.field_config_id == config_id           # config actually resolved
+    finally:
+        async with session_scope() as session:
+            row = await session.get(IdpFieldConfiguration, config_id)
+            if row:
+                await session.delete(row)
+            await session.commit()

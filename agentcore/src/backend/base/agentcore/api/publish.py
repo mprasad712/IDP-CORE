@@ -648,6 +648,17 @@ async def _resolve_publish_scope(
         )
     ).all()
     if not base_memberships:
+        if allow_departmentless_private_publish:
+            # No department membership, but departmentless private publish is allowed.
+            # Resolve org from the agent itself or user org memberships.
+            resolved_org_id = agent.org_id
+            if not resolved_org_id:
+                current_user_org_ids = await _current_user_org_ids(session, current_user.id)
+                if current_user_org_ids:
+                    resolved_org_id = sorted(current_user_org_ids, key=str)[0]
+                    agent.org_id = resolved_org_id
+                    session.add(agent)
+            return None, None
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
@@ -1152,6 +1163,7 @@ async def get_publish_context(
         session,
         current_user=current_user,
         agent=agent,
+        allow_departmentless_private_publish=True,
     )
     return PublishContextResponse(
         agent_id=agent.id,
@@ -1851,6 +1863,13 @@ async def uat_deploy_action(
                 if new_is_active is None:
                     new_is_active = False
                 changes.append("status → UNPUBLISHED")
+                # Stop this deployment's background triggers (folder/email monitors). Fully guarded
+                # so a trigger error can never block the unpublish.
+                try:
+                    from agentcore.services.deps import get_trigger_service
+                    await get_trigger_service().deactivate_triggers_for_deployment(session, record.id)
+                except Exception as _trig_err:
+                    logger.warning(f"Trigger deactivation failed for unpublished deployment {record.id}: {_trig_err}")
 
             elif new_status == "PUBLISHED":
                 if current_status_val != "UNPUBLISHED":
@@ -2228,7 +2247,6 @@ async def publish_agent(
         allow_departmentless_private_publish = (
             env == "uat"
             and str(body.visibility).strip().upper() == "PRIVATE"
-            and str(getattr(current_user, "role", "")).lower() in {"root", "super_admin", "admin"}
         )
 
         resolved_department_id, resolved_department_admin_id = await _resolve_publish_scope(
@@ -2425,6 +2443,56 @@ async def publish_agent(
                 )
             except Exception as sched_err:
                 logger.warning(f"FileTrigger sync failed for UAT deploy of {agent_id}: {sched_err}")
+
+            # Sync IDPConnectorInput (Outlook) nodes → auto-create email-monitor trigger_config
+            try:
+                from agentcore.services.deps import get_trigger_service
+                trigger_svc = get_trigger_service()
+                await trigger_svc.sync_email_monitors_for_agent(
+                    session=session,
+                    agent_id=agent_id,
+                    environment="uat",
+                    version=f"v{next_version}",
+                    deployment_id=new_record.id,
+                    flow_data=snapshot,
+                    created_by=current_user.id,
+                )
+            except Exception as mail_err:
+                logger.warning(f"Email-monitor sync failed for UAT deploy of {agent_id}: {mail_err}")
+
+            # Sync IDPConnectorInput (SharePoint) nodes → auto-create folder-monitor trigger_config
+            # (storage_type=SharePoint, ingest_mode=idp_pipeline) so the published agent polls the
+            # selected folder and ingests new files into Processed Docs.
+            try:
+                from agentcore.services.deps import get_trigger_service
+                trigger_svc = get_trigger_service()
+                await trigger_svc.sync_sharepoint_idp_monitors_for_agent(
+                    session=session,
+                    agent_id=agent_id,
+                    environment="uat",
+                    version=f"v{next_version}",
+                    deployment_id=new_record.id,
+                    flow_data=snapshot,
+                    created_by=current_user.id,
+                )
+            except Exception as sp_err:
+                logger.warning(f"SharePoint-monitor sync failed for UAT deploy of {agent_id}: {sp_err}")
+
+            # Sync IDPConnectorInput (OneDrive) nodes → folder-monitor (idp_pipeline) triggers
+            try:
+                from agentcore.services.deps import get_trigger_service
+                trigger_svc = get_trigger_service()
+                await trigger_svc.sync_onedrive_idp_monitors_for_agent(
+                    session=session,
+                    agent_id=agent_id,
+                    environment="uat",
+                    version=f"v{next_version}",
+                    deployment_id=new_record.id,
+                    flow_data=snapshot,
+                    created_by=current_user.id,
+                )
+            except Exception as od_err:
+                logger.warning(f"OneDrive-monitor sync failed for UAT deploy of {agent_id}: {od_err}")
 
             # ─── Sync agent registry after UAT publish ──
             try:
@@ -2629,6 +2697,54 @@ async def publish_agent(
                     )
                 except Exception as fm_err:
                     logger.warning(f"FileTrigger sync failed for PROD deploy of {agent_id}: {fm_err}")
+
+                # Sync IDPConnectorInput (Outlook) nodes → auto-create email-monitor trigger_config
+                try:
+                    from agentcore.services.deps import get_trigger_service
+                    trigger_svc = get_trigger_service()
+                    await trigger_svc.sync_email_monitors_for_agent(
+                        session=session,
+                        agent_id=agent_id,
+                        environment="prod",
+                        version=f"v{next_version}",
+                        deployment_id=new_record.id,
+                        flow_data=snapshot,
+                        created_by=current_user.id,
+                    )
+                except Exception as mail_err:
+                    logger.warning(f"Email-monitor sync failed for PROD deploy of {agent_id}: {mail_err}")
+
+                # Sync IDPConnectorInput (SharePoint) nodes → folder-monitor (idp_pipeline) triggers
+                try:
+                    from agentcore.services.deps import get_trigger_service
+                    trigger_svc = get_trigger_service()
+                    await trigger_svc.sync_sharepoint_idp_monitors_for_agent(
+                        session=session,
+                        agent_id=agent_id,
+                        environment="prod",
+                        version=f"v{next_version}",
+                        deployment_id=new_record.id,
+                        flow_data=snapshot,
+                        created_by=current_user.id,
+                    )
+                except Exception as sp_err:
+                    logger.warning(f"SharePoint-monitor sync failed for PROD deploy of {agent_id}: {sp_err}")
+
+                # Sync IDPConnectorInput (OneDrive) nodes → folder-monitor (idp_pipeline) triggers
+                try:
+                    from agentcore.services.deps import get_trigger_service
+                    trigger_svc = get_trigger_service()
+                    await trigger_svc.sync_onedrive_idp_monitors_for_agent(
+                        session=session,
+                        agent_id=agent_id,
+                        environment="prod",
+                        version=f"v{next_version}",
+                        deployment_id=new_record.id,
+                        flow_data=snapshot,
+                        created_by=current_user.id,
+                    )
+                except Exception as od_err:
+                    logger.warning(f"OneDrive-monitor sync failed for PROD deploy of {agent_id}: {od_err}")
 
                 # ─── Publish notification (DB-verified) ──
                 await _notify_publish_event(

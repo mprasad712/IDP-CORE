@@ -628,7 +628,7 @@ async def get_observability_scope_options(
     org_rows: list[tuple[UUID, str]] = []
     dept_rows: list[tuple[UUID, str, UUID]] = []
 
-    if role in {"business_user", "developer", "consumer"}:
+    if role in {"doc_reviewer", "idp_configurator", "doc_submitter"}:
         # These roles only see their own traces — no org/dept selection needed.
         return ScopeOptionsResponse(
             role=role,

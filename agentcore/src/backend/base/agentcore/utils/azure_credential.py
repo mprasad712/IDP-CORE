@@ -23,3 +23,4 @@ def get_azure_credential_async():
         return WorkloadIdentityCredential()
     from azure.identity.aio import DefaultAzureCredential
     return DefaultAzureCredential(exclude_interactive_browser_credential=True)
+
