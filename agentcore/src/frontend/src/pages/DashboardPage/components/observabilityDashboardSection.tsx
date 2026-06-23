@@ -21,16 +21,23 @@ import {
   ExternalLink,
   Activity,
   Terminal,
-  AlertTriangle
+  AlertTriangle,
+  Bot,
+  Folder,
+  Users
 } from "lucide-react";
 import { api } from "@/controllers/API/api";
 import { cn } from "@/utils/utils";
+import { useCustomNavigate } from "@/customization/hooks/use-custom-navigate";
 import { ObservabilityTraceDrawer } from "@/components/core/observabilityTraceDrawer";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type {
   MetricsResponse,
   TracesListResponse,
-  TraceListItem
+  TraceListItem,
+  AgentListResponse,
+  ProjectListResponse,
+  UserUsageListResponse
 } from "@/controllers/API/queries/observability/types";
 import { useGetDepartments } from "@/controllers/API/queries/auth";
 import type { DepartmentListItem } from "@/controllers/API/queries/auth/use-get-departments";
@@ -66,6 +73,8 @@ export function ObservabilityDashboardSection({
   accentColor,
   viewMode = "single"
 }: ObservabilityDashboardSectionProps) {
+  const navigate = useCustomNavigate();
+
   // Local Telemetry State
   const [metrics, setMetrics] = React.useState<MetricsResponse | null>(null);
   const [tracesData, setTracesData] = React.useState<TracesListResponse | null>(null);
@@ -85,6 +94,41 @@ export function ObservabilityDashboardSection({
   // Selected trace for timeline drawer
   const [selectedTraceId, setSelectedTraceId] = React.useState<string | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = React.useState(false);
+
+  // Privileged check for Users Tab visibility
+  const showUsersTab = isSuperAdmin || isLeaderExecutive || isDocApprover || isDepartmentAdmin;
+
+  // New Observability State Hooks
+  const [agentsData, setAgentsData] = React.useState<AgentListResponse | null>(null);
+  const [isLoadingAgents, setIsLoadingAgents] = React.useState(true);
+  const [errorAgents, setErrorAgents] = React.useState<string | null>(null);
+
+  const [projectsData, setProjectsData] = React.useState<ProjectListResponse | null>(null);
+  const [isLoadingProjects, setIsLoadingProjects] = React.useState(true);
+  const [errorProjects, setErrorProjects] = React.useState<string | null>(null);
+
+  const [usersData, setUsersData] = React.useState<UserUsageListResponse | null>(null);
+  const [isLoadingUsers, setIsLoadingUsers] = React.useState(true);
+  const [errorUsers, setErrorUsers] = React.useState<string | null>(null);
+
+  // Search & Pagination states for new tabs
+  const [agentsSearch, setAgentsSearch] = React.useState("");
+  const [agentsPage, setAgentsPage] = React.useState(1);
+
+  const [projectsSearch, setProjectsSearch] = React.useState("");
+  const [projectsPage, setProjectsPage] = React.useState(1);
+
+  const [usersSearch, setUsersSearch] = React.useState("");
+  const [usersPage, setUsersPage] = React.useState(1);
+
+  const [modelsSearch, setModelsSearch] = React.useState("");
+
+  // Tab & click-through filter states
+  const [activeTab, setActiveTab] = React.useState("overview");
+  const [selectedAgentId, setSelectedAgentId] = React.useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = React.useState<string | null>(null);
+
+  const itemsPerPage = 10;
 
   const dateRangeLabel = React.useMemo(() => {
     if (dateRangeFilter === "1") return "today";
@@ -191,6 +235,9 @@ export function ObservabilityDashboardSection({
       }
     }
     if (environmentFilter !== "all") params.environment = environmentFilter;
+    if (selectedAgentId) {
+      params.session_id = selectedAgentId;
+    }
 
     // Fetch dates according to range filter selection
     const todayStr = new Date().toISOString().slice(0, 10);
@@ -221,7 +268,217 @@ export function ObservabilityDashboardSection({
     return () => {
       active = false;
     };
-  }, [traceScopeFilter, selectedDeptId, userData?.organization_id, userData?.department_id, environmentFilter, dateRangeFilter, page, refreshTick, isSuperAdmin, isLeaderExecutive, isDocApprover]);
+  }, [traceScopeFilter, selectedDeptId, userData?.organization_id, userData?.department_id, environmentFilter, dateRangeFilter, page, refreshTick, isSuperAdmin, isLeaderExecutive, isDocApprover, selectedAgentId]);
+
+  // Fetch agents data
+  React.useEffect(() => {
+    let active = true;
+    setIsLoadingAgents(true);
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const ago = new Date();
+    const daysOffset = dateRangeFilter === "1" ? 0 : Number(dateRangeFilter);
+    ago.setDate(ago.getDate() - daysOffset);
+    const fromDateStr = ago.toISOString().slice(0, 10);
+
+    const params: Record<string, any> = {
+      from_date: fromDateStr,
+      to_date: todayStr,
+      trace_scope: traceScopeFilter,
+      tz_offset: tzOffset,
+      fetch_all: true
+    };
+    if (userData?.organization_id) params.org_id = userData.organization_id;
+    if (traceScopeFilter === "dept") {
+      if ((isSuperAdmin || isLeaderExecutive || isDocApprover) && selectedDeptId) {
+        params.dept_id = selectedDeptId;
+      } else if (userData?.department_id) {
+        params.dept_id = userData.department_id;
+      }
+    }
+    if (environmentFilter !== "all") params.environment = environmentFilter;
+
+    api.get<AgentListResponse>("/api/observability/agents", { params })
+      .then((res) => {
+        if (active) {
+          setAgentsData(res.data);
+          setErrorAgents(null);
+        }
+      })
+      .catch((err) => {
+        if (active) {
+          setErrorAgents(err?.response?.data?.detail || "Failed to fetch agents data");
+        }
+      })
+      .finally(() => {
+        if (active) setIsLoadingAgents(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [traceScopeFilter, selectedDeptId, userData?.organization_id, userData?.department_id, environmentFilter, dateRangeFilter, tzOffset, refreshTick, isSuperAdmin, isLeaderExecutive, isDocApprover]);
+
+  // Fetch projects data
+  React.useEffect(() => {
+    let active = true;
+    setIsLoadingProjects(true);
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const ago = new Date();
+    const daysOffset = dateRangeFilter === "1" ? 0 : Number(dateRangeFilter);
+    ago.setDate(ago.getDate() - daysOffset);
+    const fromDateStr = ago.toISOString().slice(0, 10);
+
+    const params: Record<string, any> = {
+      from_date: fromDateStr,
+      to_date: todayStr,
+      trace_scope: traceScopeFilter,
+      tz_offset: tzOffset,
+      fetch_all: true
+    };
+    if (userData?.organization_id) params.org_id = userData.organization_id;
+    if (traceScopeFilter === "dept") {
+      if ((isSuperAdmin || isLeaderExecutive || isDocApprover) && selectedDeptId) {
+        params.dept_id = selectedDeptId;
+      } else if (userData?.department_id) {
+        params.dept_id = userData.department_id;
+      }
+    }
+    if (environmentFilter !== "all") params.environment = environmentFilter;
+
+    api.get<ProjectListResponse>("/api/observability/projects", { params })
+      .then((res) => {
+        if (active) {
+          setProjectsData(res.data);
+          setErrorProjects(null);
+        }
+      })
+      .catch((err) => {
+        if (active) {
+          setErrorProjects(err?.response?.data?.detail || "Failed to fetch projects data");
+        }
+      })
+      .finally(() => {
+        if (active) setIsLoadingProjects(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [traceScopeFilter, selectedDeptId, userData?.organization_id, userData?.department_id, environmentFilter, dateRangeFilter, tzOffset, refreshTick, isSuperAdmin, isLeaderExecutive, isDocApprover]);
+
+  // Fetch users usage data
+  React.useEffect(() => {
+    if (!showUsersTab) return;
+    let active = true;
+    setIsLoadingUsers(true);
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const ago = new Date();
+    const daysOffset = dateRangeFilter === "1" ? 0 : Number(dateRangeFilter);
+    ago.setDate(ago.getDate() - daysOffset);
+    const fromDateStr = ago.toISOString().slice(0, 10);
+
+    const params: Record<string, any> = {
+      from_date: fromDateStr,
+      to_date: todayStr,
+      trace_scope: traceScopeFilter,
+      tz_offset: tzOffset
+    };
+    if (userData?.organization_id) params.org_id = userData.organization_id;
+    if (traceScopeFilter === "dept") {
+      if ((isSuperAdmin || isLeaderExecutive || isDocApprover) && selectedDeptId) {
+        params.dept_id = selectedDeptId;
+      } else if (userData?.department_id) {
+        params.dept_id = userData.department_id;
+      }
+    }
+    if (environmentFilter !== "all") params.environment = environmentFilter;
+
+    api.get<UserUsageListResponse>("/api/observability/users", { params })
+      .then((res) => {
+        if (active) {
+          setUsersData(res.data);
+          setErrorUsers(null);
+        }
+      })
+      .catch((err) => {
+        if (active) {
+          setErrorUsers(err?.response?.data?.detail || "Failed to fetch users usage data");
+        }
+      })
+      .finally(() => {
+        if (active) setIsLoadingUsers(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [showUsersTab, traceScopeFilter, selectedDeptId, userData?.organization_id, userData?.department_id, environmentFilter, dateRangeFilter, tzOffset, refreshTick, isSuperAdmin, isLeaderExecutive, isDocApprover]);
+
+  // Local filtering & pagination computations
+  const filteredAgents = React.useMemo(() => {
+    if (!agentsData?.agents) return [];
+    let list = agentsData.agents;
+    if (selectedProjectId) {
+      list = list.filter(a => a.project_id === selectedProjectId);
+    }
+    if (!agentsSearch.trim()) return list;
+    const s = agentsSearch.toLowerCase().trim();
+    return list.filter(a =>
+      (a.agent_name && a.agent_name.toLowerCase().includes(s)) ||
+      (a.project_name && a.project_name.toLowerCase().includes(s))
+    );
+  }, [agentsData, agentsSearch, selectedProjectId]);
+
+  const paginatedAgents = React.useMemo(() => {
+    const start = (agentsPage - 1) * itemsPerPage;
+    return filteredAgents.slice(start, start + itemsPerPage);
+  }, [filteredAgents, agentsPage]);
+
+  const totalAgentsPages = Math.ceil(filteredAgents.length / itemsPerPage) || 1;
+
+  const filteredProjects = React.useMemo(() => {
+    if (!projectsData?.projects) return [];
+    if (!projectsSearch.trim()) return projectsData.projects;
+    const s = projectsSearch.toLowerCase().trim();
+    return projectsData.projects.filter(p =>
+      p.project_name && p.project_name.toLowerCase().includes(s)
+    );
+  }, [projectsData, projectsSearch]);
+
+  const paginatedProjects = React.useMemo(() => {
+    const start = (projectsPage - 1) * itemsPerPage;
+    return filteredProjects.slice(start, start + itemsPerPage);
+  }, [filteredProjects, projectsPage]);
+
+  const totalProjectsPages = Math.ceil(filteredProjects.length / itemsPerPage) || 1;
+
+  const filteredUsers = React.useMemo(() => {
+    if (!usersData?.users) return [];
+    if (!usersSearch.trim()) return usersData.users;
+    const s = usersSearch.toLowerCase().trim();
+    return usersData.users.filter(u =>
+      (u.username && u.username.toLowerCase().includes(s)) ||
+      (u.display_name && u.display_name.toLowerCase().includes(s)) ||
+      (u.email && u.email.toLowerCase().includes(s))
+    );
+  }, [usersData, usersSearch]);
+
+  const paginatedUsers = React.useMemo(() => {
+    const start = (usersPage - 1) * itemsPerPage;
+    return filteredUsers.slice(start, start + itemsPerPage);
+  }, [filteredUsers, usersPage]);
+
+  const totalUsersPages = Math.ceil(filteredUsers.length / itemsPerPage) || 1;
+
+  const filteredModels = React.useMemo(() => {
+    if (!metrics?.by_model) return [];
+    if (!modelsSearch.trim()) return metrics.by_model;
+    const s = modelsSearch.toLowerCase().trim();
+    return metrics.by_model.filter(m => m.model.toLowerCase().includes(s));
+  }, [metrics, modelsSearch]);
 
   // Search submit trigger
   const handleSearchSubmit = (e: React.FormEvent) => {
@@ -531,7 +788,25 @@ export function ObservabilityDashboardSection({
       
       {/* Table Filters Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between px-4 py-3 border-b border-border bg-stone-50/40 dark:bg-zinc-800/20">
-        <p className="text-xs font-bold text-[#2D2926] dark:text-zinc-200">IDP Execution Trace Log Grid</p>
+        <div className="flex items-center gap-2">
+          <p className="text-xs font-bold text-[#2D2926] dark:text-zinc-200">IDP Execution Trace Log Grid</p>
+          {selectedAgentId && (
+            <span className="flex items-center gap-1 bg-[#D04A02]/10 border border-[#D04A02]/20 text-[#D04A02] font-semibold text-[10px] px-2 py-0.5 rounded-full">
+              <span>Agent: {agentsData?.agents.find(a => a.agent_id === selectedAgentId)?.agent_name || selectedAgentId.slice(0, 8)}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedAgentId(null);
+                  setPage(1);
+                }}
+                className="text-stone-500 hover:text-[#D04A02] font-bold text-xs leading-none ml-1 focus:outline-none"
+                title="Clear filter"
+              >
+                &times;
+              </button>
+            </span>
+          )}
+        </div>
         
         <div className="flex flex-wrap items-center gap-2">
           {/* Search Input */}
@@ -691,8 +966,8 @@ export function ObservabilityDashboardSection({
 
         {globalFilters}
 
-        <Tabs defaultValue="overview" className="w-full flex flex-col gap-6">
-          <TabsList className="h-9 bg-transparent p-0 gap-1 border-b border-border w-full justify-start rounded-none">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full flex flex-col gap-6">
+          <TabsList className="h-9 bg-transparent p-0 gap-1 border-b border-border w-full justify-start rounded-none flex-wrap">
             <TabsTrigger
               value="overview"
               className={cn(
@@ -715,6 +990,52 @@ export function ObservabilityDashboardSection({
               <Terminal className="h-4 w-4 mr-2" />
               Traces & Execution Logs
             </TabsTrigger>
+            <TabsTrigger
+              value="agents"
+              className={cn(
+                "h-9 rounded-none border-b-2 border-transparent px-4 text-sm font-medium text-muted-foreground transition-all",
+                "data-[state=active]:border-[#D04A02] data-[state=active]:text-foreground data-[state=active]:shadow-none",
+                "data-[state=active]:bg-transparent hover:text-foreground",
+              )}
+            >
+              <Bot className="h-4 w-4 mr-2" />
+              Agents
+            </TabsTrigger>
+            <TabsTrigger
+              value="projects"
+              className={cn(
+                "h-9 rounded-none border-b-2 border-transparent px-4 text-sm font-medium text-muted-foreground transition-all",
+                "data-[state=active]:border-[#D04A02] data-[state=active]:text-foreground data-[state=active]:shadow-none",
+                "data-[state=active]:bg-transparent hover:text-foreground",
+              )}
+            >
+              <Folder className="h-4 w-4 mr-2" />
+              Projects
+            </TabsTrigger>
+            <TabsTrigger
+              value="models"
+              className={cn(
+                "h-9 rounded-none border-b-2 border-transparent px-4 text-sm font-medium text-muted-foreground transition-all",
+                "data-[state=active]:border-[#D04A02] data-[state=active]:text-foreground data-[state=active]:shadow-none",
+                "data-[state=active]:bg-transparent hover:text-foreground",
+              )}
+            >
+              <Cpu className="h-4 w-4 mr-2" />
+              Models
+            </TabsTrigger>
+            {showUsersTab && (
+              <TabsTrigger
+                value="users"
+                className={cn(
+                  "h-9 rounded-none border-b-2 border-transparent px-4 text-sm font-medium text-muted-foreground transition-all",
+                  "data-[state=active]:border-[#D04A02] data-[state=active]:text-foreground data-[state=active]:shadow-none",
+                  "data-[state=active]:bg-transparent hover:text-foreground",
+                )}
+              >
+                <Users className="h-4 w-4 mr-2" />
+                Users
+              </TabsTrigger>
+            )}
           </TabsList>
 
           <TabsContent value="overview" className="space-y-6 outline-none focus:outline-none focus-visible:outline-none m-0">
@@ -725,6 +1046,478 @@ export function ObservabilityDashboardSection({
           <TabsContent value="traces" className="outline-none focus:outline-none focus-visible:outline-none m-0">
             {tracesGrid}
           </TabsContent>
+
+          <TabsContent value="agents" className="outline-none focus:outline-none focus-visible:outline-none m-0">
+            <div className="rounded-xl border border-border bg-white dark:bg-zinc-900 shadow-sm overflow-hidden">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between px-4 py-3 border-b border-border bg-stone-50/40 dark:bg-zinc-800/20">
+                <div className="flex items-center gap-2">
+                  <p className="text-xs font-bold text-[#2D2926] dark:text-zinc-200">Agent Performance Telemetry</p>
+                  {selectedProjectId && (
+                    <span className="flex items-center gap-1 bg-[#D04A02]/10 border border-[#D04A02]/20 text-[#D04A02] font-semibold text-[10px] px-2 py-0.5 rounded-full">
+                      <span>Folder: {projectsData?.projects.find(p => p.project_id === selectedProjectId)?.project_name || selectedProjectId.slice(0, 8)}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedProjectId(null);
+                          setAgentsPage(1);
+                        }}
+                        className="text-stone-500 hover:text-[#D04A02] font-bold text-xs leading-none ml-1 focus:outline-none"
+                        title="Clear filter"
+                      >
+                        &times;
+                      </button>
+                    </span>
+                  )}
+                </div>
+                <div className="relative w-48 sm:w-56">
+                  <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" />
+                  <input
+                    type="text"
+                    placeholder="Search agents..."
+                    value={agentsSearch}
+                    onChange={(e) => {
+                      setAgentsSearch(e.target.value);
+                      setAgentsPage(1);
+                    }}
+                    className="w-full h-7.5 rounded-lg border border-border bg-background pl-8 pr-3 text-xxs focus:outline-none focus:ring-1 focus:ring-[#D04A02]"
+                  />
+                </div>
+              </div>
+
+              <div className="overflow-x-auto w-full">
+                {isLoadingAgents ? (
+                  <div className="flex h-36 items-center justify-center text-xs text-muted-foreground">Loading agents telemetry...</div>
+                ) : errorAgents ? (
+                  <div className="flex h-36 flex-col items-center justify-center p-4 text-center">
+                    <AlertTriangle className="h-6 w-6 text-red-500" />
+                    <p className="text-xs text-red-800 dark:text-red-400 mt-1 font-semibold">Could not load agents list</p>
+                    <p className="text-[10px] text-muted-foreground">{errorAgents}</p>
+                  </div>
+                ) : paginatedAgents.length === 0 ? (
+                  <div className="flex h-36 items-center justify-center text-xs text-muted-foreground italic">No agents telemetry recorded in this window.</div>
+                ) : (
+                  <table className="min-w-full divide-y divide-border text-left">
+                    <thead className="bg-stone-50/40 dark:bg-zinc-800/10 text-xxs text-muted-foreground uppercase font-bold tracking-wider">
+                      <tr>
+                        <th className="px-4 py-2.5">Agent Name</th>
+                        <th className="px-4 py-2.5">Project Folder</th>
+                        <th className="px-4 py-2.5">Runs</th>
+                        <th className="px-4 py-2.5">Cost</th>
+                        <th className="px-4 py-2.5">Tokens</th>
+                        <th className="px-4 py-2.5">Avg Latency</th>
+                        <th className="px-4 py-2.5 text-right font-bold uppercase">Last Active</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border text-xxs text-foreground leading-normal">
+                      {paginatedAgents.map((agent) => (
+                        <tr key={agent.agent_id} className="hover:bg-stone-50/50 dark:hover:bg-zinc-800/20 transition-colors">
+                          <td className="px-4 py-3 font-semibold text-foreground">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedAgentId(agent.agent_id);
+                                setActiveTab("traces");
+                                setPage(1);
+                              }}
+                              className="flex items-center gap-1.5 hover:underline text-[#D04A02] font-semibold text-left focus:outline-none"
+                            >
+                              <Bot className="h-3.5 w-3.5 text-orange-600 shrink-0" />
+                              <span className="truncate max-w-xs">{agent.agent_name || `Agent: ${agent.agent_id.slice(0, 8)}`}</span>
+                            </button>
+                          </td>
+                          <td className="px-4 py-3 text-muted-foreground font-semibold">
+                            {agent.project_id ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedProjectId(agent.project_id);
+                                  setAgentsPage(1);
+                                }}
+                                className="flex items-center gap-1 hover:underline hover:text-[#D04A02] text-left focus:outline-none"
+                              >
+                                <Folder className="h-3 w-3 shrink-0 text-orange-600/75" />
+                                <span className="truncate max-w-[150px]">{agent.project_name || `Folder: ${agent.project_id.slice(0, 8)}`}</span>
+                              </button>
+                            ) : (
+                              <span className="italic text-muted-foreground/60 text-xxs">No folder</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 font-mono">{agent.trace_count.toLocaleString()}</td>
+                          <td className="px-4 py-3 font-mono">${agent.total_cost.toFixed(5)}</td>
+                          <td className="px-4 py-3 font-mono">{agent.total_tokens.toLocaleString()}</td>
+                          <td className="px-4 py-3 font-mono">{formatDuration(agent.avg_latency_ms)}</td>
+                          <td className="px-4 py-3 text-right text-muted-foreground font-mono">
+                            {agent.last_activity ? new Date(agent.last_activity).toLocaleString() : "N/A"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              {!isLoadingAgents && !errorAgents && filteredAgents.length > 0 && (
+                <div className="flex items-center justify-between border-t border-border px-4 py-3 bg-stone-50/20 dark:bg-zinc-800/10">
+                  <div className="text-xxs text-muted-foreground">
+                    Showing page <span className="font-semibold text-foreground">{agentsPage}</span> of{" "}
+                    <span className="font-semibold text-foreground">{totalAgentsPages}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={agentsPage === 1}
+                      onClick={() => setAgentsPage((p) => Math.max(1, p - 1))}
+                      className="h-7 w-7 flex items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground disabled:opacity-50 transition-colors active:scale-90"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={agentsPage >= totalAgentsPages}
+                      onClick={() => setAgentsPage((p) => Math.min(totalAgentsPages, p + 1))}
+                      className="h-7 w-7 flex items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground disabled:opacity-50 transition-colors active:scale-90"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="projects" className="outline-none focus:outline-none focus-visible:outline-none m-0">
+            <div className="rounded-xl border border-border bg-white dark:bg-zinc-900 shadow-sm overflow-hidden">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between px-4 py-3 border-b border-border bg-stone-50/40 dark:bg-zinc-800/20">
+                <p className="text-xs font-bold text-[#2D2926] dark:text-zinc-200">Project Folder Spend & Usage</p>
+                <div className="relative w-48 sm:w-56">
+                  <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" />
+                  <input
+                    type="text"
+                    placeholder="Search projects..."
+                    value={projectsSearch}
+                    onChange={(e) => {
+                      setProjectsSearch(e.target.value);
+                      setProjectsPage(1);
+                    }}
+                    className="w-full h-7.5 rounded-lg border border-border bg-background pl-8 pr-3 text-xxs focus:outline-none focus:ring-1 focus:ring-[#D04A02]"
+                  />
+                </div>
+              </div>
+
+              <div className="overflow-x-auto w-full">
+                {isLoadingProjects ? (
+                  <div className="flex h-36 items-center justify-center text-xs text-muted-foreground">Loading projects telemetry...</div>
+                ) : errorProjects ? (
+                  <div className="flex h-36 flex-col items-center justify-center p-4 text-center">
+                    <AlertTriangle className="h-6 w-6 text-red-500" />
+                    <p className="text-xs text-red-800 dark:text-red-400 mt-1 font-semibold">Could not load projects list</p>
+                    <p className="text-[10px] text-muted-foreground">{errorProjects}</p>
+                  </div>
+                ) : paginatedProjects.length === 0 ? (
+                  <div className="flex h-36 items-center justify-center text-xs text-muted-foreground italic">No projects telemetry recorded in this window.</div>
+                ) : (
+                  <table className="min-w-full divide-y divide-border text-left">
+                    <thead className="bg-stone-50/40 dark:bg-zinc-800/10 text-xxs text-muted-foreground uppercase font-bold tracking-wider">
+                      <tr>
+                        <th className="px-4 py-2.5">Project Name</th>
+                        <th className="px-4 py-2.5">Connected Agents</th>
+                        <th className="px-4 py-2.5">Total Runs</th>
+                        <th className="px-4 py-2.5">Cost</th>
+                        <th className="px-4 py-2.5">Tokens</th>
+                        <th className="px-4 py-2.5 text-right font-bold uppercase">Last Active</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border text-xxs text-foreground leading-normal">
+                      {paginatedProjects.map((proj) => (
+                        <tr key={proj.project_id} className="hover:bg-stone-50/50 dark:hover:bg-zinc-800/20 transition-colors">
+                          <td className="px-4 py-3 font-semibold text-foreground">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedProjectId(proj.project_id);
+                                setActiveTab("agents");
+                                setAgentsPage(1);
+                              }}
+                              className="flex items-center gap-1.5 hover:underline text-[#D04A02] font-semibold text-left focus:outline-none"
+                              title={proj.project_name || proj.project_id}
+                            >
+                              <Folder className="h-3.5 w-3.5 text-orange-600 shrink-0" />
+                              <span className="truncate max-w-xs">{proj.project_name || `Project: ${proj.project_id.slice(0, 8)}`}</span>
+                            </button>
+                          </td>
+                          <td className="px-4 py-3 text-muted-foreground font-semibold">
+                            {proj.agent_count} {proj.agent_count === 1 ? "agent" : "agents"}
+                          </td>
+                          <td className="px-4 py-3 font-mono">{proj.trace_count.toLocaleString()}</td>
+                          <td className="px-4 py-3 font-mono">${proj.total_cost.toFixed(5)}</td>
+                          <td className="px-4 py-3 font-mono">{proj.total_tokens.toLocaleString()}</td>
+                          <td className="px-4 py-3 text-right text-muted-foreground font-mono">
+                            {proj.last_activity ? new Date(proj.last_activity).toLocaleString() : "N/A"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              {!isLoadingProjects && !errorProjects && filteredProjects.length > 0 && (
+                <div className="flex items-center justify-between border-t border-border px-4 py-3 bg-stone-50/20 dark:bg-zinc-800/10">
+                  <div className="text-xxs text-muted-foreground">
+                    Showing page <span className="font-semibold text-foreground">{projectsPage}</span> of{" "}
+                    <span className="font-semibold text-foreground">{totalProjectsPages}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={projectsPage === 1}
+                      onClick={() => setProjectsPage((p) => Math.max(1, p - 1))}
+                      className="h-7 w-7 flex items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground disabled:opacity-50 transition-colors active:scale-90"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={projectsPage >= totalProjectsPages}
+                      onClick={() => setProjectsPage((p) => Math.min(totalProjectsPages, p + 1))}
+                      className="h-7 w-7 flex items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground disabled:opacity-50 transition-colors active:scale-90"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="models" className="outline-none focus:outline-none focus-visible:outline-none m-0">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+              <div className="overflow-hidden rounded-xl border border-border bg-white dark:bg-zinc-900 shadow-sm flex flex-col h-full lg:col-span-1">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-orange-50/5 dark:bg-zinc-800/40">
+                  <div>
+                    <p className="text-xs font-bold text-foreground leading-tight">Model Breakdown Chart</p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">Distribution of cost or runs by model type</p>
+                  </div>
+                  <Cpu className="h-3.5 w-3.5 text-orange-600" />
+                </div>
+                <div className="p-4 flex flex-col items-center justify-center gap-4 flex-grow">
+                  {isLoadingMetrics ? (
+                    <div className="text-xs text-muted-foreground animate-pulse">Loading chart...</div>
+                  ) : modelUsageData.length > 0 ? (
+                    <>
+                      <PieChart width={140} height={140}>
+                        <Pie
+                          data={modelUsageData}
+                          dataKey="value"
+                          nameKey="label"
+                          innerRadius={24}
+                          outerRadius={44}
+                          paddingAngle={2}
+                        >
+                          {modelUsageData.map((_, i) => (
+                            <Cell key={i} fill={chartColors[i % chartColors.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip content={<DonutTooltip />} />
+                      </PieChart>
+                      <div className="space-y-1.5 w-full overflow-y-auto max-h-[120px] px-2">
+                        {modelUsageData.map((slice, i) => (
+                          <div key={slice.label} className="flex items-center justify-between text-xxs leading-snug">
+                            <div className="flex items-center gap-1.5 truncate">
+                              <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: chartColors[i % chartColors.length] }} />
+                              <span className="text-muted-foreground truncate" title={slice.label}>{slice.label}</span>
+                            </div>
+                            <span className="font-semibold text-foreground font-mono">
+                              {metrics?.by_model?.[i]?.total_cost > 0 ? `$${slice.value.toFixed(4)}` : slice.value}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-xs text-muted-foreground italic">No model data recorded</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="overflow-hidden rounded-xl border border-border bg-white dark:bg-zinc-900 shadow-sm lg:col-span-2">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between px-4 py-3 border-b border-border bg-stone-50/40 dark:bg-zinc-800/20">
+                  <p className="text-xs font-bold text-[#2D2926] dark:text-zinc-200">LLM Provider Metrics</p>
+                  <div className="relative w-48 sm:w-56">
+                    <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" />
+                    <input
+                      type="text"
+                      placeholder="Search models..."
+                      value={modelsSearch}
+                      onChange={(e) => setModelsSearch(e.target.value)}
+                      className="w-full h-7.5 rounded-lg border border-border bg-background pl-8 pr-3 text-xxs focus:outline-none focus:ring-1 focus:ring-[#D04A02]"
+                    />
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto w-full">
+                  {isLoadingMetrics ? (
+                    <div className="flex h-36 items-center justify-center text-xs text-muted-foreground">Loading models list...</div>
+                  ) : filteredModels.length === 0 ? (
+                    <div className="flex h-36 items-center justify-center text-xs text-muted-foreground italic">No model usage recorded.</div>
+                  ) : (
+                    <table className="min-w-full divide-y divide-border text-left">
+                      <thead className="bg-stone-50/40 dark:bg-zinc-800/10 text-xxs text-muted-foreground uppercase font-bold tracking-wider">
+                        <tr>
+                          <th className="px-4 py-2.5">Model</th>
+                          <th className="px-4 py-2.5">Calls</th>
+                          <th className="px-4 py-2.5">Cost</th>
+                          <th className="px-4 py-2.5">Tokens (Prompt/Comp)</th>
+                          <th className="px-4 py-2.5 font-bold uppercase">Avg Latency</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border text-xxs text-foreground leading-normal">
+                        {filteredModels.map((m) => (
+                          <tr key={m.model} className="hover:bg-stone-50/50 dark:hover:bg-zinc-800/20 transition-colors">
+                            <td className="px-4 py-3 font-semibold font-mono text-foreground flex items-center gap-1.5">
+                              <Cpu className="h-3.5 w-3.5 text-orange-600 shrink-0" />
+                              {m.model}
+                            </td>
+                            <td className="px-4 py-3 font-mono">{m.call_count.toLocaleString()}</td>
+                            <td className="px-4 py-3 font-mono">${m.total_cost.toFixed(5)}</td>
+                            <td className="px-4 py-3 font-mono">
+                              <div>{m.total_tokens.toLocaleString()}</div>
+                              <div className="text-[10px] text-muted-foreground">
+                                in: {m.input_tokens.toLocaleString()} / out: {m.output_tokens.toLocaleString()}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 font-mono">{formatDuration(m.avg_latency_ms)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            </div>
+          </TabsContent>
+
+          {showUsersTab && (
+            <TabsContent value="users" className="outline-none focus:outline-none focus-visible:outline-none m-0">
+              <div className="rounded-xl border border-border bg-white dark:bg-zinc-900 shadow-sm overflow-hidden">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between px-4 py-3 border-b border-border bg-stone-50/40 dark:bg-zinc-800/20">
+                  <p className="text-xs font-bold text-[#2D2926] dark:text-zinc-200">User Telemetry & Spend Breakdown</p>
+                  <div className="relative w-48 sm:w-56">
+                    <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" />
+                    <input
+                      type="text"
+                      placeholder="Search users..."
+                      value={usersSearch}
+                      onChange={(e) => {
+                        setUsersSearch(e.target.value);
+                        setUsersPage(1);
+                      }}
+                      className="w-full h-7.5 rounded-lg border border-border bg-background pl-8 pr-3 text-xxs focus:outline-none focus:ring-1 focus:ring-[#D04A02]"
+                    />
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto w-full">
+                  {isLoadingUsers ? (
+                    <div className="flex h-36 items-center justify-center text-xs text-muted-foreground">Loading users usage data...</div>
+                  ) : errorUsers ? (
+                    <div className="flex h-36 flex-col items-center justify-center p-4 text-center">
+                      <AlertTriangle className="h-6 w-6 text-red-500" />
+                      <p className="text-xs text-red-800 dark:text-red-400 mt-1 font-semibold">Could not load users usage data</p>
+                      <p className="text-[10px] text-muted-foreground">{errorUsers}</p>
+                    </div>
+                  ) : paginatedUsers.length === 0 ? (
+                    <div className="flex h-36 items-center justify-center text-xs text-muted-foreground italic">No users usage recorded in this window.</div>
+                  ) : (
+                    <table className="min-w-full divide-y divide-border text-left">
+                      <thead className="bg-stone-50/40 dark:bg-zinc-800/10 text-xxs text-muted-foreground uppercase font-bold tracking-wider">
+                        <tr>
+                          <th className="px-4 py-2.5">User</th>
+                          <th className="px-4 py-2.5">Role</th>
+                          <th className="px-4 py-2.5">Executed Runs</th>
+                          <th className="px-4 py-2.5">Cost</th>
+                          <th className="px-4 py-2.5">Tokens Consumed</th>
+                          <th className="px-4 py-2.5 text-right font-bold uppercase">Last Active</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border text-xxs text-foreground leading-normal">
+                        {paginatedUsers.map((user) => {
+                          const displayRole = user.role.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+                          let rolePillClass = "bg-stone-100 text-stone-800 border-stone-200";
+                          if (user.role === "super_admin") {
+                            rolePillClass = "bg-rose-50 dark:bg-rose-950/20 text-rose-700 dark:text-rose-400 border border-rose-200 dark:border-rose-900/30";
+                          } else if (user.role === "idp_auditor") {
+                            rolePillClass = "bg-indigo-50 dark:bg-indigo-950/20 text-indigo-700 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-900/30";
+                          } else if (user.role === "doc_approver") {
+                            rolePillClass = "bg-amber-50 dark:bg-amber-950/20 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-900/30";
+                          } else if (user.role === "department_admin") {
+                            rolePillClass = "bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border border-orange-200 dark:border-orange-900/30";
+                          } else if (user.role === "doc_reviewer") {
+                            rolePillClass = "bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-900/30";
+                          } else if (user.role === "idp_configurator") {
+                            rolePillClass = "bg-purple-50 dark:bg-purple-950/20 text-purple-700 dark:text-purple-400 border border-purple-200 dark:border-purple-900/30";
+                          }
+                          return (
+                            <tr key={user.user_id} className="hover:bg-stone-50/50 dark:hover:bg-zinc-800/20 transition-colors">
+                              <td className="px-4 py-3 whitespace-nowrap">
+                                <div className="flex items-center gap-2">
+                                  <div className="h-6 w-6 rounded-full bg-orange-100 dark:bg-orange-950/40 text-orange-700 dark:text-orange-400 flex items-center justify-center font-bold text-xxs shrink-0">
+                                    {(user.display_name || user.username)[0].toUpperCase()}
+                                  </div>
+                                  <div>
+                                    <div className="font-semibold text-foreground">{user.display_name || user.username}</div>
+                                    <div className="text-[10px] text-muted-foreground">{user.email || user.username}</div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-4 py-3 whitespace-nowrap">
+                                <span className={cn("px-1.5 py-0.5 rounded text-[10px] font-bold border", rolePillClass)}>
+                                  {displayRole}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 font-mono">{user.trace_count.toLocaleString()}</td>
+                              <td className="px-4 py-3 font-mono">${user.total_cost.toFixed(5)}</td>
+                              <td className="px-4 py-3 font-mono">{user.total_tokens.toLocaleString()}</td>
+                              <td className="px-4 py-3 text-right text-muted-foreground whitespace-nowrap font-mono">
+                                {user.last_activity ? new Date(user.last_activity).toLocaleString() : "N/A"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+
+                {!isLoadingUsers && !errorUsers && filteredUsers.length > 0 && (
+                  <div className="flex items-center justify-between border-t border-border px-4 py-3 bg-stone-50/20 dark:bg-zinc-800/10">
+                    <div className="text-xxs text-muted-foreground">
+                      Showing page <span className="font-semibold text-foreground">{usersPage}</span> of{" "}
+                      <span className="font-semibold text-foreground">{totalUsersPages}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={usersPage === 1}
+                        onClick={() => setUsersPage((p) => Math.max(1, p - 1))}
+                        className="h-7 w-7 flex items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground disabled:opacity-50 transition-colors active:scale-90"
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={usersPage >= totalUsersPages}
+                        onClick={() => setUsersPage((p) => Math.min(totalUsersPages, p + 1))}
+                        className="h-7 w-7 flex items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground disabled:opacity-50 transition-colors active:scale-90"
+                      >
+                        <ChevronRight className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </TabsContent>
+          )}
         </Tabs>
 
         {/* Timeline Drawer Subcomponent */}

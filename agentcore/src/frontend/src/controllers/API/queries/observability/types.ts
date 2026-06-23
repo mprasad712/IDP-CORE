@@ -119,3 +119,67 @@ export interface TraceDetailResponse {
   scope_warning: boolean;
   scope_warning_message: string | null;
 }
+
+export interface AgentListItem {
+  agent_id: string;
+  agent_name: string | null;
+  project_id: string | null;
+  project_name: string | null;
+  trace_count: number;
+  session_count: number;
+  total_tokens: number;
+  total_cost: number;
+  avg_latency_ms: number | null;
+  models_used: string[];
+  last_activity: string | null;
+  error_count: number;
+}
+
+export interface AgentListResponse {
+  agents: AgentListItem[];
+  total: number;
+  truncated: boolean;
+  fetched_trace_count: number;
+  scope_warning: boolean;
+  scope_warning_message: string | null;
+}
+
+export interface ProjectListItem {
+  project_id: string;
+  project_name: string | null;
+  agent_count: number;
+  trace_count: number;
+  session_count: number;
+  total_tokens: number;
+  total_cost: number;
+  last_activity: string | null;
+}
+
+export interface ProjectListResponse {
+  projects: ProjectListItem[];
+  total: number;
+  truncated: boolean;
+  fetched_trace_count: number;
+  scope_warning: boolean;
+  scope_warning_message: string | null;
+}
+
+export interface UserUsageItem {
+  user_id: string;
+  username: string;
+  display_name: string | null;
+  email: string | null;
+  role: string;
+  trace_count: number;
+  total_tokens: number;
+  total_cost: number;
+  last_activity: string | null;
+}
+
+export interface UserUsageListResponse {
+  users: UserUsageItem[];
+  total: number;
+  scope_warning: boolean;
+  scope_warning_message: string | null;
+}
+

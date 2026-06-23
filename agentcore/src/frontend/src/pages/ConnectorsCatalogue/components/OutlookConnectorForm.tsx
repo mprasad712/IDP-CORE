@@ -4,7 +4,7 @@
  * with the main ConnectorsCatalogue/index.tsx.
  */
 
-import { Eye, EyeOff, Trash2, Loader2, RefreshCw } from "lucide-react";
+import { Eye, EyeOff, Trash2, Loader2, RefreshCw, Link } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "@/controllers/API/api";
@@ -34,6 +34,7 @@ export default function OutlookConnectorForm({ form, onChange, isEditing, connec
   const [accounts, setAccounts] = useState<LinkedAccount[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
   const [removingEmail, setRemovingEmail] = useState<string | null>(null);
+  const [linkingMailbox, setLinkingMailbox] = useState(false);
 
   const fetchAccounts = useCallback(async () => {
     if (!connectorId) return;
@@ -53,6 +54,20 @@ export default function OutlookConnectorForm({ form, onChange, isEditing, connec
       fetchAccounts();
     }
   }, [isEditing, connectorId, fetchAccounts]);
+
+  const handleLinkMailbox = async () => {
+    if (!connectorId) return;
+    setLinkingMailbox(true);
+    try {
+      const res = await api.get(`/api/outlook/${connectorId}/oauth/start`);
+      const { authorize_url } = res.data;
+      window.location.href = authorize_url;
+    } catch {
+      // silently fail — user can retry
+    } finally {
+      setLinkingMailbox(false);
+    }
+  };
 
   const handleRemoveAccount = async (email: string) => {
     if (!connectorId) return;
@@ -119,15 +134,30 @@ export default function OutlookConnectorForm({ form, onChange, isEditing, connec
         <div className="mt-4 rounded-lg border border-border p-4">
           <div className="mb-3 flex items-center justify-between">
             <h4 className="text-sm font-medium">{t("Linked Mailboxes")}</h4>
-            <button
-              type="button"
-              onClick={fetchAccounts}
-              disabled={loadingAccounts}
-              className="text-muted-foreground hover:text-foreground disabled:opacity-50"
-              title={t("Refresh accounts")}
-            >
-              <RefreshCw className={`h-4 w-4 ${loadingAccounts ? "animate-spin" : ""}`} />
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleLinkMailbox}
+                disabled={linkingMailbox}
+                className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              >
+                {linkingMailbox ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Link className="h-3 w-3" />
+                )}
+                {t("Link Mailbox")}
+              </button>
+              <button
+                type="button"
+                onClick={fetchAccounts}
+                disabled={loadingAccounts}
+                className="text-muted-foreground hover:text-foreground disabled:opacity-50"
+                title={t("Refresh accounts")}
+              >
+                <RefreshCw className={`h-4 w-4 ${loadingAccounts ? "animate-spin" : ""}`} />
+              </button>
+            </div>
           </div>
 
           {loadingAccounts && accounts.length === 0 ? (

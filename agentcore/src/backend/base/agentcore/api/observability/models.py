@@ -287,3 +287,27 @@ class ProjectDetailResponse(BaseModel):
     by_date: list[DailyUsageItem] = []
     scope_warning: bool = False
     scope_warning_message: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Users
+# ---------------------------------------------------------------------------
+
+class UserUsageItem(BaseModel):
+    user_id: str
+    username: str
+    display_name: str | None = None
+    email: str | None = None
+    role: str
+    trace_count: int = 0
+    total_tokens: int = 0
+    total_cost: float = 0.0
+    last_activity: datetime | None = None
+
+
+class UserUsageListResponse(BaseModel):
+    users: list[UserUsageItem]
+    total: int
+    scope_warning: bool = False
+    scope_warning_message: str | None = None
+

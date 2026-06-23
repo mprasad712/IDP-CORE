@@ -10,6 +10,7 @@ from agentcore.api.idp.processed_docs import router as processed_docs_router
 from agentcore.api.idp.batches import router as batches_router
 from agentcore.api.idp.rules import router as rules_router
 from agentcore.api.idp.idp_agents import router as idp_agents_router
+from agentcore.api.idp.reports import router as reports_router
 
 router = APIRouter(prefix="/v1/idp", tags=["IDP"])
 
@@ -83,3 +84,5 @@ router.include_router(processed_docs_router, dependencies=_idp_review_guard)
 router.include_router(batches_router, dependencies=_idp_submit_guard)
 router.include_router(rules_router, dependencies=_idp_guard)
 router.include_router(idp_agents_router, dependencies=_idp_guard)
+# Reports are read-only GETs → baseline guard (read=view_idp).
+router.include_router(reports_router, dependencies=_idp_guard)

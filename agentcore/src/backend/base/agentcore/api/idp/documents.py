@@ -20,6 +20,7 @@ from agentcore.services.database.models.idp.documents import IdpDocument, IdpPro
 from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
 from agentcore.services.deps import get_storage_service, get_settings_service
 from agentcore.services.idp.pipeline import PipelineError, enqueue_document
+from agentcore.services.idp.scope import resolve_org_scope
 from agentcore.services.storage.service import StorageService
 
 router = APIRouter(prefix="/documents", tags=["IDP Documents"])
@@ -354,3 +355,54 @@ async def get_document_log(
         "processing_time_ms": job.processing_time_ms,
         "log": job.log or [],
     }
+
+
+@router.get("/{document_id}/log/download")
+async def download_document_log(
+    *,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+    document_id: UUID,
+    storage_service: StorageService = Depends(get_storage_service),
+):
+    """Download the readable per-document processing-log artifact (the text `flow.log`).
+
+    The pipeline writes a human-readable trail to `flow_logs/{document_id}/flow.log`
+    under the document's agent scope. This streams that file as an attachment. Returns
+    404 (never 500) when the artifact is absent — older docs or failures may not have one.
+    """
+    # Org-scope via the canonical resolver: root sees all; others only their orgs' docs.
+    is_root, org_ids = await resolve_org_scope(session, current_user)
+    stmt = select(IdpDocument).where(IdpDocument.id == document_id)
+    if not is_root:
+        stmt = (
+            stmt.join(IdpAgent, IdpDocument.agent_id == IdpAgent.id)
+            .join(Agent, IdpAgent.agent_id == Agent.id)
+            .where(Agent.org_id.in_(org_ids))
+        )
+    doc = (await session.exec(stmt)).first()
+    if doc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    # Artifact lives at flow_logs/{document_id}/flow.log under str(doc.agent_id) (see pipeline.py).
+    try:
+        data = await storage_service.get_file(
+            agent_id=str(doc.agent_id), file_name=f"flow_logs/{document_id}/flow.log"
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No processing log available for this document."
+        ) from e
+    except Exception as e:
+        logger.warning(f"[idp] failed to read processing log for {document_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No processing log available for this document."
+        ) from e
+
+    base = os.path.splitext(os.path.basename(doc.original_filename or "document"))[0]
+    safe_name = re.sub(r'[\r\n";]', "_", f"{base}_processing_log.txt")
+    return Response(
+        content=data,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )

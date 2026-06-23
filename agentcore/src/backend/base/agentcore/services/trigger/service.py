@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import time
@@ -49,6 +50,16 @@ async def _get_storage_connector_config(connector_id: str) -> dict | None:
 def _odata_escape(value: str) -> str:
     """Escape single quotes for OData filter values."""
     return value.replace("'", "''")
+
+
+def _recipient_addrs(recipients) -> list[str]:
+    """Flatten a Graph recipients array → list of email addresses."""
+    out = []
+    for r in recipients or []:
+        a = ((r or {}).get("emailAddress") or {}).get("address", "")
+        if a:
+            out.append(a)
+    return out
 
 
 class TriggerService(Service):
@@ -259,6 +270,223 @@ class TriggerService(Service):
                 logger.info(f"Created new folder monitor {record.id} for node {node_id} (new deployment)")
 
         await session.commit()
+
+    async def sync_email_monitors_for_agent(
+        self,
+        session,
+        agent_id,
+        environment: str,
+        version: str,
+        deployment_id,
+        flow_data: dict,
+        created_by,
+    ) -> None:
+        """On publish, scan the snapshot for Outlook Connector Input nodes and create/update
+        an EMAIL_MONITOR trigger per node (ingest_mode=idp_pipeline). Mirrors the folder-monitor
+        sync: (node_id, deployment_id) versioning, deactivate-old-on-new-version.
+
+        The node is matched the same way the rest of the IDP pipeline matches nodes — by
+        ``data.node.display_name == "Connector Input"`` (the canvas saves the node under type
+        ``ConnectorInput``, not ``IDPConnectorInput``). The connector is resolved from the plain
+        connector NAME the canvas dropdown writes into ``connector_name`` (or a legacy pipe-format
+        ``connector`` field) against the Outlook connector catalogue.
+        """
+        from agentcore.services.database.models.trigger_config.crud import (
+            create_trigger_config,
+            get_triggers_by_agent_id,
+        )
+        from agentcore.services.database.models.trigger_config.model import (
+            TriggerConfigCreate,
+            TriggerTypeEnum,
+        )
+
+        nodes = flow_data.get("nodes", [])
+
+        def _is_connector_node(n: dict) -> bool:
+            nd = n.get("data", {}) or {}
+            if nd.get("type") in ("IDPConnectorInput", "ConnectorInput"):
+                return True
+            # display_name fallback: only treat it as a connector node if it actually carries a
+            # connector field, so an unrelated node named "Connector Input" can't spawn a monitor.
+            node = nd.get("node", {}) or {}
+            if node.get("display_name") != "Connector Input":
+                return False
+            tmpl = node.get("template", {}) or {}
+            return "connector_name" in tmpl or "connector" in tmpl
+
+        conn_nodes = [n for n in nodes if _is_connector_node(n)]
+        if not conn_nodes:
+            return
+
+        # Resolve connectors by NAME (what the canvas IDPConnectorDropdown saves into
+        # ``connector_name``) or by id. Only Outlook connectors poll.
+        from sqlalchemy import select as _select_cc
+        from agentcore.services.database.models.connector_catalogue.model import ConnectorCatalogue
+
+        cc_rows = (
+            await session.execute(
+                _select_cc(ConnectorCatalogue).where(ConnectorCatalogue.provider == "outlook")
+            )
+        ).scalars().all()
+        cc_by_id = {str(r.id): r for r in cc_rows}
+        cc_by_name: dict[str, list] = {}
+        for r in cc_rows:
+            cc_by_name.setdefault((r.name or "").strip().lower(), []).append(r)
+
+        def _resolve_by_name(nm: str):
+            cands = cc_by_name.get((nm or "").strip().lower()) or []
+            if not cands:
+                return None
+            if len(cands) == 1:
+                return cands[0]
+            # A connector name is unique only within (org_id, dept_id). Disambiguate a cross-scope
+            # collision by preferring the publisher's own connector, else a deterministic pick (+warn).
+            mine = [c for c in cands if created_by is not None and c.created_by == created_by]
+            chosen = (mine or sorted(cands, key=lambda c: str(c.id)))[0]
+            logger.warning(
+                f"sync_email_monitors: connector name '{nm}' matches {len(cands)} Outlook "
+                f"connectors across scopes; using {chosen.id}"
+            )
+            return chosen
+
+        def _cfg_from_node(template: dict, node_id: str) -> dict | None:
+            def tv(k, default=""):
+                return (template.get(k) or {}).get("value", default)
+
+            # Resolve to a REAL Outlook connector row. Accept a legacy pipe string
+            # "name | provider | emails | uuid" in ``connector`` (trusted only if the id still
+            # exists), or the plain connector NAME the canvas saves in ``connector_name``.
+            row = None
+            pipe_raw = (tv("connector", "") or "").strip()
+            if "|" in pipe_raw:
+                parts = [p.strip() for p in pipe_raw.split("|")]
+                if len(parts) >= 4:
+                    row = cc_by_id.get(parts[-1])  # verify the pipe id is a real connector
+            if row is None:
+                name_or_id = (tv("connector_name", "") or pipe_raw or "").strip()
+                row = cc_by_id.get(name_or_id) or _resolve_by_name(name_or_id)
+            if row is None or (row.provider or "").lower() != "outlook":
+                return None  # only existing Outlook connectors poll
+            connector_id = str(row.id)
+
+            def _int(v, d):
+                try:
+                    return int(v)
+                except Exception:
+                    return d
+
+            return {
+                "connector_id": connector_id,
+                "account_email": tv("account_email", "") or "",
+                "mail_folder": tv("folder", "inbox") or "inbox",
+                "max_results": _int(tv("max_emails", 10), 10),
+                "poll_interval_seconds": _int(tv("poll_interval_seconds", 60), 60),
+                "filter_sender": tv("filter_sender", "") or "",
+                "filter_subject": tv("filter_subject", "") or "",
+                "filter_body": tv("filter_body", "") or "",
+                "filter_to": tv("filter_to", "") or "",
+                "filter_cc": tv("filter_cc", "") or "",
+                "filter_importance": tv("filter_importance", "all") or "all",
+                "filter_has_attachments": bool(tv("filter_has_attachments", True)),
+                "unread_only": bool(tv("unread_only", False)),
+                "mark_as_read": bool(tv("mark_as_read", False)),
+                "fetch_full_body": bool(tv("fetch_full_body", False)),
+                "fetch_attachments": True,
+                "ingest_mode": "idp_pipeline",
+                "node_id": node_id,
+            }
+
+        existing = await get_triggers_by_agent_id(session, agent_id, active_only=False)
+        existing_em = [
+            t for t in existing
+            if t.trigger_type == TriggerTypeEnum.EMAIL_MONITOR and t.environment == environment
+        ]
+        existing_by_key: dict[tuple[str, str], object] = {}
+        existing_by_node_only: dict[str, list] = {}
+        for t in existing_em:
+            nid = (t.trigger_config or {}).get("node_id")
+            did = str(t.deployment_id) if t.deployment_id else None
+            if nid and did:
+                existing_by_key[(nid, did)] = t
+            if nid:
+                existing_by_node_only.setdefault(nid, []).append(t)
+
+        dep_id_str = str(deployment_id)
+        for node in conn_nodes:
+            node_id = node.get("id")
+            template = node.get("data", {}).get("node", {}).get("template", {})
+            cfg = _cfg_from_node(template, node_id)
+            if cfg is None:
+                continue  # non-outlook connector → no poller
+
+            exact_match = existing_by_key.get((node_id, dep_id_str))
+            if exact_match:
+                exact_match.trigger_config = cfg
+                exact_match.is_active = True
+                session.add(exact_match)
+                await session.commit()
+                await session.refresh(exact_match)
+                await self.unregister(exact_match.id)
+                try:
+                    await self.register_email_monitor(exact_match)
+                except Exception as e:
+                    logger.warning(f"Failed to re-register email monitor for node {node_id}: {e}")
+                logger.info(f"Updated email monitor {exact_match.id} for node {node_id} (same deployment)")
+            else:
+                for old_t in existing_by_node_only.get(node_id, []):
+                    if old_t.is_active:
+                        old_t.is_active = False
+                        session.add(old_t)
+                        await self.unregister(old_t.id)
+                        logger.info(f"Deactivated old email monitor {old_t.id} (superseded by {deployment_id})")
+                record = await create_trigger_config(
+                    session,
+                    TriggerConfigCreate(
+                        agent_id=agent_id,
+                        deployment_id=deployment_id,
+                        trigger_type=TriggerTypeEnum.EMAIL_MONITOR,
+                        trigger_config=cfg,
+                        is_active=True,
+                        environment=environment,
+                        version=version,
+                        created_by=created_by,
+                    ),
+                )
+                try:
+                    await self.register_email_monitor(record)
+                except Exception as e:
+                    logger.warning(f"Failed to register email monitor for node {node_id}: {e}")
+                logger.info(f"Created email monitor {record.id} for node {node_id} (new deployment)")
+
+        await session.commit()
+
+    async def deactivate_triggers_for_deployment(self, session, deployment_id) -> int:
+        """Mark + unregister every trigger for a deployment (called on unpublish/new version).
+
+        Does NOT commit — the ``is_active=False`` flips are flushed into the CALLER's transaction
+        so they're atomic with the unpublish (if the caller rolls back, the flips roll back too).
+        ``unregister`` (stopping the asyncio task) is idempotent; a rolled-back trigger simply
+        re-registers on the next startup.
+        """
+        from sqlalchemy import select as _select
+        from agentcore.services.database.models.trigger_config.model import TriggerConfigTable
+
+        rows = (
+            await session.execute(
+                _select(TriggerConfigTable).where(TriggerConfigTable.deployment_id == deployment_id)
+            )
+        ).scalars().all()
+        n = 0
+        for t in rows:
+            try:
+                if t.is_active:
+                    t.is_active = False
+                    session.add(t)
+                await self.unregister(t.id)
+                n += 1
+            except Exception as e:
+                logger.warning(f"deactivate_triggers_for_deployment {t.id}: {e}")
+        return n
 
     async def register_folder_monitor(self, trigger_record) -> None:
         """Register a folder monitor from a TriggerConfigTable record."""
@@ -739,7 +967,10 @@ class TriggerService(Service):
         filter_sender = config.get("filter_sender", "")
         filter_subject = config.get("filter_subject", "")
         filter_body = config.get("filter_body", "")
+        filter_to = config.get("filter_to", "")
+        filter_cc = config.get("filter_cc", "")
         filter_importance = config.get("filter_importance", "")
+        ingest_mode = config.get("ingest_mode", "")  # "idp_pipeline" → create IdpDocuments + enqueue
         filter_has_attachments = config.get("filter_has_attachments", False)
         unread_only = config.get("unread_only", True)
         mark_as_read = config.get("mark_as_read", False)
@@ -798,8 +1029,9 @@ class TriggerService(Service):
                 safe_folder = mail_folder.replace("/", "").replace("\\", "").replace("..", "") or "inbox"
                 url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{safe_folder}/messages"
                 # Include body in $select when full body is requested
-                select_fields = "id,subject,from,receivedDateTime,bodyPreview,hasAttachments,toRecipients,importance,isRead"
-                if fetch_full_body:
+                select_fields = "id,subject,from,receivedDateTime,bodyPreview,hasAttachments,toRecipients,ccRecipients,importance,isRead"
+                if fetch_full_body or filter_body:
+                    # body is needed in $select to match filter_body in the client-side fallback.
                     select_fields += ",body"
                 params: dict[str, str] = {
                     "$top": str(max_results),
@@ -815,6 +1047,10 @@ class TriggerService(Service):
                     filters.append(f"contains(subject, '{_odata_escape(filter_subject)}')")
                 if filter_body:
                     filters.append(f"contains(body/content, '{_odata_escape(filter_body)}')")
+                if filter_to:
+                    filters.append(f"toRecipients/any(r:r/emailAddress/address eq '{_odata_escape(filter_to)}')")
+                if filter_cc:
+                    filters.append(f"ccRecipients/any(c:c/emailAddress/address eq '{_odata_escape(filter_cc)}')")
                 if filter_importance and filter_importance != "all":
                     filters.append(f"importance eq '{_odata_escape(filter_importance)}'")
                 if filter_has_attachments:
@@ -875,85 +1111,114 @@ class TriggerService(Service):
                     for m in messages:
                         m_sender = m.get("from", {}).get("emailAddress", {}).get("address", "").lower()
                         m_subject = (m.get("subject") or "").lower()
-                        m_body = (m.get("bodyPreview") or "").lower()
+                        m_body = ((m.get("body") or {}).get("content") or m.get("bodyPreview") or "").lower()
                         if filter_sender and filter_sender.lower() != m_sender:
                             continue
                         if filter_subject and filter_subject.lower() not in m_subject:
                             continue
                         if filter_body and filter_body.lower() not in m_body:
                             continue
+                        if filter_to and filter_to.lower() not in [a.lower() for a in _recipient_addrs(m.get("toRecipients"))]:
+                            continue
+                        if filter_cc and filter_cc.lower() not in [a.lower() for a in _recipient_addrs(m.get("ccRecipients"))]:
+                            continue
+                        if filter_importance and filter_importance != "all" and (m.get("importance") or "").lower() != filter_importance.lower():
+                            continue
+                        if filter_has_attachments and not m.get("hasAttachments"):
+                            continue
+                        if unread_only and m.get("isRead"):
+                            continue
                         filtered.append(m)
                     messages = filtered
 
-                # 5. Filter to unseen messages only
+                # 5. Filter to unseen messages only. Do NOT mark seen yet — for IDP ingest an email
+                #    is marked seen only after it fully ingests, so a partial/crash failure is
+                #    retried next poll (the per-attachment dedup_key skips the ones already done).
                 seen = self._seen_files.get(task_id, OrderedDict())
-                new_messages = []
-                for msg in messages:
-                    msg_id = msg.get("id", "")
-                    if msg_id and msg_id not in seen:
-                        new_messages.append(msg)
-                        seen[msg_id] = None  # OrderedDict append (preserves insertion order)
-                # Cap seen set to prevent unbounded memory growth
-                _MAX_SEEN = 10_000
-                if len(seen) > _MAX_SEEN:
-                    excess = len(seen) - _MAX_SEEN
-                    for _ in range(excess):
-                        seen.popitem(last=False)  # evicts OLDEST, not random
-                self._seen_files[task_id] = seen
+                new_messages = [m for m in messages if m.get("id") and m["id"] not in seen]
 
                 if not new_messages:
                     continue
 
                 logger.info(f"Email monitor {task_id}: found {len(new_messages)} new email(s)")
 
-                # 6. Build enhanced payload with full body + attachments
-                email_payload = []
-                for msg in new_messages:
-                    from_addr = msg.get("from", {}).get("emailAddress", {})
-                    entry: dict = {
-                        "id": msg.get("id"),
-                        "subject": msg.get("subject", ""),
-                        "from_name": from_addr.get("name", ""),
-                        "from_email": from_addr.get("address", ""),
-                        "received": msg.get("receivedDateTime", ""),
-                        "preview": msg.get("bodyPreview", ""),
-                        "has_attachments": msg.get("hasAttachments", False),
-                        "importance": msg.get("importance", "normal"),
-                        "is_read": msg.get("isRead", False),
-                    }
+                processed_ids: list[str] = []  # emails to mark seen (+ optionally read)
+                if ingest_mode == "idp_pipeline":
+                    # IDP source mode (created by sync_email_monitors_for_agent): create one
+                    # IdpDocument per attachment and enqueue the EXISTING pipeline (OCR → extract
+                    # → route → Processed Docs). Skip the flow-graph execution (no double-process).
+                    for msg in new_messages:
+                        ok = False
+                        try:
+                            raw_atts = await self._fetch_attachments_raw(msg["id"], access_token, task_id)
+                            if raw_atts is None:
+                                # Attachment fetch FAILED (transient Graph error) — do NOT mark the
+                                # email seen; retry next poll so its attachments aren't lost.
+                                logger.warning(
+                                    f"Email monitor {task_id}: attachment fetch failed for "
+                                    f"{str(msg.get('id', ''))[:24]}; will retry next poll"
+                                )
+                            else:
+                                ok = await self._ingest_email_to_idp(agent_id, connector_id, msg, raw_atts)
+                        except Exception:
+                            logger.exception(
+                                f"Email monitor {task_id}: IDP ingest failed for message "
+                                f"{str(msg.get('id', ''))[:24]}"
+                            )
+                        if ok:
+                            processed_ids.append(msg["id"])
+                else:
+                    # Legacy flow-graph mode (API-created email monitors): unchanged.
+                    email_payload = []
+                    for msg in new_messages:
+                        from_addr = msg.get("from", {}).get("emailAddress", {})
+                        entry: dict = {
+                            "id": msg.get("id"),
+                            "subject": msg.get("subject", ""),
+                            "from_name": from_addr.get("name", ""),
+                            "from_email": from_addr.get("address", ""),
+                            "received": msg.get("receivedDateTime", ""),
+                            "preview": msg.get("bodyPreview", ""),
+                            "has_attachments": msg.get("hasAttachments", False),
+                            "importance": msg.get("importance", "normal"),
+                            "is_read": msg.get("isRead", False),
+                            "to": _recipient_addrs(msg.get("toRecipients")),
+                            "cc": _recipient_addrs(msg.get("ccRecipients")),
+                        }
+                        if fetch_full_body:
+                            body_obj = msg.get("body", {})
+                            entry["body"] = body_obj.get("content", "")
+                            entry["body_type"] = body_obj.get("contentType", "text")
+                        if fetch_attachments and msg.get("hasAttachments"):
+                            entry["attachments"] = await self._fetch_and_parse_attachments(
+                                msg["id"], access_token, task_id,
+                            )
+                        elif fetch_attachments:
+                            entry["attachments"] = []
+                        email_payload.append(entry)
 
-                    # Include full email body when enabled
-                    if fetch_full_body:
-                        body_obj = msg.get("body", {})
-                        entry["body"] = body_obj.get("content", "")
-                        entry["body_type"] = body_obj.get("contentType", "text")
-
-                    # Fetch and parse attachments when enabled
-                    if fetch_attachments and msg.get("hasAttachments"):
-                        entry["attachments"] = await self._fetch_and_parse_attachments(
-                            msg["id"], access_token, task_id,
-                        )
-                    elif fetch_attachments:
-                        entry["attachments"] = []
-
-                    email_payload.append(entry)
-
-                await self._execute_trigger(
-                    trigger_config_id=trigger_config_id,
-                    agent_id=agent_id,
-                    payload={"emails": email_payload, "trigger_type": "email_monitor"},
-                    environment=environment,
-                    version=version,
-                    trigger_config=config,
-                )
-
-                # 7. Mark processed emails as read if configured
-                if mark_as_read:
-                    await self._mark_emails_as_read(
-                        [m.get("id") for m in new_messages if m.get("id")],
-                        access_token,
-                        task_id,
+                    await self._execute_trigger(
+                        trigger_config_id=trigger_config_id,
+                        agent_id=agent_id,
+                        payload={"emails": email_payload, "trigger_type": "email_monitor"},
+                        environment=environment,
+                        version=version,
+                        trigger_config=config,
                     )
+                    processed_ids = [m["id"] for m in new_messages if m.get("id")]
+
+                # Mark processed emails seen (bounded) — only the ones that actually completed.
+                for _mid in processed_ids:
+                    seen[_mid] = None
+                _MAX_SEEN = 10_000
+                if len(seen) > _MAX_SEEN:
+                    for _ in range(len(seen) - _MAX_SEEN):
+                        seen.popitem(last=False)  # evict OLDEST
+                self._seen_files[task_id] = seen
+
+                # 7. Mark the successfully-processed emails as read if configured
+                if mark_as_read and processed_ids:
+                    await self._mark_emails_as_read(processed_ids, access_token, task_id)
 
                 await self._persist_seen_files(trigger_config_id)
 
@@ -1053,6 +1318,200 @@ class TriggerService(Service):
                 f"for message {message_id[:20]}...: {e}"
             )
             return []
+
+    async def _fetch_attachments_raw(self, message_id: str, access_token: str, task_id: str) -> list[dict] | None:
+        """Fetch RAW file-attachment bytes (b64) for IDP ingest.
+
+        Returns ``[{attachment_id, name, content_bytes_b64, content_type, size}]`` for
+        ``#microsoft.graph.fileAttachment`` items only (skips inline/item attachments).
+
+        Returns ``None`` when the Graph fetch itself FAILED (non-200 or exception) so the
+        caller can retry the email next poll instead of marking it seen with nothing ingested
+        (a transient ``/attachments`` error must not silently drop a real attachment). An empty
+        ``[]`` means the fetch succeeded but the email has no ingestible file attachments.
+        """
+        import httpx
+        from urllib.parse import quote
+
+        safe_id = quote(message_id, safe="")
+        url = f"https://graph.microsoft.com/v1.0/me/messages/{safe_id}/attachments"
+        out: list[dict] = []
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
+            if resp.status_code != 200:
+                logger.warning(f"Email monitor {task_id}: raw attachments HTTP {resp.status_code} for {message_id[:20]}...")
+                return None  # fetch failed → caller retries (do not mark seen)
+            for att in resp.json().get("value", []):
+                if att.get("@odata.type") != "#microsoft.graph.fileAttachment":
+                    continue
+                cb = att.get("contentBytes", "")
+                if not cb:
+                    continue
+                out.append({
+                    "attachment_id": att.get("id", ""),
+                    "name": att.get("name", "attachment"),
+                    "content_bytes_b64": cb,
+                    "content_type": att.get("contentType", "application/octet-stream"),
+                    "size": att.get("size", 0),
+                })
+            return out
+        except Exception as e:
+            logger.warning(f"Email monitor {task_id}: raw attachments error for {message_id[:20]}...: {e}")
+            return None  # fetch failed → caller retries (do not mark seen)
+
+    async def _ingest_email_to_idp(self, base_agent_id, connector_id: str, email_msg: dict, raw_attachments: list[dict]) -> bool:
+        """Create one IdpDocument per file attachment and enqueue the existing IDP pipeline.
+
+        Mirrors ``api/idp/documents.py::upload_documents`` (agent resolve/auto-create → storage
+        save → IdpDocument row → ``enqueue_document``) so a polled email lands in Processed Docs
+        exactly like an upload, with email provenance in ``source_metadata`` and idempotent across
+        re-polls/restarts (a `dedup_key` lookup + ``enqueue_document``'s row-lock). Returns True if
+        every intended attachment ingested (caller marks the email seen) — False if any failed (the
+        email is retried next poll; already-ingested attachments are skipped by the dedup_key).
+        """
+        if not raw_attachments:
+            return True
+
+        import hashlib
+        from uuid import UUID as _UUID, uuid4 as _uuid4
+        from sqlalchemy import or_, select as _select
+
+        from agentcore.services.deps import get_db_service, get_storage_service
+        from agentcore.services.database.models.agent.model import Agent
+        from agentcore.services.database.models.idp.config import IdpAgent
+        from agentcore.services.database.models.idp.documents import IdpDocument
+        from agentcore.services.idp.pipeline import enqueue_document
+        from agentcore.api.idp.documents import ALLOWED_EXTENSIONS
+
+        from_addr = (email_msg.get("from") or {}).get("emailAddress", {})
+        message_id = email_msg.get("id", "")
+        base_meta = {
+            "from": from_addr.get("address", ""),
+            "from_name": from_addr.get("name", ""),
+            "to": _recipient_addrs(email_msg.get("toRecipients")),
+            "cc": _recipient_addrs(email_msg.get("ccRecipients")),
+            "subject": email_msg.get("subject", ""),
+            "message_id": message_id,
+            "received": email_msg.get("receivedDateTime", ""),
+        }
+        conn_uuid = None
+        if connector_id:
+            try:
+                conn_uuid = _UUID(str(connector_id))
+            except Exception:
+                conn_uuid = None
+
+        db_service = get_db_service()
+        storage = get_storage_service()
+        async with db_service.with_session() as session:
+            # Resolve / auto-create the IDP agent (mirror upload_documents).
+            idp_agent = (
+                await session.execute(
+                    _select(IdpAgent).where(
+                        or_(IdpAgent.id == base_agent_id, IdpAgent.agent_id == base_agent_id),
+                        IdpAgent.deleted_at.is_(None),
+                    )
+                )
+            ).scalars().first()
+            if idp_agent is None:
+                base_agent = await session.get(Agent, base_agent_id)
+                if base_agent is None or base_agent.deleted_at is not None:
+                    logger.warning(f"[email-ingest] base agent {base_agent_id} gone; giving up on {message_id[:20]}")
+                    return True  # agent deleted → mark seen so we don't re-fetch forever
+                idp_agent = IdpAgent(
+                    agent_id=base_agent_id, extraction_mode="dynamic_prompting", dynamic_prompt="",
+                    default_rule_action="pending_review", is_active=True,
+                )
+                session.add(idp_agent)
+                await session.flush()
+
+            agent_scope = str(idp_agent.id)
+            all_ok = True  # True only if every (intended) attachment ingested → email marked seen
+            for att in raw_attachments:
+                name = att.get("name", "attachment")
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in ALLOWED_EXTENSIONS:
+                    logger.info(f"[email-ingest] skipping unsupported attachment '{name}' ({ext})")
+                    continue  # intentional skip — not a failure
+                try:
+                    # validate=True so a structurally-malformed payload RAISES (→ retry) instead of
+                    # silently decoding to corrupted non-empty bytes. Graph fileAttachment contentBytes
+                    # is compact standard base64 (no embedded whitespace), so this never false-rejects.
+                    data = base64.b64decode(att.get("content_bytes_b64", ""), validate=True)
+                except Exception:
+                    # A real (supported) attachment we could not decode — likely a truncated/transient
+                    # Graph payload. Do NOT mark the email seen (all_ok=False → retry next poll); the
+                    # dedup_key skips any sibling attachments already ingested, so no duplicates.
+                    logger.warning(f"[email-ingest] could not decode attachment '{name}'; will retry")
+                    all_ok = False
+                    continue
+                if not data:
+                    logger.warning(f"[email-ingest] empty content for attachment '{name}'; will retry")
+                    all_ok = False
+                    continue
+
+                # Idempotency across restarts/crashes: skip if this (message, attachment) already exists.
+                dedup_key = f"{message_id}:{att.get('attachment_id') or name}"
+                exists = (
+                    await session.execute(
+                        _select(IdpDocument.id)
+                        .where(IdpDocument.source_metadata["dedup_key"].astext == dedup_key)
+                        .limit(1)
+                    )
+                ).first()
+                if exists:
+                    logger.info(f"[email-ingest] already ingested ({dedup_key[:48]}); skipping")
+                    continue
+
+                # Each attachment is isolated: one failure must not abort the rest, and a DB failure
+                # after the file is written must not leave an orphan in storage.
+                doc_id = _uuid4()
+                storage_filename = f"idp_{doc_id}{ext}"
+                saved = False
+                try:
+                    await storage.save_file(agent_id=agent_scope, file_name=storage_filename, data=data)
+                    saved = True
+                    doc = IdpDocument(
+                        id=doc_id,
+                        agent_id=idp_agent.id,
+                        original_filename=name,
+                        file_path=f"{agent_scope}/{storage_filename}",
+                        file_type=ext.lstrip("."),
+                        mime_type=att.get("content_type"),
+                        file_size_bytes=len(data),
+                        checksum=hashlib.sha256(data).hexdigest(),
+                        source="mail_connector",
+                        connector_id=conn_uuid,
+                        source_metadata={**base_meta, "attachment_name": name, "dedup_key": dedup_key},
+                        status="queued",
+                        uploaded_by=None,
+                    )
+                    session.add(doc)
+                    await session.commit()
+                    await session.refresh(doc)
+                except Exception as e:
+                    logger.warning(f"[email-ingest] failed to ingest attachment '{name}': {e}")
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
+                    if saved:  # delete the orphan file no IdpDocument row references
+                        try:
+                            await storage.delete_file(agent_id=agent_scope, file_name=storage_filename)
+                        except Exception:
+                            logger.warning(f"[email-ingest] could not clean up orphan file {storage_filename}")
+                    all_ok = False
+                    continue
+
+                # Document committed; enqueue is best-effort — the row exists either way and the
+                # dedup_key prevents a duplicate if the email is retried.
+                try:
+                    await enqueue_document(session, doc.id)
+                    logger.info(f"[email-ingest] queued IdpDocument {doc.id} ('{name}') from email {message_id[:20]}")
+                except Exception as e:
+                    logger.warning(f"[email-ingest] enqueue failed for {doc.id}: {e}")
+            return all_ok
 
     async def _refresh_outlook_token(self, config: dict, acct: dict, connector_id: str, force: bool = False) -> str:
         """Refresh an Outlook OAuth token if expired, returning a valid access token."""

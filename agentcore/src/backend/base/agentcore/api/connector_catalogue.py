@@ -62,11 +62,18 @@ def _build_secret_name(prefix: str, connector_id: UUID, provider: str, key: str)
     return f"{prefix}-connector-{provider_tag}-{connector_id}-{key}"
 
 
-def _store_secret_value(name: str, value: str) -> None:
+def _store_secret_value(name: str, value: str) -> bool:
+    """Store a secret in Key Vault. Returns True on success, False if KV is unavailable."""
     if not value:
-        return
-    store = _get_kv_store()
-    store.set_secret(name, value)
+        return True
+    try:
+        store = _get_kv_store()
+        store.set_secret(name, value)
+        return True
+    except Exception:
+        from loguru import logger as _logger
+        _logger.warning("Key Vault unavailable — secret '{}' will be stored inline in provider_config.", name)
+        return False
 
 
 def _resolve_secret_value(name: str) -> str:
@@ -104,13 +111,18 @@ def _prepare_provider_config(
         if raw_value:
             if allow_secret_update or not existing.get(secret_name_key):
                 secret_name = _build_secret_name(prefix, connector_id, provider, "client-secret")
-                _store_secret_value(secret_name, raw_value)
-                prepared[secret_name_key] = secret_name
+                stored = _store_secret_value(secret_name, raw_value)
+                if stored:
+                    prepared[secret_name_key] = secret_name
+                    prepared.pop("client_secret", None)
+                # else: KV unavailable — keep client_secret inline
             else:
                 prepared[secret_name_key] = existing.get(secret_name_key) or prepared.get(secret_name_key)
-            prepared.pop("client_secret", None)
+                prepared.pop("client_secret", None)
         elif existing.get(secret_name_key):
             prepared[secret_name_key] = existing[secret_name_key]
+        elif existing.get("client_secret"):
+            prepared["client_secret"] = existing["client_secret"]
 
     elif provider in EMAIL_PROVIDERS:
         secret_name_key = "client_secret_secret_name"
@@ -118,13 +130,18 @@ def _prepare_provider_config(
         if raw_value:
             if allow_secret_update or not existing.get(secret_name_key):
                 secret_name = _build_secret_name(prefix, connector_id, provider, "client-secret")
-                _store_secret_value(secret_name, raw_value)
-                prepared[secret_name_key] = secret_name
+                stored = _store_secret_value(secret_name, raw_value)
+                if stored:
+                    prepared[secret_name_key] = secret_name
+                    prepared.pop("client_secret", None)
+                # else: KV unavailable — keep client_secret inline
             else:
                 prepared[secret_name_key] = existing.get(secret_name_key) or prepared.get(secret_name_key)
-            prepared.pop("client_secret", None)
+                prepared.pop("client_secret", None)
         elif existing.get(secret_name_key):
             prepared[secret_name_key] = existing[secret_name_key]
+        elif existing.get("client_secret"):
+            prepared["client_secret"] = existing["client_secret"]
 
     return prepared
 
@@ -143,10 +160,22 @@ def _ensure_provider_secret_present(provider: str, config: dict, existing_config
         if not merged.get("container_name"):
             raise HTTPException(status_code=400, detail="container_name is required for Azure Blob connector")
     elif provider == "sharepoint":
-        if not config.get("client_secret") and not config.get("client_secret_secret_name") and not existing.get("client_secret_secret_name"):
+        has_secret = (
+            config.get("client_secret")
+            or config.get("client_secret_secret_name")
+            or existing.get("client_secret_secret_name")
+            or existing.get("client_secret")
+        )
+        if not has_secret:
             raise HTTPException(status_code=400, detail="client_secret is required for SharePoint connector")
     elif provider in EMAIL_PROVIDERS:
-        if not config.get("client_secret") and not config.get("client_secret_secret_name") and not existing.get("client_secret_secret_name"):
+        has_secret = (
+            config.get("client_secret")
+            or config.get("client_secret_secret_name")
+            or existing.get("client_secret_secret_name")
+            or existing.get("client_secret")
+        )
+        if not has_secret:
             raise HTTPException(status_code=400, detail="client_secret is required for Outlook connector")
 
 

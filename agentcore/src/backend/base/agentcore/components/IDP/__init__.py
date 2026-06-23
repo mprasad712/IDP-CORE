@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from agentcore.components._importing import import_mod
 
 if TYPE_CHECKING:
+    from agentcore.components.IDP.connector_input import IDPConnectorInput
     from agentcore.components.IDP.approval_gate import IDPApprovalGate
     from agentcore.components.IDP.chunk_aggregator import IDPChunkAggregator
     from agentcore.components.IDP.chunking_strategy import IDPChunkingStrategy
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from agentcore.components.IDP.webhook_output import IDPWebhookOutput
 
 _dynamic_imports = {
+    "IDPConnectorInput": "connector_input",
     "IDPApprovalGate": "approval_gate",
     "IDPChunkAggregator": "chunk_aggregator",
     "IDPChunkingStrategy": "chunking_strategy",

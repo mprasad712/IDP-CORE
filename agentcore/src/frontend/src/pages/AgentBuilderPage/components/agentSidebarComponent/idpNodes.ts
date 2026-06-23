@@ -151,6 +151,14 @@ function output(name: string, display_name: string, types: string[] = ["Message"
   };
 }
 
+// Gate a field so it only renders when the selected connector is an Outlook/email connector
+// (the IDPConnectorDropdown writes the chosen connector's provider into `connector_provider`).
+// Future SharePoint/OneDrive connectors won't show these email-only options.
+const EMAIL_ONLY = { field: "connector_provider", value: "outlook" } as const;
+function emailOnly<T>(field: T): T & { show_when: typeof EMAIL_ONLY } {
+  return { ...field, show_when: EMAIL_ONLY };
+}
+
 // ─── node definitions ─────────────────────────────────────────────────────────
 
 export const IDP_NODES: IDPData = {
@@ -195,15 +203,117 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 1,
       base_classes: ["Message"],
-      field_order: ["connector_name", "attachment_filter"],
+      field_order: [
+        "connector_name",
+        "folder",
+        "filter_subject",
+        "filter_sender",
+        "filter_has_attachments",
+        "unread_only",
+        "max_emails",
+        "poll_interval_seconds",
+        "account_email",
+        "filter_body",
+        "filter_to",
+        "filter_cc",
+        "filter_importance",
+        "mark_as_read",
+        "fetch_full_body",
+        "attachment_filter",
+      ],
       template: {
-        connector_name: strField(
-          "connector_name",
-          "Connector",
-          "",
-          "Name of the configured connector (e.g. mail connector) to pull attachments from.",
-          true,
-        ),
+        connector_name: {
+          _input_type: "StrInput",
+          idp_connector_fetch: true,
+          advanced: false,
+          display_name: "Connector",
+          dynamic: false,
+          info: "Select a connected mail connector to pull attachments from. The email filters below apply when the published agent polls this mailbox.",
+          list: false,
+          name: "connector_name",
+          placeholder: "Select a connector...",
+          required: true,
+          show: true,
+          title_case: false,
+          type: "str",
+          value: "",
+        },
+        // Hidden state: the connector's provider (set by IDPConnectorDropdown on selection). Drives
+        // show_when for the email-only fields so they appear only for Outlook/email connectors.
+        connector_provider: {
+          _input_type: "StrInput",
+          advanced: false,
+          display_name: "Connector Provider",
+          dynamic: false,
+          info: "",
+          list: false,
+          name: "connector_provider",
+          placeholder: "",
+          required: false,
+          show: false,
+          title_case: false,
+          type: "str",
+          value: "",
+        },
+        // Email filters / polling — the published agent's background monitor reads these (subject /
+        // sender / folder / poll interval, etc.). Modeled on the MiCore Outlook connector options;
+        // the backend (sync_email_monitors_for_agent) reads each by these exact field names.
+        // emailOnly() => only shown when the selected connector is Outlook/email.
+        folder: emailOnly(dropdownField(
+          "folder", "Mail Folder", ["inbox", "sentitems", "drafts", "archive"], "inbox",
+          "Mailbox folder to poll for new email.",
+        )),
+        filter_subject: emailOnly(strField(
+          "filter_subject", "Subject contains", "",
+          "Only process emails whose subject contains this text.",
+        )),
+        filter_sender: emailOnly(strField(
+          "filter_sender", "Filter by Sender", "",
+          "Only process emails FROM this exact address.",
+        )),
+        filter_has_attachments: emailOnly(boolField(
+          "filter_has_attachments", "Has Attachments Only", true,
+          "Only process emails that have attachments.",
+        )),
+        unread_only: emailOnly(boolField(
+          "unread_only", "Unread Only", false, "Only process unread emails.",
+        )),
+        max_emails: emailOnly(intField(
+          "max_emails", "Max Emails", 10, "Maximum number of recent emails to scan per poll.",
+        )),
+        poll_interval_seconds: emailOnly(intField(
+          "poll_interval_seconds", "Poll Interval (seconds)", 60,
+          "How often the published agent checks this mailbox for new mail.",
+        )),
+        account_email: emailOnly(strField(
+          "account_email", "Account / Mailbox", "",
+          "Linked mailbox to read from. Leave empty to use the first linked account.",
+          false, true,
+        )),
+        filter_body: emailOnly(strField(
+          "filter_body", "Body contains", "",
+          "Only process emails whose body contains this text.", false, true,
+        )),
+        filter_to: emailOnly(strField(
+          "filter_to", "Filter by Recipient (To)", "",
+          "Only process emails sent TO this address.", false, true,
+        )),
+        filter_cc: emailOnly(strField(
+          "filter_cc", "Filter by CC", "",
+          "Only process emails with this address in CC.", false, true,
+        )),
+        filter_importance: emailOnly(dropdownField(
+          "filter_importance", "Importance", ["all", "low", "normal", "high"], "all",
+          "Only process emails of this importance.", true,
+        )),
+        mark_as_read: emailOnly(boolField(
+          "mark_as_read", "Mark as Read After Processing", false,
+          "Mark emails as read once processed.", true,
+        )),
+        fetch_full_body: emailOnly(boolField(
+          "fetch_full_body", "Fetch Full Body", false,
+          "Fetch the full email body (otherwise a short preview is used).", true,
+        )),
         attachment_filter: strField(
           "attachment_filter",
           "File Type Filter",

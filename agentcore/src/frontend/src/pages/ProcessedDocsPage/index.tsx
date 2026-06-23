@@ -13,6 +13,7 @@ import {
   RotateCcw,
   Info,
   ListTree,
+  Save,
 } from "lucide-react";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -87,6 +88,7 @@ interface ProcessedDoc {
   lineItemColumns: string[];
   reviewer?: string;
   reviewedAt?: string;
+  reviewDraft?: boolean; // reviewer saved edits as a draft (pending, not yet submitted)
   // rowId -> (columnName -> idp_extracted_line_items.id), so edited cells can be PATCHed.
   cellIds?: Record<string, Record<string, string>>;
 }
@@ -110,6 +112,7 @@ function listDocToPage(d: ApiProcessedDoc): ProcessedDoc {
     fileType: (d.file_type ?? "").toLowerCase().replace(/^\./, ""),
     overallConfidence: Math.round((d.overall_confidence ?? 0) * 100),
     status: mapApiStatus(d.status),
+    reviewDraft: d.review_draft ?? false,
     headerFields: [],
     lineItems: [],
     lineItemColumns: [],
@@ -139,7 +142,14 @@ function enrichWithDetail(
     rows[li.row_index][li.column_name] = li.reviewed_value ?? li.extracted_value ?? "";
     (cellIds[rowId] = cellIds[rowId] ?? {})[li.column_name] = li.id;
   });
-  return { ...base, headerFields, lineItems: Object.values(rows), lineItemColumns: cols, cellIds };
+  return {
+    ...base,
+    reviewDraft: detail.review_draft ?? base.reviewDraft,
+    headerFields,
+    lineItems: Object.values(rows),
+    lineItemColumns: cols,
+    cellIds,
+  };
 }
 
 // ─── CSV export (client-side; no backend export endpoint) ──────────────────────
@@ -166,6 +176,21 @@ function exportDocsToCsv(rows: ProcessedDoc[], filename: string): void {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/** Download the per-document processing-log artifact (text flow.log) via the authenticated API. */
+async function downloadDocLog(doc: ProcessedDoc): Promise<void> {
+  try {
+    const res = await api.get(`/api/v1/idp/documents/${doc.id}/log/download`, { responseType: "blob" });
+    const url = URL.createObjectURL(res.data as Blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${doc.name || "document"}_processing_log.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error("[ProcessedDocs] processing-log download failed", e);
+  }
 }
 
 /** Build the reasoning + source-location tooltip text for a field (audit/evidence trail). */
@@ -495,9 +520,12 @@ function DocDetailView({
   };
 
 
-  const handleSave = async () => {
+  // draft=true → "Save as Draft": persist edits only, keep the doc in Pending Review.
+  // draft=false → "Submit": persist edits + finalize (records reviewer, moves to Reviewed).
+  const handleSave = async (draft: boolean) => {
     setSaving(true);
     setSaveError(null);
+    let editsSaved = false;
     try {
       // Build the field-update payload from the DB ids carried through enrichWithDetail.
       // (Add Row / row-delete are disabled for backend docs — there are no create/delete
@@ -514,9 +542,20 @@ function DocDetailView({
           if (cellId) line_items.push({ id: cellId, value: (row[col] ?? "") === "" ? null : row[col] });
         });
       });
-      if (headers.length || line_items.length) {
-        await patchFields.mutateAsync({ headers, line_items });
+
+      // Always persist the edited values. For a draft, pass draft:true so the backend
+      // tags the doc (review_draft) and leaves it in Pending Review.
+      if (headers.length || line_items.length || draft) {
+        await patchFields.mutateAsync({ headers, line_items, draft });
+        editsSaved = true;
       }
+
+      if (draft) {
+        // Reflect the draft locally + close back to Pending (the hooks already refetched the list).
+        onSave({ ...doc, headerFields: fields, lineItems, status: "pending", reviewDraft: true });
+        return;
+      }
+
       await postReview.mutateAsync({ notes: notes || null });
       // Only on success: reflect the review locally + close (the hooks already refetched).
       onSave({
@@ -524,12 +563,19 @@ function DocDetailView({
         headerFields: fields,
         lineItems,
         status: "reviewed",
+        reviewDraft: false,
         reviewer: "me",
         reviewedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
       });
     } catch (e) {
       console.error("[ProcessedDocs] save review failed", e);
-      setSaveError("Could not save the review — nothing was persisted. Please try again.");
+      setSaveError(
+        draft
+          ? "Could not save the draft — nothing was persisted. Please try again."
+          : editsSaved
+            ? "Your field edits were saved, but submitting the review failed. Please reopen the document and try again."
+            : "Could not submit the review — nothing was persisted. Please try again.",
+      );
     } finally {
       setSaving(false);
     }
@@ -554,6 +600,11 @@ function DocDetailView({
                 <Badge variant="outline" className="text-[11px] px-1.5 py-0">{doc.documentType}</Badge>
                 <ConfidencePill score={doc.overallConfidence} />
                 <StatusChip status={doc.status} />
+                {doc.reviewDraft && doc.status === "pending" && (
+                  <Badge variant="outline" className="text-[11px] px-1.5 py-0 border-amber-400 text-amber-600">
+                    Draft
+                  </Badge>
+                )}
               </div>
               {doc.status === "reviewed" && (
                 <p className="text-[11px] text-muted-foreground">
@@ -656,13 +707,22 @@ function DocDetailView({
 
           {/* Processing trace — the complete per-component cycle (input → output) for this document. */}
           <section>
-            <button
-              onClick={() => setShowTrace((v) => !v)}
-              className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 hover:text-foreground transition-colors"
-            >
-              <ListTree className="h-3.5 w-3.5" />
-              {showTrace ? "Hide" : "View"} Processing Logs
-            </button>
+            <div className="flex items-center justify-between gap-2">
+              <button
+                onClick={() => setShowTrace((v) => !v)}
+                className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 hover:text-foreground transition-colors"
+              >
+                <ListTree className="h-3.5 w-3.5" />
+                {showTrace ? "Hide" : "View"} Processing Logs
+              </button>
+              <button
+                onClick={() => downloadDocLog(doc)}
+                title="Download processing log"
+                className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground/60 hover:text-foreground transition-colors"
+              >
+                <Download className="h-3 w-3" /> Download log
+              </button>
+            </div>
             {showTrace && (
               <div className="mt-2 rounded-xl border bg-muted/5 overflow-hidden">
                 <ProcessingTrace docId={doc.id} />
@@ -683,13 +743,23 @@ function DocDetailView({
                 placeholder="Add review notes (optional)…"
                 className="w-full rounded-xl border bg-background/50 text-sm px-4 py-3 resize-none focus:outline-none focus:ring-2 focus:ring-[#D04A02]/30 focus:border-[#D04A02] transition-all placeholder:text-muted-foreground/40"
               />
-              <Button
-                onClick={handleSave}
-                disabled={saving}
-                className="bg-[#D04A02] hover:bg-[#B84000] text-white gap-2 rounded-lg font-medium disabled:opacity-60"
-              >
-                <CheckCircle2 className="h-4 w-4" /> {saving ? "Saving…" : "Save Review"}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => handleSave(true)}
+                  disabled={saving}
+                  className="gap-2 rounded-lg font-medium disabled:opacity-60"
+                >
+                  <Save className="h-4 w-4" /> {saving ? "Saving…" : "Save as Draft"}
+                </Button>
+                <Button
+                  onClick={() => handleSave(false)}
+                  disabled={saving}
+                  className="bg-[#D04A02] hover:bg-[#B84000] text-white gap-2 rounded-lg font-medium disabled:opacity-60"
+                >
+                  <CheckCircle2 className="h-4 w-4" /> {saving ? "Saving…" : "Submit"}
+                </Button>
+              </div>
               {saveError && (
                 <p className="text-xs text-destructive mt-1">{saveError}</p>
               )}
@@ -777,7 +847,14 @@ function DocTable({
                 <ConfidencePill score={doc.overallConfidence} />
               </TableCell>
               <TableCell>
-                <StatusChip status={doc.status} />
+                <div className="flex items-center gap-1.5">
+                  <StatusChip status={doc.status} />
+                  {doc.reviewDraft && doc.status === "pending" && (
+                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-400 text-amber-600">
+                      Draft
+                    </Badge>
+                  )}
+                </div>
               </TableCell>
               <TableCell>
                 <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">

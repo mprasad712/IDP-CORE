@@ -1863,6 +1863,13 @@ async def uat_deploy_action(
                 if new_is_active is None:
                     new_is_active = False
                 changes.append("status → UNPUBLISHED")
+                # Stop this deployment's background triggers (folder/email monitors). Fully guarded
+                # so a trigger error can never block the unpublish.
+                try:
+                    from agentcore.services.deps import get_trigger_service
+                    await get_trigger_service().deactivate_triggers_for_deployment(session, record.id)
+                except Exception as _trig_err:
+                    logger.warning(f"Trigger deactivation failed for unpublished deployment {record.id}: {_trig_err}")
 
             elif new_status == "PUBLISHED":
                 if current_status_val != "UNPUBLISHED":
@@ -2437,6 +2444,22 @@ async def publish_agent(
             except Exception as sched_err:
                 logger.warning(f"FileTrigger sync failed for UAT deploy of {agent_id}: {sched_err}")
 
+            # Sync IDPConnectorInput (Outlook) nodes → auto-create email-monitor trigger_config
+            try:
+                from agentcore.services.deps import get_trigger_service
+                trigger_svc = get_trigger_service()
+                await trigger_svc.sync_email_monitors_for_agent(
+                    session=session,
+                    agent_id=agent_id,
+                    environment="uat",
+                    version=f"v{next_version}",
+                    deployment_id=new_record.id,
+                    flow_data=snapshot,
+                    created_by=current_user.id,
+                )
+            except Exception as mail_err:
+                logger.warning(f"Email-monitor sync failed for UAT deploy of {agent_id}: {mail_err}")
+
             # ─── Sync agent registry after UAT publish ──
             try:
                 await sync_agent_registry(
@@ -2640,6 +2663,22 @@ async def publish_agent(
                     )
                 except Exception as fm_err:
                     logger.warning(f"FileTrigger sync failed for PROD deploy of {agent_id}: {fm_err}")
+
+                # Sync IDPConnectorInput (Outlook) nodes → auto-create email-monitor trigger_config
+                try:
+                    from agentcore.services.deps import get_trigger_service
+                    trigger_svc = get_trigger_service()
+                    await trigger_svc.sync_email_monitors_for_agent(
+                        session=session,
+                        agent_id=agent_id,
+                        environment="prod",
+                        version=f"v{next_version}",
+                        deployment_id=new_record.id,
+                        flow_data=snapshot,
+                        created_by=current_user.id,
+                    )
+                except Exception as mail_err:
+                    logger.warning(f"Email-monitor sync failed for PROD deploy of {agent_id}: {mail_err}")
 
                 # ─── Publish notification (DB-verified) ──
                 await _notify_publish_event(

@@ -1121,10 +1121,10 @@ export default function DashboardAdmin(): JSX.Element {
   const _idpActive = isDepartmentAdmin || isSuperAdmin || isRootAdmin;
   useEffect(() => {
     if (!_idpActive) return;
-    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-pipeline")
+    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-pipeline", { params: { tz_offset_minutes: tzOffsetMinutes } })
       .then((r) => setIdpPipelineKpis(r.data?.kpis?.map((k) => ({ name: k.label, value: k.unit ? `${k.value}${k.unit}` : `${k.value}` })) ?? idpPipelineFallback))
       .catch(() => setIdpPipelineKpis(idpPipelineFallback));
-  }, [_idpActive, refreshTick]);
+  }, [_idpActive, refreshTick, tzOffsetMinutes]);
 
   useEffect(() => {
     if (!_idpActive) return;
@@ -1136,10 +1136,10 @@ export default function DashboardAdmin(): JSX.Element {
   const _reviewActive = isDepartmentAdmin || isBusinessUser;
   useEffect(() => {
     if (!_reviewActive) return;
-    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-review-queue")
+    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-review-queue", { params: { tz_offset_minutes: tzOffsetMinutes } })
       .then((r) => setIdpReviewKpis(r.data?.kpis?.map((k) => ({ name: k.label, value: k.unit ? `${k.value}${k.unit}` : `${k.value}` })) ?? idpReviewFallback))
       .catch(() => setIdpReviewKpis(idpReviewFallback));
-  }, [_reviewActive, refreshTick]);
+  }, [_reviewActive, refreshTick, tzOffsetMinutes]);
 
   useEffect(() => {
     if (!_reviewActive) return;
@@ -1179,10 +1179,10 @@ export default function DashboardAdmin(): JSX.Element {
 
   useEffect(() => {
     if (!isDeveloper) return;
-    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-field-quality")
+    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-field-quality", { params: { tz_offset_minutes: tzOffsetMinutes } })
       .then((r) => setIdpQualityKpis(r.data?.kpis?.map((k) => ({ name: k.label, value: k.unit ? `${k.value}${k.unit}` : `${k.value}` })) ?? idpQualityFallback))
       .catch(() => setIdpQualityKpis(idpQualityFallback));
-  }, [isDeveloper, refreshTick]);
+  }, [isDeveloper, refreshTick, tzOffsetMinutes]);
 
   useEffect(() => {
     if (!isDeveloper) return;
@@ -1193,10 +1193,10 @@ export default function DashboardAdmin(): JSX.Element {
 
   useEffect(() => {
     if (!isLeaderExecutive) return;
-    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-analytics")
+    api.get<DashboardSectionApiResponse>("/api/dashboard/sections/idp-analytics", { params: { tz_offset_minutes: tzOffsetMinutes } })
       .then((r) => setIdpAnalyticsKpis(r.data?.kpis?.map((k) => ({ name: k.label, value: k.unit === "$" ? `$${k.value}` : k.unit ? `${k.value}${k.unit}` : `${k.value}` })) ?? idpAnalyticsFallback))
       .catch(() => setIdpAnalyticsKpis(idpAnalyticsFallback));
-  }, [isLeaderExecutive, refreshTick]);
+  }, [isLeaderExecutive, refreshTick, tzOffsetMinutes]);
 
   useEffect(() => {
     if (!isLeaderExecutive) return;
