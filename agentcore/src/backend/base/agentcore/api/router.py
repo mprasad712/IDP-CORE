@@ -38,6 +38,7 @@ from agentcore.api.guardrails_catalogue import router as guardrails_catalogue_ro
 from agentcore.api.help_support import router as help_support_router
 from agentcore.api.connector_catalogue import router as connector_catalogue_router
 from agentcore.api.outlook_connector import router as outlook_connector_router
+from agentcore.api.onedrive_connector import router as onedrive_connector_router
 from agentcore.api.sharepoint_connector import router as sharepoint_connector_router
 from agentcore.api.sharepoint_user import router as sharepoint_user_router
 from agentcore.api.outlook_orch import router as outlook_orch_router
@@ -96,6 +97,7 @@ router.include_router(guardrails_catalogue_router)
 router.include_router(help_support_router)
 router.include_router(connector_catalogue_router)
 router.include_router(outlook_connector_router)
+router.include_router(onedrive_connector_router)
 router.include_router(sharepoint_connector_router)
 router.include_router(sharepoint_user_router)
 router.include_router(outlook_orch_router)

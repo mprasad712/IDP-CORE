@@ -24,6 +24,11 @@ router = APIRouter(prefix="/connector-catalogue", tags=["Connector Catalogue"])
 DB_PROVIDERS = {"postgresql", "oracle", "sqlserver", "mysql"}
 STORAGE_PROVIDERS = {"azure_blob", "sharepoint"}
 EMAIL_PROVIDERS = {"outlook"}
+# Delegated-OAuth file connectors (sign-in + refresh token, like Outlook). OneDrive works for both
+# personal and work/school accounts via the /common authority + Graph /me/drive.
+FILE_OAUTH_PROVIDERS = {"onedrive"}
+# Providers that authenticate via delegated OAuth and store linked_accounts (tokens + client_secret).
+OAUTH_PROVIDERS = EMAIL_PROVIDERS | FILE_OAUTH_PROVIDERS
 
 
 # ---------- Key Vault helpers ----------
@@ -124,7 +129,7 @@ def _prepare_provider_config(
         elif existing.get("client_secret"):
             prepared["client_secret"] = existing["client_secret"]
 
-    elif provider in EMAIL_PROVIDERS:
+    elif provider in OAUTH_PROVIDERS:
         secret_name_key = "client_secret_secret_name"
         raw_value = prepared.get("client_secret")
         if raw_value:
@@ -168,7 +173,7 @@ def _ensure_provider_secret_present(provider: str, config: dict, existing_config
         )
         if not has_secret:
             raise HTTPException(status_code=400, detail="client_secret is required for SharePoint connector")
-    elif provider in EMAIL_PROVIDERS:
+    elif provider in OAUTH_PROVIDERS:
         has_secret = (
             config.get("client_secret")
             or config.get("client_secret_secret_name")
@@ -176,7 +181,8 @@ def _ensure_provider_secret_present(provider: str, config: dict, existing_config
             or existing.get("client_secret")
         )
         if not has_secret:
-            raise HTTPException(status_code=400, detail="client_secret is required for Outlook connector")
+            label = "OneDrive" if provider in FILE_OAUTH_PROVIDERS else "Outlook"
+            raise HTTPException(status_code=400, detail=f"client_secret is required for {label} connector")
 
 
 def _decrypt_provider_config(provider: str, config: dict) -> dict:
@@ -191,7 +197,7 @@ def _decrypt_provider_config(provider: str, config: dict) -> dict:
             secret_name = resolved.get("client_secret_secret_name", "")
             if secret_name:
                 resolved["client_secret"] = _resolve_secret_value(secret_name)
-    elif provider in EMAIL_PROVIDERS:
+    elif provider in OAUTH_PROVIDERS:
         if "client_secret" not in resolved:
             secret_name = resolved.get("client_secret_secret_name", "")
             if secret_name:
@@ -369,7 +375,7 @@ def _serialize_connector(
                 safe_config["client_secret"] = "********"
             if "client_secret_secret_name" in safe_config:
                 safe_config["client_secret_secret_name"] = "********"
-        elif row.provider in EMAIL_PROVIDERS:
+        elif row.provider in OAUTH_PROVIDERS:
             for key in ("client_secret", "access_token", "refresh_token"):
                 if key in safe_config:
                     safe_config[key] = "********"
@@ -673,10 +679,11 @@ def _test_connector_payload_or_raise(payload: TestConnectionPayload) -> dict:
             return _test_azure_blob_connection(config)
         return _test_sharepoint_connection(config)
 
-    if provider in EMAIL_PROVIDERS:
+    if provider in OAUTH_PROVIDERS:
+        label = "OneDrive" if provider in FILE_OAUTH_PROVIDERS else "Outlook"
         raise HTTPException(
             status_code=400,
-            detail="Outlook connectors must be saved first and linked via OAuth before they can be tested.",
+            detail=f"{label} connectors must be saved first and linked via OAuth before they can be tested.",
         )
 
     if not payload.host or not payload.port or not payload.database_name or not payload.username:
@@ -1008,6 +1015,85 @@ async def _test_outlook_connection(config: dict) -> dict:
     }
 
 
+async def _test_onedrive_connection(config: dict) -> dict:
+    """Test a OneDrive connection by calling Microsoft Graph /me/drive.
+
+    Mirrors ``_test_outlook_connection`` but uses the /common authority (so it works for both
+    personal and work/school accounts) and the Files scopes. Refreshes the access token when expired,
+    mutating *config* in-place and returning ``_tokens_refreshed: True`` so the caller can persist it.
+    """
+    import httpx
+
+    start = time.time()
+    tokens_refreshed = False
+
+    linked_accounts = config.get("linked_accounts", [])
+    if not linked_accounts:
+        raise HTTPException(
+            status_code=400,
+            detail="No linked OneDrive account. Use the OAuth flow to link an account first.",
+        )
+
+    acct = linked_accounts[0]
+    access_token = acct.get("access_token", "")
+    account_email = acct.get("email", "unknown")
+
+    if not access_token:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No access token for account '{account_email}'. Re-link OneDrive via OAuth.",
+        )
+
+    expires_at = acct.get("token_expires_at", 0)
+    if expires_at and time.time() >= (expires_at - 60):
+        refresh_token = acct.get("refresh_token", "")
+        client_id = config.get("client_id", "")
+        client_secret = config.get("client_secret", "")
+        # OneDrive uses the /common authority so a single connector serves personal + work/school.
+        if refresh_token and client_id and client_secret:
+            token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+            async with httpx.AsyncClient(timeout=15) as client:
+                refresh_resp = await client.post(token_url, data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                    "scope": "Files.Read Files.ReadWrite User.Read offline_access",
+                })
+            if refresh_resp.status_code == 200:
+                token_data = refresh_resp.json()
+                access_token = token_data["access_token"]
+                acct["access_token"] = access_token
+                acct["refresh_token"] = token_data.get("refresh_token", refresh_token)
+                acct["token_expires_at"] = time.time() + token_data.get("expires_in", 3600)
+                tokens_refreshed = True
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            "https://graph.microsoft.com/v1.0/me/drive",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+    latency_ms = round((time.time() - start) * 1000, 2)
+
+    if resp.status_code != 200:
+        detail = resp.text[:300] if resp.text else str(resp.status_code)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Microsoft Graph /me/drive returned {resp.status_code}: {detail}",
+        )
+
+    drive = resp.json()
+    drive_type = drive.get("driveType", "drive")
+    return {
+        "success": True,
+        "message": f"Connected to OneDrive ({drive_type}) for {account_email}",
+        "latency_ms": latency_ms,
+        "tables_metadata": None,
+        "_tokens_refreshed": tokens_refreshed,
+    }
+
+
 # ---------- Endpoints ----------
 
 @router.get("")
@@ -1115,7 +1201,7 @@ async def create_connector(
     await _require_connector_permission(current_user, "add_connector")
 
     provider = payload.provider.lower()
-    if provider not in EMAIL_PROVIDERS:
+    if provider not in OAUTH_PROVIDERS:
         draft_payload = (
             TestConnectionPayload(provider=provider, provider_config=payload.provider_config or {})
             if provider in STORAGE_PROVIDERS
@@ -1145,7 +1231,7 @@ async def create_connector(
 
     connector_id = uuid4()
 
-    if provider in STORAGE_PROVIDERS | EMAIL_PROVIDERS:
+    if provider in STORAGE_PROVIDERS | OAUTH_PROVIDERS:
         # Azure Blob / SharePoint / Outlook: credentials go into provider_config, not DB fields
         raw_config = payload.provider_config or {}
         _ensure_provider_secret_present(provider, raw_config)
@@ -1278,8 +1364,8 @@ async def update_connector(
     if effective_provider in STORAGE_PROVIDERS | EMAIL_PROVIDERS:
         # Storage / Email provider: update provider_config, clear DB fields
         if payload.provider_config is not None:
-            if effective_provider in EMAIL_PROVIDERS and row.provider_config:
-                # Preserve linked_accounts/tokens when editing Outlook connectors
+            if effective_provider in OAUTH_PROVIDERS and row.provider_config:
+                # Preserve linked_accounts/tokens when editing OAuth (Outlook/OneDrive) connectors
                 existing = dict(row.provider_config or {})
                 merged = {**existing, **payload.provider_config}
                 # Don't let an empty client_secret overwrite the stored one
@@ -1412,7 +1498,7 @@ async def test_connector_connection(
                 result = _test_azure_blob_connection(config)
             else:  # sharepoint
                 result = _test_sharepoint_connection(config)
-        elif provider in EMAIL_PROVIDERS:
+        elif provider in OAUTH_PROVIDERS:
             config = _decrypt_provider_config(provider, row.provider_config or {})
             if override and override.provider_config:
                 # Merge override fields but preserve linked_accounts from stored config
@@ -1420,7 +1506,10 @@ async def test_connector_connection(
                 config.update(override.provider_config)
                 if linked and "linked_accounts" not in override.provider_config:
                     config["linked_accounts"] = linked
-            result = await _test_outlook_connection(config)
+            if provider in FILE_OAUTH_PROVIDERS:
+                result = await _test_onedrive_connection(config)
+            else:
+                result = await _test_outlook_connection(config)
         else:
             # DB provider
             host = override.host if override and override.host else row.host
@@ -1435,8 +1524,8 @@ async def test_connector_connection(
             ssl_enabled = override.ssl_enabled if override and override.ssl_enabled is not None else row.ssl_enabled
             result = _test_db_connection(provider, host, port, database_name, schema_name, username, password, ssl_enabled)
 
-        # If Outlook tokens were refreshed during the test, persist them
-        if result.get("_tokens_refreshed") and provider in EMAIL_PROVIDERS:
+        # If OAuth tokens were refreshed during the test, persist them
+        if result.get("_tokens_refreshed") and provider in OAUTH_PROVIDERS:
             row.provider_config = _prepare_provider_config(
                 provider,
                 config,

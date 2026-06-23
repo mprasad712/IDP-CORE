@@ -23,6 +23,7 @@ import { useContext, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 import OutlookConnectorForm from "./components/OutlookConnectorForm";
+import OneDriveConnectorForm from "./components/OneDriveConnectorForm";
 import { ENABLE_OUTLOOK_CONNECTOR } from "@/customization/feature-flags";
 import { Button } from "@/components/ui/button";
 import {
@@ -59,7 +60,8 @@ type ProviderFilter =
   | "mysql"
   | "azure_blob"
   | "sharepoint"
-  | "outlook";
+  | "outlook"
+  | "onedrive";
 
 const PROVIDER_LABELS: Record<string, string> = {
   postgresql: "PostgreSQL",
@@ -69,6 +71,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   azure_blob: "Azure Blob Storage",
   sharepoint: "SharePoint",
   outlook: "Microsoft Outlook",
+  onedrive: "OneDrive",
 };
 
 const PROVIDER_PORTS: Record<string, number> = {
@@ -80,7 +83,8 @@ const PROVIDER_PORTS: Record<string, number> = {
 
 const DB_PROVIDERS = new Set(["postgresql", "oracle", "sqlserver", "mysql"]);
 const STORAGE_PROVIDERS = new Set(["azure_blob", "sharepoint"]);
-const EMAIL_PROVIDERS = new Set(["outlook"]);
+// Providers that authenticate via delegated OAuth (sign-in + linked accounts): Outlook + OneDrive.
+const OAUTH_PROVIDERS = new Set(["outlook", "onedrive"]);
 const DEFAULT_CONNECTOR_HOST =
   getRuntimeEnv("DEFAULT_CONNECTOR_HOST") ||
   getRuntimeEnv("HOST_IP") ||
@@ -117,6 +121,9 @@ const BLANK_FORM = {
   outlook_tenant_id: "",
   outlook_client_id: "",
   outlook_client_secret: "",
+  // OneDrive fields (delegated OAuth; /common authority needs no tenant)
+  onedrive_client_id: "",
+  onedrive_client_secret: "",
   visibility: "private",
   public_scope: "department",
   org_id: "",
@@ -167,6 +174,14 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       const message = email
         ? t("Outlook mailbox linked successfully: {{email}}", { email })
         : t("Outlook mailbox linked successfully");
+      setTestResult({ success: true, message });
+      setSuccessData({ title: message });
+      void refetch();
+    } else if (success === "onedrive_account_linked") {
+      const email = searchParams.get("email") || "";
+      const message = email
+        ? t("OneDrive account linked successfully: {{email}}", { email })
+        : t("OneDrive account linked successfully");
       setTestResult({ success: true, message });
       setSuccessData({ title: message });
       void refetch();
@@ -512,6 +527,9 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       outlook_tenant_id: cfg.tenant_id ?? "",
       outlook_client_id: cfg.client_id ?? "",
       outlook_client_secret: "",
+      // OneDrive (client_secret is masked; user must re-enter to update)
+      onedrive_client_id: cfg.client_id ?? "",
+      onedrive_client_secret: "",
       visibility: connector.visibility ?? "private",
       public_scope: connector.public_scope ?? "department",
       org_id: connector.org_id ?? "",
@@ -576,6 +594,22 @@ export default function ConnectorsCatalogueView(): JSX.Element {
         name: form.name,
         description: form.description || undefined,
         provider: "outlook",
+        provider_config,
+        ...scopePayload,
+      };
+    }
+
+    if (form.provider === "onedrive") {
+      const provider_config: Record<string, string> = {
+        client_id: form.onedrive_client_id,
+      };
+      if (form.onedrive_client_secret) {
+        provider_config.client_secret = form.onedrive_client_secret;
+      }
+      return {
+        name: form.name,
+        description: form.description || undefined,
+        provider: "onedrive",
         provider_config,
         ...scopePayload,
       };
@@ -669,6 +703,9 @@ export default function ConnectorsCatalogueView(): JSX.Element {
     } else if (form.provider === "outlook") {
       if (!form.outlook_tenant_id || !form.outlook_client_id) return true;
       if (!editingConnector && !form.outlook_client_secret) return true;
+    } else if (form.provider === "onedrive") {
+      if (!form.onedrive_client_id) return true;
+      if (!editingConnector && !form.onedrive_client_secret) return true;
     } else {
       // DB provider
       if (!form.host || !form.database_name || !form.username) return true;
@@ -689,7 +726,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
     }
     try {
       const payload = buildPayload();
-      if (!editingConnector && form.provider !== "outlook") {
+      if (!editingConnector && !OAUTH_PROVIDERS.has(form.provider)) {
         const currentTestKey = JSON.stringify(payload);
         let result = testResult && testPayloadKey === currentTestKey ? testResult : null;
         let autoTestRan = false;
@@ -805,6 +842,14 @@ export default function ConnectorsCatalogueView(): JSX.Element {
             client_secret: form.outlook_client_secret,
           },
         };
+      } else if (form.provider === "onedrive") {
+        payload = {
+          provider: form.provider,
+          provider_config: {
+            client_id: form.onedrive_client_id,
+            client_secret: form.onedrive_client_secret,
+          },
+        };
       } else {
         payload = {
           provider: form.provider,
@@ -859,10 +904,12 @@ export default function ConnectorsCatalogueView(): JSX.Element {
   };
 
   const [linkingMailbox, setLinkingMailbox] = useState(false);
-  const handleLinkMailbox = async (connectorId: string) => {
+  // Works for both Outlook (mailbox) and OneDrive (account) — picks the endpoint by provider.
+  const handleLinkAccount = async (connector: ConnectorInfo) => {
+    const base = connector.provider === "onedrive" ? "onedrive" : "outlook";
     try {
       setLinkingMailbox(true);
-      const res = await api.get(`/api/outlook/${connectorId}/oauth/start`);
+      const res = await api.get(`/api/${base}/${connector.id}/oauth/start`);
       const { authorize_url } = res.data;
       if (authorize_url) {
         window.location.href = authorize_url;
@@ -872,7 +919,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
     } catch (err: any) {
       const detail = getErrorMessage(err, t("Failed to start OAuth flow"));
       setTestResult({ success: false, message: detail });
-      setErrorData({ title: t("Mailbox linking failed"), list: [detail] });
+      setErrorData({ title: t("Account linking failed"), list: [detail] });
       setLinkingMailbox(false);
     }
   };
@@ -923,6 +970,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       azure_blob: "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400",
       sharepoint: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
       outlook: "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400",
+      onedrive: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
     };
     return styles[provider] || "bg-gray-100 text-gray-700";
   };
@@ -934,19 +982,19 @@ export default function ConnectorsCatalogueView(): JSX.Element {
     if (c.provider === "sharepoint") {
       return c.provider_config?.site_url ?? "—";
     }
-    if (c.provider === "outlook") {
+    if (c.provider === "outlook" || c.provider === "onedrive") {
       return c.provider_config?.client_id ?? "—";
     }
     return c.host ? `${c.host}:${c.port}` : "—";
   };
 
   const getConnectorDb = (c: ConnectorInfo): string => {
-    if (STORAGE_PROVIDERS.has(c.provider) || EMAIL_PROVIDERS.has(c.provider)) return "—";
+    if (STORAGE_PROVIDERS.has(c.provider) || OAUTH_PROVIDERS.has(c.provider)) return "—";
     return c.database_name ?? "—";
   };
 
   const getConnectorSchema = (c: ConnectorInfo): string => {
-    if (STORAGE_PROVIDERS.has(c.provider) || EMAIL_PROVIDERS.has(c.provider)) return "—";
+    if (STORAGE_PROVIDERS.has(c.provider) || OAUTH_PROVIDERS.has(c.provider)) return "—";
     return c.schema_name ?? "—";
   };
 
@@ -961,7 +1009,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
     return t("Private");
   };
 
-  const FILTER_TABS: ProviderFilter[] = ["all", "postgresql", "oracle", "sqlserver", "mysql", "azure_blob", "sharepoint", ...(ENABLE_OUTLOOK_CONNECTOR ? ["outlook" as const] : [])];
+  const FILTER_TABS: ProviderFilter[] = ["all", "postgresql", "oracle", "sqlserver", "mysql", "azure_blob", "sharepoint", "onedrive", ...(ENABLE_OUTLOOK_CONNECTOR ? ["outlook" as const] : [])];
 
   /* ---- JSX ---- */
   if (!canViewConnectorPage) {
@@ -1130,8 +1178,10 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                           <span
                             className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${getProviderBadge(c.provider)}`}
                           >
-                            {STORAGE_PROVIDERS.has(c.provider) ? (
+                            {STORAGE_PROVIDERS.has(c.provider) || c.provider === "onedrive" ? (
                               <Cloud className="h-3 w-3" />
+                            ) : c.provider === "outlook" ? (
+                              <Mail className="h-3 w-3" />
                             ) : (
                               <Database className="h-3 w-3" />
                             )}
@@ -1203,7 +1253,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                         </td>
                         <td className="w-[70px] min-w-[70px] px-4 py-4">
                           <span className="text-sm font-medium">
-                            {STORAGE_PROVIDERS.has(c.provider) || EMAIL_PROVIDERS.has(c.provider)
+                            {STORAGE_PROVIDERS.has(c.provider) || OAUTH_PROVIDERS.has(c.provider)
                               ? "-"
                               : (c.tables_metadata?.length ?? "-")}
                           </span>
@@ -1237,15 +1287,21 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                               >
                                 <Zap className="h-4 w-4" />
                               </button>
-                              {EMAIL_PROVIDERS.has(c.provider) && (
+                              {OAUTH_PROVIDERS.has(c.provider) && (
                                 <button
-                                  onClick={() => handleLinkMailbox(c.id)}
+                                  onClick={() => handleLinkAccount(c)}
                                   disabled={linkingMailbox}
                                   className="rounded p-1.5 text-muted-foreground hover:bg-sky-50 hover:text-sky-600 dark:hover:bg-sky-900/20 transition-colors"
-                                  title={t("Link Mailbox (OAuth)")}
+                                  title={
+                                    c.provider === "onedrive"
+                                      ? t("Link OneDrive Account (OAuth)")
+                                      : t("Link Mailbox (OAuth)")
+                                  }
                                 >
                                   {linkingMailbox ? (
                                     <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : c.provider === "onedrive" ? (
+                                    <Cloud className="h-4 w-4" />
                                   ) : (
                                     <Mail className="h-4 w-4" />
                                   )}
@@ -1477,6 +1533,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                   <optgroup label={t("Cloud Storage")}>
                     <option value="azure_blob">Azure Blob Storage</option>
                     <option value="sharepoint">SharePoint</option>
+                    <option value="onedrive">OneDrive</option>
                   </optgroup>
                   {ENABLE_OUTLOOK_CONNECTOR && (
                   <optgroup label={t("Email")}>
@@ -1717,6 +1774,16 @@ export default function ConnectorsCatalogueView(): JSX.Element {
               {/* ── Outlook fields ── */}
               {form.provider === "outlook" && (
                 <OutlookConnectorForm
+                  form={form}
+                  onChange={(field, value) => setForm({ ...form, [field]: value })}
+                  isEditing={!!editingConnector}
+                  connectorId={editingConnector?.id}
+                />
+              )}
+
+              {/* ── OneDrive fields ── */}
+              {form.provider === "onedrive" && (
+                <OneDriveConnectorForm
                   form={form}
                   onChange={(field, value) => setForm({ ...form, [field]: value })}
                   isEditing={!!editingConnector}

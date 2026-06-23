@@ -166,6 +166,13 @@ function sharepointOnly<T>(field: T): T & { show_when: typeof SHAREPOINT_ONLY } 
   return { ...field, show_when: SHAREPOINT_ONLY };
 }
 
+// Gate a field so it only renders when the selected connector is a OneDrive connector.
+// OneDrive processes files from a chosen folder within the signed-in account's drive.
+const ONEDRIVE_ONLY = { field: "connector_provider", value: "onedrive" } as const;
+function onedriveOnly<T>(field: T): T & { show_when: typeof ONEDRIVE_ONLY } {
+  return { ...field, show_when: ONEDRIVE_ONLY };
+}
+
 // ─── node definitions ─────────────────────────────────────────────────────────
 
 export const IDP_NODES: IDPData = {
@@ -217,6 +224,10 @@ export const IDP_NODES: IDPData = {
         "sharepoint_folder",
         "sharepoint_file_types",
         "sharepoint_poll_interval",
+        // OneDrive (shown when a OneDrive connector is selected)
+        "onedrive_folder",
+        "onedrive_file_types",
+        "onedrive_poll_interval",
         // Outlook / email
         "folder",
         "filter_subject",
@@ -285,6 +296,25 @@ export const IDP_NODES: IDPData = {
         )),
         sharepoint_poll_interval: sharepointOnly(intField(
           "sharepoint_poll_interval", "Poll Interval (seconds)", 300,
+          "How often the published agent checks this folder for new files.",
+        )),
+        // OneDrive options — the published agent's background monitor polls the chosen folder in the
+        // signed-in account's drive and ingests new files into Processed Docs (ingest_mode=idp_pipeline).
+        onedrive_folder: onedriveOnly({
+          // idp_onedrive_folder_fetch → custom renderer lists the account's folders to pick from
+          // (still a combobox, so a deeper path can be typed manually).
+          ...strField(
+            "onedrive_folder", "Folder", "",
+            "Pick a folder from your OneDrive to process. Leave empty for the drive root.",
+          ),
+          idp_onedrive_folder_fetch: true,
+        }),
+        onedrive_file_types: onedriveOnly(strField(
+          "onedrive_file_types", "File Type Filter", "pdf,png,jpg,docx",
+          "Comma-separated list of file extensions to process. Leave empty for all supported types.",
+        )),
+        onedrive_poll_interval: onedriveOnly(intField(
+          "onedrive_poll_interval", "Poll Interval (seconds)", 300,
           "How often the published agent checks this folder for new files.",
         )),
         // Email filters / polling — the published agent's background monitor reads these (subject /
