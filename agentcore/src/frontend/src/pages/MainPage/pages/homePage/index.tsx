@@ -22,8 +22,8 @@ import { AuthContext } from "@/contexts/authContext";
 
 const HomePage = ({ type }: { type: "agents" | "components" | "mcp" }) => {
   const [view, setView] = useState<"grid" | "list">(() => {
-    const savedView = localStorage.getItem("view");
-    return savedView === "grid" || savedView === "list" ? savedView : "list";
+    const savedView = localStorage.getItem("projects-view");
+    return savedView === "grid" || savedView === "list" ? savedView : "grid";
   });
   const { folderId } = useParams();
   const [pageIndex, setPageIndex] = useState(1);
@@ -118,7 +118,7 @@ const HomePage = ({ type }: { type: "agents" | "components" | "mcp" }) => {
   };
 
   useEffect(() => {
-    localStorage.setItem("view", view);
+    localStorage.setItem("projects-view", view);
   }, [view]);
 
   const handlePageChange = useCallback((newPageIndex, newPageSize) => {
@@ -313,8 +313,8 @@ const HomePage = ({ type }: { type: "agents" | "components" | "mcp" }) => {
               <div className="flex h-full flex-col">
                 {isLoading ? (
                   view === "grid" ? (
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-                      <ListSkeleton /><ListSkeleton /><ListSkeleton />
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                      <ListSkeleton /><ListSkeleton /><ListSkeleton /><ListSkeleton />
                     </div>
                   ) : (
                     <div className="flex flex-col gap-2">
@@ -323,15 +323,17 @@ const HomePage = ({ type }: { type: "agents" | "components" | "mcp" }) => {
                   )
                 ) : (agentType === "agents" || agentType === "components") && data && data.pagination.total > 0 ? (
                   view === "grid" ? (
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                       {data.agents.map((agent, index) => (
                         <ListComponent
                           key={agent.id}
+                          view="grid"
                           agentData={agent}
                           index={index}
                           selected={selectedAgents.includes(agent.id)}
                           setSelected={(selected) => setSelectedAgent(selected, agent.id, index)}
                           shiftPressed={isShiftPressed || isCtrlPressed}
+                          disabled={can("view_agents_page") && !can("edit_agents")}
                         />
                       ))}
                     </div>
@@ -340,6 +342,7 @@ const HomePage = ({ type }: { type: "agents" | "components" | "mcp" }) => {
                       {data.agents.map((agent, index) => (
                         <ListComponent
                           key={agent.id}
+                          view="list"
                           agentData={agent}
                           index={index}
                           selected={selectedAgents.includes(agent.id)}
