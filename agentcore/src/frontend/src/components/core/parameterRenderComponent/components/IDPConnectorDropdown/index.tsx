@@ -19,13 +19,16 @@ export default function IDPConnectorDropdown({
   });
 
   const options = (connectors ?? [])
-    .filter((c) => c.status === "connected" && c.provider === "outlook")
+    .filter(
+      (c) =>
+        c.status === "connected" &&
+        (c.provider === "outlook" || c.provider === "sharepoint"),
+    )
     .map((c) => c.name);
 
   const onChange = (val: any, dbValue?: boolean, skipSnapshot?: boolean) => {
-    // Record the selected connector's provider so the email-only fields (show_when:
-    // connector_provider == "outlook") render only for Outlook/email connectors. Future
-    // SharePoint/OneDrive connectors set a different provider and hide those options.
+    // Record the selected connector's provider so provider-specific fields render via show_when:
+    // email-only fields show for "outlook"; SharePoint folder/library fields show for "sharepoint".
     const provider =
       (connectors ?? []).find((c) => c.name === val)?.provider ?? "";
     if (handleNodeClass && (nodeClass as any)?.template?.connector_provider) {
