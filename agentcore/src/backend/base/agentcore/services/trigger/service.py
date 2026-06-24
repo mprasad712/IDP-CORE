@@ -316,28 +316,34 @@ class TriggerService(Service):
 
         conn_nodes = [n for n in nodes if _is_connector_node(n)]
 
-        # Existing email monitors for this agent+env (active or not). Fetched BEFORE the
-        # no-connector-nodes early-return so we can deactivate ORPHANS — monitors whose node_id is
-        # no longer in the published flow (e.g. the Connector Input node was deleted + re-added →
-        # new node_id, so a new monitor is created while the old one keeps running; on restart BOTH
-        # re-register and poll). Deactivating orphans leaves exactly one active monitor per current
-        # connector node. (Enable/disable stays the user's control via the Automations toggle.)
+        # Existing email monitors for this agent+env (active or not). Fetched up front so we can
+        # deactivate ORPHANS — active monitors whose node is no longer an OUTLOOK EMAIL node in the
+        # published flow. A node becomes an orphan when it is deleted, re-added with a new node_id
+        # (a fresh monitor is created while the old one keeps polling), OR has its connector switched
+        # to a non-Outlook provider (SharePoint/OneDrive) so it no longer resolves to an email cfg.
+        # On the "live" set below we deactivate the rest, leaving exactly one active monitor per
+        # current Outlook Connector Input node. (Enable/disable stays the user's Automations toggle.)
         existing = await get_triggers_by_agent_id(session, agent_id, active_only=False)
         existing_em = [
             t for t in existing
             if t.trigger_type == TriggerTypeEnum.EMAIL_MONITOR and t.environment == environment
         ]
-        new_node_ids = {n.get("id") for n in conn_nodes}
-        for t in existing_em:
-            nid = (t.trigger_config or {}).get("node_id")
-            if t.is_active and nid not in new_node_ids:
-                t.is_active = False
-                session.add(t)
-                await self.unregister(t.id)
-                logger.info(f"Deactivated orphan email monitor {t.id} (node {nid} no longer in flow)")
+
+        async def _deactivate_orphans(live_node_ids: set) -> None:
+            for t in existing_em:
+                nid = (t.trigger_config or {}).get("node_id")
+                if t.is_active and nid not in live_node_ids:
+                    t.is_active = False
+                    session.add(t)
+                    await self.unregister(t.id)
+                    logger.info(
+                        f"Deactivated orphan email monitor {t.id} (node {nid} no longer an Outlook email node)"
+                    )
 
         if not conn_nodes:
-            await session.commit()  # persist any orphan deactivations
+            # No connector nodes at all → every email monitor for this agent+env is an orphan.
+            await _deactivate_orphans(set())
+            await session.commit()
             return
 
         # Resolve connectors by NAME (what the canvas IDPConnectorDropdown saves into
@@ -418,6 +424,18 @@ class TriggerService(Service):
                 "node_id": node_id,
             }
 
+        # Resolve which current connector nodes actually drive an Outlook email monitor. A node that
+        # now points at a SharePoint/OneDrive/unknown connector resolves to None → it is NOT live, so
+        # its old email monitor (if any) is deactivated as an orphan below.
+        node_cfgs: dict[str, dict] = {}
+        for node in conn_nodes:
+            node_id = node.get("id")
+            template = node.get("data", {}).get("node", {}).get("template", {})
+            cfg = _cfg_from_node(template, node_id)
+            if cfg is not None:
+                node_cfgs[node_id] = cfg
+        await _deactivate_orphans(set(node_cfgs))
+
         # (existing_em fetched above for the orphan pass — reuse it for the versioning lookups.)
         existing_by_key: dict[tuple[str, str], object] = {}
         existing_by_node_only: dict[str, list] = {}
@@ -430,13 +448,7 @@ class TriggerService(Service):
                 existing_by_node_only.setdefault(nid, []).append(t)
 
         dep_id_str = str(deployment_id)
-        for node in conn_nodes:
-            node_id = node.get("id")
-            template = node.get("data", {}).get("node", {}).get("template", {})
-            cfg = _cfg_from_node(template, node_id)
-            if cfg is None:
-                continue  # non-outlook connector → no poller
-
+        for node_id, cfg in node_cfgs.items():
             exact_match = existing_by_key.get((node_id, dep_id_str))
             if exact_match:
                 exact_match.trigger_config = cfg
