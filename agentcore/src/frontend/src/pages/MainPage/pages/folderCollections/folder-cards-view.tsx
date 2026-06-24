@@ -419,15 +419,15 @@ export default function FolderCardsView({
 
   return (
     <>
-      <div className="dark relative flex h-full w-full flex-col overflow-auto bg-[#070b16] text-foreground">
+      <div className="relative flex h-full w-full flex-col overflow-auto bg-background text-foreground">
         {/* ambient command-center glows */}
         <div className="pointer-events-none fixed inset-0 overflow-hidden">
-          <div className="absolute -top-24 left-1/4 h-80 w-80 rounded-full bg-sky-500/20 blur-[130px]" />
-          <div className="absolute top-1/3 right-0 h-80 w-80 rounded-full bg-violet-500/15 blur-[130px]" />
-          <div className="absolute bottom-0 left-0 h-80 w-80 rounded-full bg-[#D04A02]/15 blur-[130px]" />
+          <div className="absolute -top-24 left-1/4 h-80 w-80 rounded-full bg-[#D04A02]/15 dark:bg-sky-500/20 blur-[130px]" />
+          <div className="absolute top-1/3 right-0 h-80 w-80 rounded-full bg-[#D04A02]/10 dark:bg-violet-500/15 blur-[130px]" />
+          <div className="absolute bottom-0 left-0 h-80 w-80 rounded-full bg-[#E8853C]/12 dark:bg-[#D04A02]/15 blur-[130px]" />
         </div>
         {/* Header */}
-        <div ref={headerRef} className="relative z-20 flex items-center justify-between border-b border-white/10 bg-white/[0.03] px-6 py-4 backdrop-blur-xl sticky top-0">
+        <div ref={headerRef} className="relative z-20 flex items-center justify-between border-b border-border bg-card/80 px-6 py-4 backdrop-blur sticky top-0">
           <div className="flex items-center gap-3">
             <span className="h-9 w-1.5 rounded-full bg-[#D04A02]" style={{ boxShadow: "0 0 14px rgba(208,74,2,0.9)" }} />
             <div>
@@ -853,7 +853,7 @@ export default function FolderCardsView({
             {can("view_projects_page") && (
             <div
               onClick={!isPending ? handleOpenCreateModal : undefined}
-              className="group relative flex min-h-[150px] cursor-pointer flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-white/15 bg-white/[0.02] p-4 backdrop-blur-xl transition-all duration-300 hover:-translate-y-1 hover:border-[#D04A02]/60 hover:bg-white/[0.05]"
+              className="group relative flex min-h-[150px] cursor-pointer flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-border bg-card/40 p-4 transition-all duration-300 hover:-translate-y-1 hover:border-primary/50 hover:bg-accent"
             >
               <div
                 className={`flex h-12 w-12 items-center justify-center rounded-xl bg-[#D04A02]/15 transition-colors group-hover:bg-[#D04A02]/25${isPending ? " opacity-50" : ""}`}
@@ -871,8 +871,8 @@ export default function FolderCardsView({
               return (
                 <div
                   key={folder.id}
-                  className="group relative flex flex-col rounded-2xl border border-white/10 bg-white/[0.04] p-4 backdrop-blur-xl transition-all duration-300 hover:-translate-y-1 hover:bg-white/[0.07]"
-                  style={{ boxShadow: "0 0 0 1px rgba(255,255,255,0.05), 0 16px 50px -24px rgba(208,74,2,0.45)" }}
+                  className="group relative flex flex-col rounded-2xl border border-border bg-card p-4 backdrop-blur transition-all duration-300 hover:-translate-y-1 hover:shadow-lg"
+                  style={{ boxShadow: "0 16px 50px -24px rgba(208,74,2,0.4)" }}
                 >
                   {/* Header: icon + name + actions */}
                   <div className="flex items-start gap-3">

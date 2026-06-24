@@ -1,4 +1,4 @@
-import MothersonLogo from "@/assets/micore.png?react";
+import MothersonLogo from "@/assets/micore-icon.svg?react";
 
 export default function LogoIcon() {
   return (

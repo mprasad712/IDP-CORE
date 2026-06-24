@@ -19,7 +19,7 @@ import {
 import useAlertStore from "@/stores/alertStore";
 import AgentMenu from "./components/AgentMenu";
 import FullLogo from "@/assets/micore.svg?react";
-import IconLogo from "@/assets/micore.png?react";
+import IconLogo from "@/assets/micore-icon.svg?react";
 
 export default function AppHeader(): JSX.Element {
   const notificationCenter = useAlertStore((state) => state.notificationCenter);
