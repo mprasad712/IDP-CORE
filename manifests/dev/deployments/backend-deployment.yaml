@@ -20,7 +20,7 @@ spec:
       containers:
         - name: backend
           # Image tag is updated by CI pipeline after each build
-          image: idpflowacr1.azurecr.io/backend:66
+          image: idpflowacr1.azurecr.io/backend:68
           ports:
             - containerPort: 7860
           envFrom:
