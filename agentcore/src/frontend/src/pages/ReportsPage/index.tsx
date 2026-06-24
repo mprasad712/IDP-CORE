@@ -136,6 +136,8 @@ export default function ReportsPage() {
     predicted_type: typeParam,
     created_start: createdStart,
     created_end: createdEnd,
+    // A selected Field config filters the table to docs extracted with it (same as the export).
+    config_id: configId !== "all" ? configId : undefined,
   });
 
   const rows: ReportRow[] = data?.items ?? [];
@@ -181,10 +183,12 @@ export default function ReportsPage() {
   }
 
   function downloadReport(fmt: string) {
+    const params: Record<string, string> = { ...filterQP, format: fmt };
+    if (configId !== "all") params.config_id = configId; // match the config-filtered table
     run(() =>
       downloadBlob(
         `${getURL("IDP_REPORTS")}/processed-docs/export`,
-        { ...filterQP, format: fmt },
+        params,
         `processed_docs_report.${EXT[fmt]}`,
       ),
     );
@@ -327,12 +331,12 @@ export default function ReportsPage() {
             config-driven per-document-row layout (its schema = columns, filtered to that type). */}
         <div className="flex items-center gap-1.5">
           <span className="text-xs text-muted-foreground">Field config</span>
-          <Select value={configId} onValueChange={(v) => setConfigId(v)}>
+          <Select value={configId} onValueChange={resetToFirstPage(setConfigId)}>
             <SelectTrigger className="w-52 h-9 rounded-lg">
               <SelectValue placeholder="Field configuration" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">All configurations (sectioned)</SelectItem>
+              <SelectItem value="all">All configurations</SelectItem>
               {configs.map((c) => (
                 <SelectItem key={c.id} value={c.id}>
                   {c.name}

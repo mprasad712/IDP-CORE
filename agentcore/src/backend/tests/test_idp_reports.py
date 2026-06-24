@@ -293,65 +293,87 @@ async def test_report_export_summary_formats(setup_report_data):
 
 @pytest.mark.anyio
 async def test_report_export_data_sectioned(setup_report_data):
-    """All-data export = sectioned per-file blocks (file-info + HEADER FIELDS table beside a
-    LINE ITEMS table), stacked. doc1 = 2 line rows + reviewed vendor; doc2 = header-only; doc3 hidden.
-    Line items are audit-aware just like headers."""
+    """SWITCH-BACK: ``layout=sectioned`` (no config) still yields the legacy per-file sectioned
+    blocks (file-info + HEADER FIELDS table beside a LINE ITEMS table). doc1 = 2 line rows + reviewed
+    vendor; doc2 = header-only; doc3 hidden. (The default layout is now flat — see the flat tests.)"""
     global mock_user
     data = setup_report_data
     mock_user = data["user"]
     app, client = _client()
 
-    # both (default): each header + line field shows Predicted / Audited / Reviewed / Confidence
-    both = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv"})
+    def sec(**extra):
+        return client.get("/api/v1/idp/reports/processed-docs/export-data",
+                          params={"format": "csv", "layout": "sectioned", **extra})
+
+    # both (default values): each header + line field shows Predicted / Audited / Reviewed / Confidence
+    both = sec()
     assert both.status_code == 200
     text = both.content.decode("utf-8-sig")
     cells = [c for row in csv.reader(io.StringIO(text)) for c in row]
-    # per-file sections + side-by-side table labels
     assert "FILE  po_alpha.pdf" in cells and "FILE  po_beta.pdf" in cells
     assert "FILE  po_hidden.pdf" not in cells          # hidden doc excluded
     assert "HEADER FIELDS" in cells and "LINE ITEMS" in cells
-    # header table sub-headers + line-item audit columns (line items audited like headers)
     assert "Field" in cells and "Predicted" in cells and "Audited" in cells and "Confidence" in cells
     assert "item" in cells and "item (audited)" in cells and "qty (conf)" in cells
-    # line items now carry a "(reviewed)" sub-column too (parity with header fields)
     assert "item (reviewed)" in cells and "qty (reviewed)" in cells
-    # vendor predicted + audited both present
     assert "Acme" in text and "Acme Corp" in text
-    # file-info block carries metadata + reviewer (doc1 has a review session)
     assert "Reviewed by" in cells and "Confidence" in cells
 
     # final: single value per field/cell, no audited/conf variants
-    final = client.get(
-        "/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv", "values": "final"}
-    )
-    assert final.status_code == 200
-    ftext = final.content.decode("utf-8-sig")
+    ftext = sec(values="final").content.decode("utf-8-sig")
     fcells = [c for row in csv.reader(io.StringIO(ftext)) for c in row]
     assert "Field" in fcells and "Value" in fcells
     assert "Predicted" not in fcells and "item (audited)" not in fcells
     assert "Acme Corp" in ftext        # vendor final value = the reviewed value
 
-    # predicted (no-config): single value, LLM output only → vendor shows "Acme", not "Acme Corp"
-    pre = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv", "values": "predicted"})
-    assert pre.status_code == 200
-    ptext = pre.content.decode("utf-8-sig")
+    # predicted: LLM output only → vendor "Acme", not "Acme Corp"
+    ptext = sec(values="predicted").content.decode("utf-8-sig")
     assert "Acme" in ptext and "Acme Corp" not in ptext
-    assert "Predicted" not in [c for row in csv.reader(io.StringIO(ptext)) for c in row]  # one value column
 
-    # audited (no-config): human value only; vendor reviewed → "Acme Corp"; total un-reviewed → not "100"
-    aud = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv", "values": "audited"})
-    assert aud.status_code == 200
-    atext = aud.content.decode("utf-8-sig")
-    assert "Acme Corp" in atext and "Acme" not in atext.replace("Acme Corp", "")  # only the reviewed form
+    # audited: human value only; vendor reviewed → "Acme Corp"
+    atext = sec(values="audited").content.decode("utf-8-sig")
+    assert "Acme Corp" in atext and "Acme" not in atext.replace("Acme Corp", "")
 
-    # excel + xml still produce valid attachments
-    xl = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "excel"})
+    # excel + xml still valid
+    xl = sec(format="excel")
     assert xl.status_code == 200 and xl.content[:2] == b"PK"
-    assert client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "xml"}).status_code == 200
+    assert sec(format="xml").status_code == 200
+    # bad values / bad layout → 400
+    assert sec(values="nope").status_code == 400
+    assert client.get("/api/v1/idp/reports/processed-docs/export-data", params={"layout": "nope"}).status_code == 400
 
-    # bad values → 400
-    assert client.get("/api/v1/idp/reports/processed-docs/export-data", params={"values": "nope"}).status_code == 400
+    app.dependency_overrides.clear()
 
+
+@pytest.mark.anyio
+async def test_report_export_data_flat_default(setup_report_data):
+    """DEFAULT (no config, no layout) is now the FLAT per-document table: one fixed column header
+    row (meta + union of all field names), one row per line item, header values on the file's FIRST
+    line row only (blank below). NOT the sectioned blocks."""
+    global mock_user
+    data = setup_report_data
+    mock_user = data["user"]
+    app, client = _client()
+
+    r = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv", "values": "final"})
+    assert r.status_code == 200
+    rows = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    hd = rows[0]
+    # flat: a single column-header row with the full meta + union field columns; NO sectioned markers
+    assert hd[:2] == ["File", "Document ID"] and "Agent" in hd
+    assert not any(c.startswith("FILE  ") for row in rows for c in row)  # no per-file section banner
+    # union of fields across docs: doc1 has vendor/total/item/qty; doc2 has po_num
+    for col in ("vendor", "total", "po_num", "item", "qty"):
+        assert col in hd, f"{col} missing from union columns"
+    fi, vi, ii = hd.index("File"), hd.index("vendor"), hd.index("item")
+    body = [row for row in rows[1:] if row]
+    # 'once' layout: po_alpha (2 line items) → its first row carries File + header; the next row is a
+    # blank-File continuation with the 2nd line item.
+    a_start = next(i for i, row in enumerate(body) if row[fi] == "po_alpha.pdf")
+    assert body[a_start][vi] == "Acme Corp"               # header value on the FIRST row
+    assert body[a_start + 1][fi] == "" and body[a_start + 1][vi] == ""  # continuation row: blank meta/header
+    assert body[a_start + 1][ii]                          # …but carries the 2nd line item's value
+    assert "po_hidden.pdf" not in {row[fi] for row in body}   # hidden doc excluded
     app.dependency_overrides.clear()
 
 
@@ -366,6 +388,28 @@ async def test_report_export_row_cap(setup_report_data, monkeypatch):
     monkeypatch.setattr("agentcore.api.idp.reports.MAX_EXPORT_ROWS", 1)
     r = client.get("/api/v1/idp/reports/processed-docs/export", params={"format": "csv"})
     assert r.status_code == 422  # 2 reportable docs > cap of 1
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_report_export_data_flat_cell_cap(setup_report_data, monkeypatch):
+    """The flat layout's WIDTH is the union of every doc's field names, so a small row count can
+    still fan out to a huge sparse matrix. Over MAX_EXPORT_CELLS → 422, computed BEFORE building it."""
+    global mock_user
+    data = setup_report_data
+    mock_user = data["user"]
+    app, client = _client()
+
+    # tiny cell budget → the flat export (several docs × union columns) exceeds it
+    monkeypatch.setattr("agentcore.api.idp.reports.MAX_EXPORT_CELLS", 5)
+    r = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv", "values": "final"})
+    assert r.status_code == 422 and "cell" in r.json()["detail"].lower()
+    # generous budget → normal-sized export is a clean 200 (no false trip)
+    monkeypatch.setattr("agentcore.api.idp.reports.MAX_EXPORT_CELLS", 2_000_000)
+    assert client.get(
+        "/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv", "values": "final"}
+    ).status_code == 200
 
     app.dependency_overrides.clear()
 
@@ -394,7 +438,7 @@ async def test_report_org_isolation(setup_report_data):
 # Config-driven "Download all data" layout (export-data?config_id=…)
 # ──────────────────────────────────────────────────────────────────────
 
-_META = ["File", "Document ID", "Type", "Status", "Confidence",
+_META = ["File", "Document ID", "Agent", "Agent ID", "Type", "Status", "Confidence",
          "Uploaded", "Processed", "Reviewed By", "Reviewed At", "Review"]
 
 
@@ -633,8 +677,9 @@ async def test_config_export_columns_and_value_modes(setup_config_export):
 
 
 @pytest.mark.anyio
-async def test_config_export_row_repetition_and_zero_lines(setup_config_export):
-    """doc_a (2 line items) → 2 rows with meta+headers repeated; doc_b (0 line items) → 1 row."""
+async def test_config_export_row_once_and_zero_lines(setup_config_export):
+    """doc_a (2 line items) → 2 rows; meta+header on the FIRST row only, BLANK on the row below.
+    doc_b (0 line items) → 1 row."""
     global mock_user
     data = setup_config_export
     mock_user = data["user"]
@@ -642,17 +687,31 @@ async def test_config_export_row_repetition_and_zero_lines(setup_config_export):
     rows = _csv_rows(_export(client, format="csv", config_id=str(data["config_inv"]), values="final"))
     hd = rows[0]
     fi, vi, ii, qi = hd.index("File"), hd.index("vendor"), hd.index("item"), hd.index("qty")
-    a_rows = [r for r in rows[1:] if r[fi] == "inv_a.pdf"]
-    b_rows = [r for r in rows[1:] if r[fi] == "inv_b.pdf"]
-    assert len(a_rows) == 2                              # one row per line item
-    assert {r[vi] for r in a_rows} == {"Acme Corp"}      # header value repeated on every line row
-    assert sorted(r[ii] for r in a_rows) == ["W1", "W2"]
-    assert sorted(r[qi] for r in a_rows) == ["1", "2"]
-    assert len(b_rows) == 1                              # 0 line items → single row
-    assert b_rows[0][vi] == "Beta"
-    assert b_rows[0][ii] == "" and b_rows[0][qi] == ""   # no line items → blank line cells
-    # doc_b is missing the 'total' config field → blank
-    assert b_rows[0][hd.index("total")] == ""
+    body = rows[1:]
+
+    def block_for(fname):
+        """A doc's rows: the row whose File == fname, plus the blank-File continuation rows below it."""
+        out, cap = [], False
+        for r in body:
+            if r[fi] == fname:
+                cap = True; out.append(r)
+            elif cap and r[fi] == "":
+                out.append(r)
+            elif cap:
+                break
+        return out
+
+    a = block_for("inv_a.pdf")
+    assert len(a) == 2                                   # 2 line items → 2 rows
+    assert a[0][vi] == "Acme Corp"                       # header value on the FIRST row only
+    assert a[1][vi] == ""                                # blank on the continuation row (header once)
+    assert sorted(r[ii] for r in a) == ["W1", "W2"]      # both line items present
+    assert sorted(r[qi] for r in a) == ["1", "2"]
+    b = block_for("inv_b.pdf")
+    assert len(b) == 1                                   # 0 line items → single row
+    assert b[0][vi] == "Beta"
+    assert b[0][ii] == "" and b[0][qi] == ""             # no line items → blank line cells
+    assert b[0][hd.index("total")] == ""                 # missing config field → blank
     app.dependency_overrides.clear()
 
 
@@ -748,6 +807,29 @@ async def test_config_export_access_and_bad_inputs(setup_config_export):
     assert _export(client, format="csv", config_id=str(data["template_cfg"])).status_code == 200
     assert _export(client, format="csv", config_id=str(data["config_inv"]), values="nope").status_code == 400
     assert _export(client, format="json", config_id=str(data["config_inv"])).status_code == 400
+    # layout=sectioned is not supported WITH a config (config exports are always flat) → 400
+    assert _export(client, format="csv", config_id=str(data["config_inv"]), layout="sectioned").status_code == 400
+    assert _export(client, format="csv", layout="bogus").status_code == 400
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_summary_report_export_filtered_by_config(setup_config_export):
+    """The summary 'Download report' (/processed-docs/export) honours config_id too — so it matches
+    the config-filtered table, not all docs."""
+    global mock_user
+    data = setup_config_export
+    mock_user = data["user"]
+    app, client = _client()
+    r = client.get("/api/v1/idp/reports/processed-docs/export",
+                   params={"format": "csv", "config_id": str(data["config_inv"])})
+    assert r.status_code == 200
+    text = r.content.decode("utf-8-sig")
+    assert "inv_a.pdf" in text and "inv_b.pdf" in text   # Invoice-linked docs present
+    assert "inv_d.pdf" not in text and "inv_f.pdf" not in text  # other-config / classifier-override excluded
+    # access-checked like the rest → unknown config 404
+    assert client.get("/api/v1/idp/reports/processed-docs/export",
+                      params={"config_id": str(uuid4())}).status_code == 404
     app.dependency_overrides.clear()
 
 
@@ -765,4 +847,93 @@ async def test_config_export_row_cap(setup_config_export, monkeypatch):
     # A config with zero linked docs (and zero cells) must NOT false-trip the cap.
     empty = _export(client, format="csv", config_id=str(data["template_cfg"]))
     assert empty.status_code == 200 and len(_csv_rows(empty)) == 1  # header only
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_flat_matrix_cells_matches_built_matrix():
+    """The cap is only safe if _flat_matrix_cells equals the ACTUAL matrix size. Assert the helper's
+    count == rows × cols of the real _config_matrix across mixed shapes + value modes (if it under-
+    counts, an oversized export still builds; if it over-counts, a valid export is wrongly rejected)."""
+    from types import SimpleNamespace
+    from agentcore.api.idp.reports import _config_matrix, _flat_matrix_cells
+
+    def rec(v):
+        return SimpleNamespace(extracted_value=v, reviewed_value="", is_reviewed=False, confidence_score=90.0)
+
+    def dm(did, fn):
+        return SimpleNamespace(document_id=did, filename=fn, predicted_type="Invoice",
+                               doc_status="pending_review", overall_confidence=80.0,
+                               uploaded_at=None, processed_at=None, agent_name="A", agent_base_id="b")
+
+    # d1: 2 line items; d2: zero line items (still one row).
+    grouped = {
+        "d1": {"headers": {"vendor": rec("Acme")}, "lines": {0: {"item": rec("X")}, 1: {"item": rec("Y")}}},
+        "d2": {"headers": {"vendor": rec("Beta")}, "lines": {}},
+    }
+    doc_rows = [dm("d1", "a.pdf"), dm("d2", "b.pdf")]
+
+    for headers, line_cols in (["vendor"], ["item"]), (["vendor"], []):  # with + without line columns
+        for values in ("final", "both"):
+            matrix = _config_matrix(doc_rows, grouped, {}, headers, line_cols, values)
+            assert len({len(r) for r in matrix}) == 1, "matrix must be rectangular"
+            assert _flat_matrix_cells(doc_rows, grouped, headers, line_cols, values) == len(matrix) * len(matrix[0])
+    # 1 header row + d1(2 lines) + d2(1) = 4 rows when line columns exist
+    assert len(_config_matrix(doc_rows, grouped, {}, ["vendor"], ["item"], "final")) == 4
+
+
+@pytest.mark.anyio
+async def test_config_export_cell_cap(setup_config_export, monkeypatch):
+    """The flat-matrix cell cap (rows × columns) also guards the config-driven export → 422 before
+    building, while a generous budget keeps a normal-sized export a clean 200."""
+    global mock_user
+    data = setup_config_export
+    mock_user = data["user"]
+    app, client = _client()
+    monkeypatch.setattr("agentcore.api.idp.reports.MAX_EXPORT_CELLS", 5)
+    assert _export(client, format="csv", config_id=str(data["config_inv"])).status_code == 422
+    monkeypatch.setattr("agentcore.api.idp.reports.MAX_EXPORT_CELLS", 2_000_000)
+    assert _export(client, format="csv", config_id=str(data["config_inv"])).status_code == 200
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_config_export_agent_column(setup_config_export):
+    """The config-driven export carries an Agent name + Agent ID column (which agent ran each doc)."""
+    global mock_user
+    data = setup_config_export
+    mock_user = data["user"]
+    app, client = _client()
+    rows = _csv_rows(_export(client, format="csv", config_id=str(data["config_inv"]), values="final"))
+    hd = rows[0]
+    assert "Agent" in hd and "Agent ID" in hd
+    r = next(rr for rr in rows[1:] if rr[hd.index("File")] == "inv_a.pdf")
+    assert r[hd.index("Agent")] not in ("", "—")     # agent name populated
+    assert len(r[hd.index("Agent ID")]) == 36         # base agent uuid
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_report_table_filtered_by_config(setup_config_export):
+    """GET /reports/processed-docs?config_id=X filters the TABLE to docs extracted with X (same
+    union as the export) — so selecting a Field config filters the list, not just the export."""
+    global mock_user
+    data = setup_config_export
+    mock_user = data["user"]
+    app, client = _client()
+    r = client.get("/api/v1/idp/reports/processed-docs",
+                   params={"size": 100, "config_id": str(data["config_inv"])})
+    assert r.status_code == 200, r.text
+    files = {row["original_filename"] for row in r.json()["items"]}
+    assert {"inv_a.pdf", "inv_b.pdf", "inv_c.pdf", "inv_g.pdf"} <= files  # named-config + classifier + zero-extraction
+    assert "inv_d.pdf" not in files and "inv_f.pdf" not in files          # other config / classifier-override
+    # a config with no linked docs → empty table
+    empty = client.get("/api/v1/idp/reports/processed-docs",
+                       params={"size": 100, "config_id": str(data["template_cfg"])})
+    assert empty.json()["total"] == 0
+    # access-checked like the export: foreign-org / unknown config → 404 (table + export agree)
+    assert client.get("/api/v1/idp/reports/processed-docs",
+                      params={"config_id": str(data["config_foreign"])}).status_code == 404
+    assert client.get("/api/v1/idp/reports/processed-docs",
+                      params={"config_id": str(uuid4())}).status_code == 404
     app.dependency_overrides.clear()
