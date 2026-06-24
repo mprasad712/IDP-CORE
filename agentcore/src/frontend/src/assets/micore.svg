@@ -1,9 +1,10 @@
-<svg version="1.1" xmlns="http://www.w3.org/2000/svg" x="0px" y="0px" viewBox="0 0 335 58.7" xml:space="preserve">
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 725 90" xml:space="preserve">
   <style type="text/css">
     .st0{fill:#D04A02;}
-    .brand-text{font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; font-weight: 700; font-size: 36px; letter-spacing: -0.02em;}
+    .brand-text{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;font-weight:700;font-size:62px;letter-spacing:-0.02em;}
   </style>
-  <polygon class="st0" points="7,45 23,45 24,34 9,34"/>
-  <polygon class="st0" points="24,33 40,33 41,22 26,22"/>
-  <text x="54" y="50" class="st0 brand-text">Digital Workmate</text>
+  <!-- icon scaled to 70% of loader size, vertically centred with text -->
+  <polygon class="st0" points="22,65 68,65 73,52 27,52"/>
+  <polygon class="st0" points="72,51 118,51 123,37 76,37"/>
+  <text x="135" y="72" class="brand-text st0">Digital Workmate</text>
 </svg>
