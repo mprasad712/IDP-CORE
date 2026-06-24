@@ -57,7 +57,6 @@ const SetPasswordPage             = lazy(() => import("./pages/SetPasswordPage")
 const FieldConfigurationsPage     = lazy(() => import("./pages/FieldConfigurationsPage"));
 const ProcessedDocsPage           = lazy(() => import("./pages/ProcessedDocsPage"));
 const ReportsPage                 = lazy(() => import("./pages/ReportsPage"));
-const AutomationsPage             = lazy(() => import("./pages/AutomationsPage"));
 const IdpUploadPage               = lazy(() => import("./pages/IdpUploadPage"));
 const ObservabilityPage           = lazy(() => import("./pages/ObservabilityPage"));
 
@@ -264,14 +263,6 @@ const router = createBrowserRouter(
                     element={
                       <ProtectedPermissionRoute permission="view_idp">
                         <Suspense fallback={<PageLoader />}><ReportsPage /></Suspense>
-                      </ProtectedPermissionRoute>
-                    }
-                  />
-                  <Route
-                    path="idp-automations"
-                    element={
-                      <ProtectedPermissionRoute permission="view_idp">
-                        <Suspense fallback={<PageLoader />}><AutomationsPage /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />

@@ -206,7 +206,7 @@ async def _save_artifact(storage, agent_id: str, rel_path: str, data: bytes) -> 
         logger.warning(f"[pipeline] could not store artifact {rel_path}: {e}")
 
 
-async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, overall_conf: float, cfg, flow: "FlowLog") -> str:
+async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, overall_conf: float, cfg, flow: "FlowLog", match_result: str | None = None) -> str:
     """Decide auto_approved vs pending_review.
 
     If the agent has rules (``idp_agent_rules``), run the real rules engine (B17) — it can
@@ -304,6 +304,7 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
             detected_elements=detected,
             rules=rules,
             default_action=cfg.default_rule_action,
+            match_result=match_result,
         )
         action = decision.get("action", cfg.default_rule_action)
         matched = decision.get("matched_group")
@@ -478,6 +479,80 @@ async def _hook_math_reconcile(extracted, llm, job, cfg, flow: "FlowLog"):
     except Exception as e:
         flow.step("math_reconcile", "warn", f"skipped ({e})")
         return extracted
+
+
+async def _hook_sap_matching(
+    session,
+    document_id: UUID,
+    idp_agent_id: UUID,
+    extracted: dict,
+    flow: "FlowLog",
+) -> str | None:
+    """Run SAP two-way or three-way match if configured for this agent. Returns overall_status or None."""
+    from agentcore.services.idp.matching_service import (
+        MatchConfig,
+        MatchingService,
+        load_agent_match_config,
+        persist_match_result,
+    )
+    from agentcore.services.idp.sap_client import SapS4HanaClient
+    from agentcore.api.connector_catalogue import _decrypt_provider_config, SAP_PROVIDERS
+    from agentcore.services.database.models.connector_catalogue.model import ConnectorCatalogue
+
+    agent_cfg = await load_agent_match_config(session, idp_agent_id)
+    if not agent_cfg or not agent_cfg.match_enabled:
+        return None
+
+    if not agent_cfg.sap_connector_id:
+        flow.step("sap_match", "warn", "skipped (no SAP connector configured)")
+        return None
+
+    connector = await session.get(ConnectorCatalogue, agent_cfg.sap_connector_id)
+    if not connector or connector.provider not in SAP_PROVIDERS:
+        flow.step("sap_match", "warn", "skipped (SAP connector not found)")
+        return None
+
+    sap_config = _decrypt_provider_config(connector.provider, connector.provider_config or {})
+    sap_client = SapS4HanaClient(sap_config)
+
+    match_config = MatchConfig(
+        match_type=agent_cfg.match_type,
+        amount_tolerance_pct=agent_cfg.amount_tolerance_pct,
+        quantity_tolerance_pct=agent_cfg.quantity_tolerance_pct,
+        unit_price_tolerance_pct=agent_cfg.unit_price_tolerance_pct,
+        vendor_name_fuzzy_threshold=agent_cfg.vendor_name_fuzzy_threshold,
+        sap_connector_id=str(agent_cfg.sap_connector_id),
+    )
+
+    headers_dict: dict = extracted.get("headers", {}) if isinstance(extracted.get("headers"), dict) else {}
+    line_items_list: list = extracted.get("line_items", []) if isinstance(extracted.get("line_items"), list) else []
+
+    po_number = headers_dict.get("po_number", "")
+    if not po_number:
+        flow.step("sap_match", "warn", "skipped (no po_number extracted)")
+        return None
+
+    service = MatchingService(match_config, sap_client)
+    result = await service.run(headers_dict, line_items_list)
+
+    # Persist results
+    sap_po_snapshot = sap_client._last_po_snapshot if hasattr(sap_client, "_last_po_snapshot") else None
+    sap_gr_snapshot = sap_client._last_gr_snapshot if hasattr(sap_client, "_last_gr_snapshot") else None
+    await persist_match_result(
+        session=session,
+        document_id=document_id,
+        result=result,
+        config=match_config,
+        sap_po_snapshot=sap_po_snapshot,
+        sap_gr_snapshot=sap_gr_snapshot,
+    )
+
+    flow.step(
+        "sap_match", "ok" if result.overall_status != "error" else "warn",
+        f"{agent_cfg.match_type}: {result.overall_status} (score={result.match_score:.1f}%, "
+        f"po={po_number}, {len(result.discrepancies)} field(s) compared)",
+    )
+    return result.overall_status
 
 
 async def _extract_text(session, cfg, llm, text: str) -> dict:
@@ -1040,10 +1115,23 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                     end_span(trace_ctx, "entity_linking", error=str(e))
                 flow.step("entity_link", "warn", f"skipped ({e})")
 
+        # HOOK: SAP two-way / three-way matching — compare extracted invoice against SAP PO/GR.
+        sap_match_result: str | None = None
+        try:
+            sap_match_result = await _hook_sap_matching(
+                session=session,
+                document_id=document_id,
+                idp_agent_id=idp_agent.id,
+                extracted=extracted if isinstance(extracted, dict) else {},
+                flow=flow,
+            )
+        except Exception as _e:  # matching must never abort the pipeline
+            flow.step("sap_match", "warn", f"skipped ({_e})")
+
         # 7. route — the rules engine (B17) decides auto_approve vs pending_review.
         if trace_ctx:
             start_span(trace_ctx, "rules_evaluation", inputs={"overall_confidence": overall_conf})
-        new_status = await _route(session, document_id, job.id, idp_agent.id, overall_conf, cfg, flow)
+        new_status = await _route(session, document_id, job.id, idp_agent.id, overall_conf, cfg, flow, match_result=sap_match_result)
         if trace_ctx:
             end_span(trace_ctx, "rules_evaluation", outputs={"new_status": new_status})
 

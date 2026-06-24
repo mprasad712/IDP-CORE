@@ -40,6 +40,7 @@ router = APIRouter(prefix="/processed-docs", tags=["IDP Processed Documents"])
 class ProcessedDocRead(BaseModel):
     id: UUID
     agent_id: UUID
+    agent_name: str | None = None
     parent_document_id: UUID | None
     original_filename: str
     file_path: str
@@ -215,7 +216,24 @@ async def list_processed_docs(
     import warnings
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"fastapi_pagination\.ext\.sqlalchemy")
-        return await apaginate(session, stmt, params=params)
+        result = await apaginate(session, stmt, params=params)
+
+    if result.items:
+        idp_ids = [item.agent_id for item in result.items]
+        name_rows = (await session.exec(
+            select(IdpAgent.id, Agent.name)
+            .join(Agent, IdpAgent.agent_id == Agent.id)
+            .where(IdpAgent.id.in_(idp_ids))
+        )).all()
+        name_map = {str(r[0]): r[1] for r in name_rows}
+        result = result.model_copy(update={
+            "items": [
+                item.model_copy(update={"agent_name": name_map.get(str(item.agent_id))})
+                for item in result.items
+            ]
+        })
+
+    return result
 
 
 @router.get("/{id}", response_model=ProcessedDocDetailRead)
