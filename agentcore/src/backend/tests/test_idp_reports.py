@@ -393,6 +393,28 @@ async def test_report_export_row_cap(setup_report_data, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_report_export_data_flat_cell_cap(setup_report_data, monkeypatch):
+    """The flat layout's WIDTH is the union of every doc's field names, so a small row count can
+    still fan out to a huge sparse matrix. Over MAX_EXPORT_CELLS → 422, computed BEFORE building it."""
+    global mock_user
+    data = setup_report_data
+    mock_user = data["user"]
+    app, client = _client()
+
+    # tiny cell budget → the flat export (several docs × union columns) exceeds it
+    monkeypatch.setattr("agentcore.api.idp.reports.MAX_EXPORT_CELLS", 5)
+    r = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv", "values": "final"})
+    assert r.status_code == 422 and "cell" in r.json()["detail"].lower()
+    # generous budget → normal-sized export is a clean 200 (no false trip)
+    monkeypatch.setattr("agentcore.api.idp.reports.MAX_EXPORT_CELLS", 2_000_000)
+    assert client.get(
+        "/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv", "values": "final"}
+    ).status_code == 200
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
 async def test_report_org_isolation(setup_report_data):
     """A user from another (empty) org sees no rows and an empty export."""
     global mock_user
@@ -825,6 +847,53 @@ async def test_config_export_row_cap(setup_config_export, monkeypatch):
     # A config with zero linked docs (and zero cells) must NOT false-trip the cap.
     empty = _export(client, format="csv", config_id=str(data["template_cfg"]))
     assert empty.status_code == 200 and len(_csv_rows(empty)) == 1  # header only
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_flat_matrix_cells_matches_built_matrix():
+    """The cap is only safe if _flat_matrix_cells equals the ACTUAL matrix size. Assert the helper's
+    count == rows × cols of the real _config_matrix across mixed shapes + value modes (if it under-
+    counts, an oversized export still builds; if it over-counts, a valid export is wrongly rejected)."""
+    from types import SimpleNamespace
+    from agentcore.api.idp.reports import _config_matrix, _flat_matrix_cells
+
+    def rec(v):
+        return SimpleNamespace(extracted_value=v, reviewed_value="", is_reviewed=False, confidence_score=90.0)
+
+    def dm(did, fn):
+        return SimpleNamespace(document_id=did, filename=fn, predicted_type="Invoice",
+                               doc_status="pending_review", overall_confidence=80.0,
+                               uploaded_at=None, processed_at=None, agent_name="A", agent_base_id="b")
+
+    # d1: 2 line items; d2: zero line items (still one row).
+    grouped = {
+        "d1": {"headers": {"vendor": rec("Acme")}, "lines": {0: {"item": rec("X")}, 1: {"item": rec("Y")}}},
+        "d2": {"headers": {"vendor": rec("Beta")}, "lines": {}},
+    }
+    doc_rows = [dm("d1", "a.pdf"), dm("d2", "b.pdf")]
+
+    for headers, line_cols in (["vendor"], ["item"]), (["vendor"], []):  # with + without line columns
+        for values in ("final", "both"):
+            matrix = _config_matrix(doc_rows, grouped, {}, headers, line_cols, values)
+            assert len({len(r) for r in matrix}) == 1, "matrix must be rectangular"
+            assert _flat_matrix_cells(doc_rows, grouped, headers, line_cols, values) == len(matrix) * len(matrix[0])
+    # 1 header row + d1(2 lines) + d2(1) = 4 rows when line columns exist
+    assert len(_config_matrix(doc_rows, grouped, {}, ["vendor"], ["item"], "final")) == 4
+
+
+@pytest.mark.anyio
+async def test_config_export_cell_cap(setup_config_export, monkeypatch):
+    """The flat-matrix cell cap (rows × columns) also guards the config-driven export → 422 before
+    building, while a generous budget keeps a normal-sized export a clean 200."""
+    global mock_user
+    data = setup_config_export
+    mock_user = data["user"]
+    app, client = _client()
+    monkeypatch.setattr("agentcore.api.idp.reports.MAX_EXPORT_CELLS", 5)
+    assert _export(client, format="csv", config_id=str(data["config_inv"])).status_code == 422
+    monkeypatch.setattr("agentcore.api.idp.reports.MAX_EXPORT_CELLS", 2_000_000)
+    assert _export(client, format="csv", config_id=str(data["config_inv"])).status_code == 200
     app.dependency_overrides.clear()
 
 

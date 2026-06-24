@@ -37,6 +37,11 @@ from agentcore.services.database.models.idp.documents import (
 
 # Hard ceiling for synchronous exports — protects memory; over it the endpoint returns 422.
 MAX_EXPORT_ROWS = 50_000
+# Ceiling on the FLAT export's output grid (rows × columns). The row caps above bound how many
+# extracted field-rows / docs we fetch, but the flat layout's WIDTH is the union of every doc's
+# field names, so a modest row count can still fan out to a giant sparse matrix (e.g. many docs
+# each with distinct field names). This bounds the actual cell count built in memory.
+MAX_EXPORT_CELLS = 2_000_000
 
 
 def _apply_doc_scope_and_filters(stmt, is_root: bool, org_ids: list, filters: dict[str, Any], *, config_id=None):

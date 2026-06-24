@@ -29,6 +29,7 @@ from agentcore.services.idp.output import (
     serialize_table,
 )
 from agentcore.services.idp.reports import (
+    MAX_EXPORT_CELLS,
     MAX_EXPORT_ROWS,
     build_doc_meta_query,
     build_header_export_query,
@@ -335,6 +336,21 @@ def _config_matrix(doc_rows, grouped: dict, review_map: dict, ordered_headers: l
     return matrix
 
 
+def _flat_matrix_cells(doc_rows, grouped: dict, ordered_headers: list[str], ordered_line_cols: list[str], values: str) -> int:
+    """Exact cell count the flat ``_config_matrix`` WOULD produce, computed without building it.
+
+    Mirrors ``_config_matrix``'s row logic 1:1 — one fixed column-header row, then one row per line
+    item (a doc with no line items, or no line columns, emits a single row). Used to reject an
+    oversized flat export (422) BEFORE materialising a giant sparse matrix in memory, since the
+    union layout's WIDTH is unbounded (every distinct field name becomes a column)."""
+    n_cols = len(_config_columns(ordered_headers, ordered_line_cols, values))
+    n_rows = 1  # the column-header row
+    for dm in doc_rows:
+        lines = (grouped.get(str(dm.document_id)) or {}).get("lines") or {}
+        n_rows += len(lines) if (ordered_line_cols and lines) else 1
+    return n_rows * n_cols
+
+
 def _section_matrix(docs, review_map: dict, values: str) -> list[list]:
     """Build the full sheet as a positional matrix: one stacked section per file."""
     matrix: list[list] = []
@@ -594,6 +610,12 @@ async def export_processed_docs_data(
             # Iterate the authoritative linked-doc list (incl. docs with zero extracted fields).
             doc_rows = (await session.exec(dstmt.limit(MAX_EXPORT_ROWS))).all()
             review_map = await _latest_reviews(session, [r.document_id for r in doc_rows])
+            cells = _flat_matrix_cells(doc_rows, grouped, ordered_headers, ordered_line_cols, values)
+            if cells > MAX_EXPORT_CELLS:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Export would build {cells} cells, over the {MAX_EXPORT_CELLS} limit. Narrow the date range or use fewer value columns.",
+                )
             matrix = _config_matrix(doc_rows, grouped, review_map, ordered_headers, ordered_line_cols, values)
         data, media, ext = serialize_matrix(matrix, fmt, sheet_name=cfg_name)
         return _attachment(data, media, f"processed_docs_data.{ext}")
@@ -643,6 +665,12 @@ async def export_processed_docs_data(
     ordered_line_cols = sorted({r.name for r in lrows})     # union of all line-item column names
     doc_rows = (await session.exec(dstmt.limit(MAX_EXPORT_ROWS))).all()
     review_map = await _latest_reviews(session, [r.document_id for r in doc_rows])
+    cells = _flat_matrix_cells(doc_rows, grouped, ordered_headers, ordered_line_cols, values)
+    if cells > MAX_EXPORT_CELLS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Export would build {cells} cells, over the {MAX_EXPORT_CELLS} limit. Narrow the date range, pick a config, or use fewer value columns.",
+        )
     matrix = _config_matrix(doc_rows, grouped, review_map, ordered_headers, ordered_line_cols, values)
     data, media, ext = serialize_matrix(matrix, fmt, sheet_name="All Data")
     return _attachment(data, media, f"processed_docs_data.{ext}")
