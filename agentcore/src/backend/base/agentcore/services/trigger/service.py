@@ -315,7 +315,29 @@ class TriggerService(Service):
             return "connector_name" in tmpl or "connector" in tmpl
 
         conn_nodes = [n for n in nodes if _is_connector_node(n)]
+
+        # Existing email monitors for this agent+env (active or not). Fetched BEFORE the
+        # no-connector-nodes early-return so we can deactivate ORPHANS — monitors whose node_id is
+        # no longer in the published flow (e.g. the Connector Input node was deleted + re-added →
+        # new node_id, so a new monitor is created while the old one keeps running; on restart BOTH
+        # re-register and poll). Deactivating orphans leaves exactly one active monitor per current
+        # connector node. (Enable/disable stays the user's control via the Automations toggle.)
+        existing = await get_triggers_by_agent_id(session, agent_id, active_only=False)
+        existing_em = [
+            t for t in existing
+            if t.trigger_type == TriggerTypeEnum.EMAIL_MONITOR and t.environment == environment
+        ]
+        new_node_ids = {n.get("id") for n in conn_nodes}
+        for t in existing_em:
+            nid = (t.trigger_config or {}).get("node_id")
+            if t.is_active and nid not in new_node_ids:
+                t.is_active = False
+                session.add(t)
+                await self.unregister(t.id)
+                logger.info(f"Deactivated orphan email monitor {t.id} (node {nid} no longer in flow)")
+
         if not conn_nodes:
+            await session.commit()  # persist any orphan deactivations
             return
 
         # Resolve connectors by NAME (what the canvas IDPConnectorDropdown saves into
@@ -396,11 +418,7 @@ class TriggerService(Service):
                 "node_id": node_id,
             }
 
-        existing = await get_triggers_by_agent_id(session, agent_id, active_only=False)
-        existing_em = [
-            t for t in existing
-            if t.trigger_type == TriggerTypeEnum.EMAIL_MONITOR and t.environment == environment
-        ]
+        # (existing_em fetched above for the orphan pass — reuse it for the versioning lookups.)
         existing_by_key: dict[tuple[str, str], object] = {}
         existing_by_node_only: dict[str, list] = {}
         for t in existing_em:
