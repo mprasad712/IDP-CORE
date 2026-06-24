@@ -478,6 +478,361 @@ class TriggerService(Service):
 
         await session.commit()
 
+    async def sync_sharepoint_idp_monitors_for_agent(
+        self,
+        session,
+        agent_id,
+        environment: str,
+        version: str,
+        deployment_id,
+        flow_data: dict,
+        created_by,
+    ) -> None:
+        """On publish, scan the snapshot for SharePoint IDP Connector Input nodes and create/update a
+        FOLDER_MONITOR trigger per node (storage_type=SharePoint, ingest_mode=idp_pipeline).
+
+        Mirrors ``sync_email_monitors_for_agent`` for the SharePoint case: the same Connector Input
+        node feeds either an Outlook mailbox (→ EMAIL_MONITOR) or a SharePoint folder (→ FOLDER_MONITOR
+        with idp_pipeline ingest). Versioning is keyed by (node_id, deployment_id) with
+        deactivate-old-on-new-version, scoped to this function's own node_ids so it never touches the
+        FileTrigger folder monitors created by ``sync_folder_monitors_for_agent``.
+        """
+        from agentcore.services.database.models.trigger_config.crud import (
+            create_trigger_config,
+            get_triggers_by_agent_id,
+        )
+        from agentcore.services.database.models.trigger_config.model import (
+            TriggerConfigCreate,
+            TriggerTypeEnum,
+        )
+
+        nodes = flow_data.get("nodes", [])
+
+        def _is_connector_node(n: dict) -> bool:
+            nd = n.get("data", {}) or {}
+            if nd.get("type") in ("IDPConnectorInput", "ConnectorInput"):
+                return True
+            node = nd.get("node", {}) or {}
+            if node.get("display_name") != "Connector Input":
+                return False
+            tmpl = node.get("template", {}) or {}
+            return "connector_name" in tmpl or "connector" in tmpl
+
+        conn_nodes = [n for n in nodes if _is_connector_node(n)]
+        if not conn_nodes:
+            return
+
+        # Resolve connectors by NAME (what the canvas IDPConnectorDropdown saves into ``connector_name``)
+        # or by id. Only SharePoint connectors create folder monitors here.
+        from sqlalchemy import select as _select_cc
+        from agentcore.services.database.models.connector_catalogue.model import ConnectorCatalogue
+
+        cc_rows = (
+            await session.execute(
+                _select_cc(ConnectorCatalogue).where(ConnectorCatalogue.provider == "sharepoint")
+            )
+        ).scalars().all()
+        cc_by_id = {str(r.id): r for r in cc_rows}
+        cc_by_name: dict[str, list] = {}
+        for r in cc_rows:
+            cc_by_name.setdefault((r.name or "").strip().lower(), []).append(r)
+
+        def _resolve_by_name(nm: str):
+            cands = cc_by_name.get((nm or "").strip().lower()) or []
+            if not cands:
+                return None
+            if len(cands) == 1:
+                return cands[0]
+            mine = [c for c in cands if created_by is not None and c.created_by == created_by]
+            chosen = (mine or sorted(cands, key=lambda c: str(c.id)))[0]
+            logger.warning(
+                f"sync_sharepoint_idp_monitors: connector name '{nm}' matches {len(cands)} SharePoint "
+                f"connectors across scopes; using {chosen.id}"
+            )
+            return chosen
+
+        def _cfg_from_node(template: dict, node_id: str) -> dict | None:
+            def tv(k, default=""):
+                return (template.get(k) or {}).get("value", default)
+
+            row = None
+            pipe_raw = (tv("connector", "") or "").strip()
+            if "|" in pipe_raw:
+                parts = [p.strip() for p in pipe_raw.split("|")]
+                if len(parts) >= 4:
+                    row = cc_by_id.get(parts[-1])
+            if row is None:
+                name_or_id = (tv("connector_name", "") or pipe_raw or "").strip()
+                row = cc_by_id.get(name_or_id) or _resolve_by_name(name_or_id)
+            if row is None or (row.provider or "").lower() != "sharepoint":
+                return None  # only existing SharePoint connectors poll here
+
+            def _int(v, d):
+                try:
+                    return int(v)
+                except Exception:
+                    return d
+
+            file_types_raw = tv("sharepoint_file_types", "") or ""
+            file_types = [t.strip().lstrip(".") for t in file_types_raw.split(",") if t.strip()]
+
+            return {
+                "storage_type": "SharePoint",
+                "connector_id": str(row.id),
+                "sharepoint_library": tv("sharepoint_library", "") or "",
+                "sharepoint_folder": tv("sharepoint_folder", "") or "",
+                "file_types": file_types,
+                "poll_interval_seconds": _int(tv("sharepoint_poll_interval", 300), 300),
+                "trigger_on": "New Files",
+                "batch_size": 10,
+                "ingest_mode": "idp_pipeline",
+                "node_id": node_id,
+            }
+
+        existing = await get_triggers_by_agent_id(session, agent_id, active_only=False)
+        # Only consider folder monitors that WE created (ingest_mode=idp_pipeline) so we never disturb
+        # FileTrigger-created folder monitors that share the FOLDER_MONITOR type.
+        existing_fm = [
+            t for t in existing
+            if t.trigger_type == TriggerTypeEnum.FOLDER_MONITOR
+            and t.environment == environment
+            and (t.trigger_config or {}).get("ingest_mode") == "idp_pipeline"
+            and (t.trigger_config or {}).get("storage_type") == "SharePoint"
+        ]
+        existing_by_key: dict[tuple[str, str], object] = {}
+        existing_by_node_only: dict[str, list] = {}
+        for t in existing_fm:
+            nid = (t.trigger_config or {}).get("node_id")
+            did = str(t.deployment_id) if t.deployment_id else None
+            if nid and did:
+                existing_by_key[(nid, did)] = t
+            if nid:
+                existing_by_node_only.setdefault(nid, []).append(t)
+
+        dep_id_str = str(deployment_id)
+        for node in conn_nodes:
+            node_id = node.get("id")
+            template = node.get("data", {}).get("node", {}).get("template", {})
+            cfg = _cfg_from_node(template, node_id)
+            if cfg is None:
+                continue  # non-SharePoint connector → handled elsewhere (email / onedrive sync)
+
+            exact_match = existing_by_key.get((node_id, dep_id_str))
+            if exact_match:
+                cfg["_seen_keys"] = (exact_match.trigger_config or {}).get("_seen_keys", [])
+                exact_match.trigger_config = cfg
+                exact_match.is_active = True
+                session.add(exact_match)
+                await session.commit()
+                await session.refresh(exact_match)
+                await self.unregister(exact_match.id)
+                try:
+                    await self.register_folder_monitor(exact_match)
+                except Exception as e:
+                    logger.warning(f"Failed to re-register SharePoint monitor for node {node_id}: {e}")
+                logger.info(f"Updated SharePoint IDP monitor {exact_match.id} for node {node_id} (same deployment)")
+            else:
+                for old_t in existing_by_node_only.get(node_id, []):
+                    if old_t.is_active:
+                        old_t.is_active = False
+                        session.add(old_t)
+                        await self.unregister(old_t.id)
+                        logger.info(f"Deactivated old SharePoint monitor {old_t.id} (superseded by {deployment_id})")
+                record = await create_trigger_config(
+                    session,
+                    TriggerConfigCreate(
+                        agent_id=agent_id,
+                        deployment_id=deployment_id,
+                        trigger_type=TriggerTypeEnum.FOLDER_MONITOR,
+                        trigger_config=cfg,
+                        is_active=True,
+                        environment=environment,
+                        version=version,
+                        created_by=created_by,
+                    ),
+                )
+                try:
+                    await self.register_folder_monitor(record)
+                except Exception as e:
+                    logger.warning(f"Failed to register SharePoint monitor for node {node_id}: {e}")
+                logger.info(f"Created SharePoint IDP monitor {record.id} for node {node_id} (new deployment)")
+
+        await session.commit()
+
+    async def sync_onedrive_idp_monitors_for_agent(
+        self,
+        session,
+        agent_id,
+        environment: str,
+        version: str,
+        deployment_id,
+        flow_data: dict,
+        created_by,
+    ) -> None:
+        """On publish, scan for OneDrive IDP Connector Input nodes and create/update a FOLDER_MONITOR
+        trigger per node (storage_type=OneDrive, ingest_mode=idp_pipeline).
+
+        Mirrors ``sync_sharepoint_idp_monitors_for_agent`` — only the provider and per-node config keys
+        differ. Versioning is scoped to this function's own node_ids so it never touches the SharePoint
+        or FileTrigger monitors that share the FOLDER_MONITOR type.
+        """
+        from agentcore.services.database.models.trigger_config.crud import (
+            create_trigger_config,
+            get_triggers_by_agent_id,
+        )
+        from agentcore.services.database.models.trigger_config.model import (
+            TriggerConfigCreate,
+            TriggerTypeEnum,
+        )
+
+        nodes = flow_data.get("nodes", [])
+
+        def _is_connector_node(n: dict) -> bool:
+            nd = n.get("data", {}) or {}
+            if nd.get("type") in ("IDPConnectorInput", "ConnectorInput"):
+                return True
+            node = nd.get("node", {}) or {}
+            if node.get("display_name") != "Connector Input":
+                return False
+            tmpl = node.get("template", {}) or {}
+            return "connector_name" in tmpl or "connector" in tmpl
+
+        conn_nodes = [n for n in nodes if _is_connector_node(n)]
+        if not conn_nodes:
+            return
+
+        from sqlalchemy import select as _select_cc
+        from agentcore.services.database.models.connector_catalogue.model import ConnectorCatalogue
+
+        cc_rows = (
+            await session.execute(
+                _select_cc(ConnectorCatalogue).where(ConnectorCatalogue.provider == "onedrive")
+            )
+        ).scalars().all()
+        cc_by_id = {str(r.id): r for r in cc_rows}
+        cc_by_name: dict[str, list] = {}
+        for r in cc_rows:
+            cc_by_name.setdefault((r.name or "").strip().lower(), []).append(r)
+
+        def _resolve_by_name(nm: str):
+            cands = cc_by_name.get((nm or "").strip().lower()) or []
+            if not cands:
+                return None
+            if len(cands) == 1:
+                return cands[0]
+            mine = [c for c in cands if created_by is not None and c.created_by == created_by]
+            chosen = (mine or sorted(cands, key=lambda c: str(c.id)))[0]
+            logger.warning(
+                f"sync_onedrive_idp_monitors: connector name '{nm}' matches {len(cands)} OneDrive "
+                f"connectors across scopes; using {chosen.id}"
+            )
+            return chosen
+
+        def _cfg_from_node(template: dict, node_id: str) -> dict | None:
+            def tv(k, default=""):
+                return (template.get(k) or {}).get("value", default)
+
+            row = None
+            pipe_raw = (tv("connector", "") or "").strip()
+            if "|" in pipe_raw:
+                parts = [p.strip() for p in pipe_raw.split("|")]
+                if len(parts) >= 4:
+                    row = cc_by_id.get(parts[-1])
+            if row is None:
+                name_or_id = (tv("connector_name", "") or pipe_raw or "").strip()
+                row = cc_by_id.get(name_or_id) or _resolve_by_name(name_or_id)
+            if row is None or (row.provider or "").lower() != "onedrive":
+                return None
+
+            def _int(v, d):
+                try:
+                    return int(v)
+                except Exception:
+                    return d
+
+            file_types_raw = tv("onedrive_file_types", "") or ""
+            file_types = [t.strip().lstrip(".") for t in file_types_raw.split(",") if t.strip()]
+
+            return {
+                "storage_type": "OneDrive",
+                "connector_id": str(row.id),
+                "onedrive_folder": tv("onedrive_folder", "") or "",
+                "file_types": file_types,
+                "poll_interval_seconds": _int(tv("onedrive_poll_interval", 300), 300),
+                "trigger_on": "New Files",
+                "batch_size": 10,
+                "ingest_mode": "idp_pipeline",
+                "node_id": node_id,
+            }
+
+        existing = await get_triggers_by_agent_id(session, agent_id, active_only=False)
+        existing_fm = [
+            t for t in existing
+            if t.trigger_type == TriggerTypeEnum.FOLDER_MONITOR
+            and t.environment == environment
+            and (t.trigger_config or {}).get("ingest_mode") == "idp_pipeline"
+            and (t.trigger_config or {}).get("storage_type") == "OneDrive"
+        ]
+        existing_by_key: dict[tuple[str, str], object] = {}
+        existing_by_node_only: dict[str, list] = {}
+        for t in existing_fm:
+            nid = (t.trigger_config or {}).get("node_id")
+            did = str(t.deployment_id) if t.deployment_id else None
+            if nid and did:
+                existing_by_key[(nid, did)] = t
+            if nid:
+                existing_by_node_only.setdefault(nid, []).append(t)
+
+        dep_id_str = str(deployment_id)
+        for node in conn_nodes:
+            node_id = node.get("id")
+            template = node.get("data", {}).get("node", {}).get("template", {})
+            cfg = _cfg_from_node(template, node_id)
+            if cfg is None:
+                continue
+
+            exact_match = existing_by_key.get((node_id, dep_id_str))
+            if exact_match:
+                cfg["_seen_keys"] = (exact_match.trigger_config or {}).get("_seen_keys", [])
+                exact_match.trigger_config = cfg
+                exact_match.is_active = True
+                session.add(exact_match)
+                await session.commit()
+                await session.refresh(exact_match)
+                await self.unregister(exact_match.id)
+                try:
+                    await self.register_folder_monitor(exact_match)
+                except Exception as e:
+                    logger.warning(f"Failed to re-register OneDrive monitor for node {node_id}: {e}")
+                logger.info(f"Updated OneDrive IDP monitor {exact_match.id} for node {node_id} (same deployment)")
+            else:
+                for old_t in existing_by_node_only.get(node_id, []):
+                    if old_t.is_active:
+                        old_t.is_active = False
+                        session.add(old_t)
+                        await self.unregister(old_t.id)
+                        logger.info(f"Deactivated old OneDrive monitor {old_t.id} (superseded by {deployment_id})")
+                record = await create_trigger_config(
+                    session,
+                    TriggerConfigCreate(
+                        agent_id=agent_id,
+                        deployment_id=deployment_id,
+                        trigger_type=TriggerTypeEnum.FOLDER_MONITOR,
+                        trigger_config=cfg,
+                        is_active=True,
+                        environment=environment,
+                        version=version,
+                        created_by=created_by,
+                    ),
+                )
+                try:
+                    await self.register_folder_monitor(record)
+                except Exception as e:
+                    logger.warning(f"Failed to register OneDrive monitor for node {node_id}: {e}")
+                logger.info(f"Created OneDrive IDP monitor {record.id} for node {node_id} (new deployment)")
+
+        await session.commit()
+
     async def deactivate_triggers_for_deployment(self, session, deployment_id) -> int:
         """Mark + unregister every trigger for a deployment (called on unpublish/new version).
 
@@ -655,6 +1010,8 @@ class TriggerService(Service):
                     new_files = await self._scan_azure_blob(task_id, config, file_types, trigger_on)
                 elif storage_type == "SharePoint":
                     new_files = await self._scan_sharepoint(task_id, config, file_types, trigger_on)
+                elif storage_type == "OneDrive":
+                    new_files = await self._scan_onedrive(task_id, config, file_types, trigger_on)
 
                 if not new_files:
                     continue
@@ -664,6 +1021,18 @@ class TriggerService(Service):
                     new_files = new_files[:batch_size]
 
                 logger.info(f"Folder monitor {task_id}: found {len(new_files)} new files")
+
+                # IDP-pipeline mode (created by sync_sharepoint_idp_monitors_for_agent for the IDP
+                # Connector Input node): download each new file and ingest it into Processed Docs via
+                # the existing IDP pipeline — exactly like the Outlook email monitor does. No flow-graph
+                # execution (the pipeline is enqueued directly).
+                if config.get("ingest_mode") == "idp_pipeline" and storage_type in ("SharePoint", "OneDrive"):
+                    if storage_type == "SharePoint":
+                        await self._ingest_sharepoint_files_to_idp(agent_id, config, new_files)
+                    else:
+                        await self._ingest_onedrive_files_to_idp(agent_id, config, new_files)
+                    await self._persist_seen_files(trigger_config_id)
+                    continue
 
                 # Trigger the agent flow with file list
                 await self._execute_trigger(
@@ -835,8 +1204,10 @@ class TriggerService(Service):
             client_id = connector_cfg.get("client_id", "")
             client_secret = connector_cfg.get("client_secret", "")
             tenant_id = connector_cfg.get("tenant_id", "")
-            library = connector_cfg.get("library", "Shared Documents")
-            folder_path = connector_cfg.get("folder", config.get("sharepoint_folder", ""))
+            # Prefer the per-node library/folder (set on the IDP Connector Input node) over the
+            # connector-level defaults, so each agent can target a different folder of the same site.
+            library = config.get("sharepoint_library") or connector_cfg.get("library", "Shared Documents")
+            folder_path = config.get("sharepoint_folder") or connector_cfg.get("folder", "")
         else:
             # Fallback: legacy inline credentials (deprecated)
             site_url = config.get("sharepoint_site_url", "")
@@ -944,6 +1315,80 @@ class TriggerService(Service):
 
         except Exception:
             logger.exception(f"Error scanning SharePoint for trigger {task_id}")
+
+        self._seen_files[task_id] = seen
+        return new_files
+
+    async def _scan_onedrive(
+        self, task_id: str, config: dict, file_types: list[str], trigger_on: str,
+    ) -> list[dict]:
+        """Scan a OneDrive folder for new/modified files via Graph /me/drive (delegated token).
+
+        Credentials + linked account are resolved from the connector_catalogue via `connector_id`.
+        OneDrive uses the /common authority so it works for personal and work/school accounts.
+        """
+        import httpx
+        from urllib.parse import quote
+
+        GRAPH = "https://graph.microsoft.com/v1.0"
+
+        connector_id = config.get("connector_id")
+        if not connector_id:
+            logger.warning(f"TriggerService: OneDrive trigger {task_id} is missing connector_id")
+            return []
+        connector_cfg = await _get_storage_connector_config(str(connector_id))
+        if not connector_cfg:
+            logger.error(f"TriggerService: could not load OneDrive connector {connector_id}")
+            return []
+
+        accounts = connector_cfg.get("linked_accounts", [])
+        if not accounts:
+            logger.warning(f"TriggerService: OneDrive trigger {task_id} has no linked account")
+            return []
+        acct = accounts[0]
+        folder_path = (config.get("onedrive_folder", "") or "").strip().strip("/")
+
+        try:
+            access_token = await self._refresh_onedrive_token(connector_cfg, acct, str(connector_id))
+        except Exception as e:
+            logger.error(f"TriggerService: OneDrive token refresh failed for {task_id}: {e}")
+            return []
+
+        if folder_path:
+            safe = quote(folder_path, safe="/")
+            items_url = f"{GRAPH}/me/drive/root:/{safe}:/children?$top=200"
+        else:
+            items_url = f"{GRAPH}/me/drive/root/children?$top=200"
+
+        seen = self._seen_files.get(task_id, OrderedDict())
+        new_files = []
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.get(items_url, headers={"Authorization": f"Bearer {access_token}"})
+            if resp.status_code != 200:
+                logger.error(f"TriggerService: OneDrive list failed for {task_id}: {resp.text[:300]}")
+                return []
+            for item in resp.json().get("value", []):
+                if "file" not in item:
+                    continue
+                file_name = item.get("name", "")
+                if file_types:
+                    ext = Path(file_name).suffix.lstrip(".")
+                    if ext not in file_types:
+                        continue
+                modified = item.get("lastModifiedDateTime", "")
+                file_key = f"{file_name}:{modified}"
+                if file_key not in seen:
+                    new_files.append({
+                        "name": file_name,
+                        "path": item.get("webUrl", ""),
+                        "item_id": item.get("id", ""),
+                        "size": item.get("size", 0),
+                        "modified": str(modified),
+                    })
+                    seen[file_key] = None
+        except Exception:
+            logger.exception(f"Error scanning OneDrive for trigger {task_id}")
 
         self._seen_files[task_id] = seen
         return new_files
@@ -1530,6 +1975,398 @@ class TriggerService(Service):
                 except Exception as e:
                     logger.warning(f"[email-ingest] enqueue failed for {doc.id}: {e}")
             return all_ok
+
+    async def _ingest_sharepoint_files_to_idp(self, base_agent_id, config: dict, files: list[dict]) -> None:
+        """Download new SharePoint files and ingest each into the existing IDP pipeline.
+
+        Mirrors ``_ingest_email_to_idp``: resolve/auto-create the IDP agent, save the file to storage,
+        create an ``IdpDocument`` row, and enqueue the pipeline (OCR → extract → route → Processed
+        Docs). Idempotent across re-polls/restarts via a per-file ``dedup_key``. The SharePoint folder
+        monitor (``_scan_sharepoint``) already filtered to NEW files, so a file reaching here is one we
+        have not ingested yet.
+        """
+        if not files:
+            return
+
+        import hashlib
+        from uuid import UUID as _UUID, uuid4 as _uuid4
+        from urllib.parse import urlparse
+        from sqlalchemy import select as _select
+
+        import httpx
+
+        from agentcore.services.deps import get_db_service, get_storage_service
+        from agentcore.services.database.models.agent.model import Agent
+        from agentcore.services.database.models.idp.config import IdpAgent
+        from agentcore.services.database.models.idp.documents import IdpDocument
+        from agentcore.services.idp.pipeline import enqueue_document
+        from agentcore.api.idp.documents import ALLOWED_EXTENSIONS
+
+        connector_id = config.get("connector_id", "")
+        connector_cfg = await _get_storage_connector_config(str(connector_id))
+        if not connector_cfg:
+            logger.error(f"[sharepoint-ingest] could not load connector {connector_id}")
+            return
+
+        site_url = connector_cfg.get("site_url", "")
+        client_id = connector_cfg.get("client_id", "")
+        client_secret = connector_cfg.get("client_secret", "")
+        tenant_id = connector_cfg.get("tenant_id", "")
+        library = config.get("sharepoint_library") or connector_cfg.get("library", "Shared Documents")
+        if not all([site_url, client_id, client_secret, tenant_id]):
+            logger.error("[sharepoint-ingest] connector is missing site_url/client_id/client_secret/tenant_id")
+            return
+
+        GRAPH = "https://graph.microsoft.com/v1.0"
+
+        # Acquire token + resolve drive once for the whole batch.
+        async with httpx.AsyncClient(timeout=30) as client:
+            tok = await client.post(
+                f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "scope": "https://graph.microsoft.com/.default",
+                },
+            )
+            if tok.status_code != 200:
+                logger.error(f"[sharepoint-ingest] token error: {tok.text[:300]}")
+                return
+            access_token = tok.json()["access_token"]
+            headers = {"Authorization": f"Bearer {access_token}"}
+
+            parsed = urlparse(site_url)
+            hostname = parsed.hostname or parsed.netloc
+            path = parsed.path.rstrip("/")
+            site_api = f"{GRAPH}/sites/{hostname}:{path}" if path else f"{GRAPH}/sites/{hostname}"
+            sr = await client.get(site_api, headers=headers)
+            if sr.status_code != 200:
+                logger.error(f"[sharepoint-ingest] site resolve failed: {sr.text[:300]}")
+                return
+            site_id = sr.json()["id"]
+
+            dr = await client.get(f"{GRAPH}/sites/{site_id}/drives", headers=headers)
+            if dr.status_code != 200:
+                logger.error(f"[sharepoint-ingest] drive list failed: {dr.text[:300]}")
+                return
+            drives = dr.json().get("value", [])
+            drive_id = next((d["id"] for d in drives if d.get("name", "").lower() == library.lower()), None)
+            if not drive_id and drives:
+                drive_id = drives[0]["id"]
+            if not drive_id:
+                logger.error("[sharepoint-ingest] no drive found")
+                return
+
+            db_service = get_db_service()
+            storage = get_storage_service()
+            async with db_service.with_session() as session:
+                idp_agent = (
+                    await session.execute(
+                        _select(IdpAgent).where(
+                            (IdpAgent.id == base_agent_id) | (IdpAgent.agent_id == base_agent_id),
+                            IdpAgent.deleted_at.is_(None),
+                        )
+                    )
+                ).scalars().first()
+                if idp_agent is None:
+                    base_agent = await session.get(Agent, base_agent_id)
+                    if base_agent is None or base_agent.deleted_at is not None:
+                        logger.warning(f"[sharepoint-ingest] base agent {base_agent_id} gone; skipping batch")
+                        return
+                    idp_agent = IdpAgent(
+                        agent_id=base_agent_id, extraction_mode="dynamic_prompting", dynamic_prompt="",
+                        default_rule_action="pending_review", is_active=True,
+                    )
+                    session.add(idp_agent)
+                    await session.flush()
+
+                agent_scope = str(idp_agent.id)
+                conn_uuid = None
+                try:
+                    conn_uuid = _UUID(str(connector_id))
+                except Exception:
+                    conn_uuid = None
+
+                for f in files:
+                    name = f.get("name", "file")
+                    item_id = f.get("item_id", "")
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext not in ALLOWED_EXTENSIONS:
+                        logger.info(f"[sharepoint-ingest] skipping unsupported file '{name}' ({ext})")
+                        continue
+                    if not item_id:
+                        logger.warning(f"[sharepoint-ingest] file '{name}' has no item_id; skipping")
+                        continue
+
+                    dedup_key = f"sharepoint:{connector_id}:{item_id}:{f.get('modified', '')}"
+                    exists = (
+                        await session.execute(
+                            _select(IdpDocument.id)
+                            .where(IdpDocument.source_metadata["dedup_key"].astext == dedup_key)
+                            .limit(1)
+                        )
+                    ).first()
+                    if exists:
+                        logger.info(f"[sharepoint-ingest] already ingested ({dedup_key[:60]}); skipping")
+                        continue
+
+                    try:
+                        dl = await client.get(
+                            f"{GRAPH}/drives/{drive_id}/items/{item_id}/content",
+                            headers=headers, timeout=60, follow_redirects=True,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[sharepoint-ingest] download error for '{name}': {e}")
+                        continue
+                    if dl.status_code != 200 or not dl.content:
+                        logger.warning(f"[sharepoint-ingest] download failed for '{name}' ({dl.status_code})")
+                        continue
+                    data = dl.content
+
+                    doc_id = _uuid4()
+                    storage_filename = f"idp_{doc_id}{ext}"
+                    saved = False
+                    try:
+                        await storage.save_file(agent_id=agent_scope, file_name=storage_filename, data=data)
+                        saved = True
+                        doc = IdpDocument(
+                            id=doc_id,
+                            agent_id=idp_agent.id,
+                            original_filename=name,
+                            file_path=f"{agent_scope}/{storage_filename}",
+                            file_type=ext.lstrip("."),
+                            mime_type=None,
+                            file_size_bytes=len(data),
+                            checksum=hashlib.sha256(data).hexdigest(),
+                            source="sharepoint",
+                            connector_id=conn_uuid,
+                            source_metadata={
+                                "site_url": site_url,
+                                "library": library,
+                                "folder": config.get("sharepoint_folder", ""),
+                                "item_id": item_id,
+                                "web_url": f.get("path", ""),
+                                "dedup_key": dedup_key,
+                            },
+                            status="queued",
+                            uploaded_by=None,
+                        )
+                        session.add(doc)
+                        await session.commit()
+                        await session.refresh(doc)
+                    except Exception as e:
+                        logger.warning(f"[sharepoint-ingest] failed to ingest '{name}': {e}")
+                        try:
+                            await session.rollback()
+                        except Exception:
+                            pass
+                        if saved:
+                            try:
+                                await storage.delete_file(agent_id=agent_scope, file_name=storage_filename)
+                            except Exception:
+                                logger.warning(f"[sharepoint-ingest] could not clean up orphan {storage_filename}")
+                        continue
+
+                    try:
+                        await enqueue_document(session, doc.id)
+                        logger.info(f"[sharepoint-ingest] queued IdpDocument {doc.id} ('{name}')")
+                    except Exception as e:
+                        logger.warning(f"[sharepoint-ingest] enqueue failed for {doc.id}: {e}")
+
+    async def _refresh_onedrive_token(self, config: dict, acct: dict, connector_id: str, force: bool = False) -> str:
+        """Refresh a OneDrive OAuth token if expired (via /common authority), returning a valid token."""
+        access_token = acct.get("access_token", "")
+        expires_at = acct.get("token_expires_at", 0)
+        if not force and access_token and time.time() < (expires_at - 60):
+            return access_token
+
+        refresh_token = acct.get("refresh_token", "")
+        if not refresh_token:
+            raise ValueError("OneDrive token expired, no refresh token. Re-link the account.")
+
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+                data={
+                    "client_id": config.get("client_id"),
+                    "client_secret": config.get("client_secret"),
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                    "scope": "Files.Read Files.ReadWrite User.Read offline_access",
+                },
+                timeout=15,
+            )
+        if resp.status_code != 200:
+            raise ValueError(f"OneDrive token refresh failed ({resp.status_code})")
+
+        data = resp.json()
+        acct["access_token"] = data["access_token"]
+        acct["refresh_token"] = data.get("refresh_token", refresh_token)
+        acct["token_expires_at"] = time.time() + data.get("expires_in", 3600)
+        # _persist_outlook_tokens is provider-agnostic (re-encrypts the whole config for the row).
+        await self._persist_outlook_tokens(config, connector_id)
+        return data["access_token"]
+
+    async def _ingest_onedrive_files_to_idp(self, base_agent_id, config: dict, files: list[dict]) -> None:
+        """Download new OneDrive files and ingest each into the existing IDP pipeline.
+
+        Mirrors ``_ingest_sharepoint_files_to_idp`` but uses the delegated OneDrive token + Graph
+        ``/me/drive`` paths. Idempotent across re-polls via a per-file ``dedup_key``.
+        """
+        if not files:
+            return
+
+        import hashlib
+        from uuid import UUID as _UUID, uuid4 as _uuid4
+        from urllib.parse import quote
+        from sqlalchemy import select as _select
+
+        import httpx
+
+        from agentcore.services.deps import get_db_service, get_storage_service
+        from agentcore.services.database.models.agent.model import Agent
+        from agentcore.services.database.models.idp.config import IdpAgent
+        from agentcore.services.database.models.idp.documents import IdpDocument
+        from agentcore.services.idp.pipeline import enqueue_document
+        from agentcore.api.idp.documents import ALLOWED_EXTENSIONS
+
+        connector_id = config.get("connector_id", "")
+        connector_cfg = await _get_storage_connector_config(str(connector_id))
+        if not connector_cfg:
+            logger.error(f"[onedrive-ingest] could not load connector {connector_id}")
+            return
+        accounts = connector_cfg.get("linked_accounts", [])
+        if not accounts:
+            logger.warning("[onedrive-ingest] connector has no linked account")
+            return
+        acct = accounts[0]
+        try:
+            access_token = await self._refresh_onedrive_token(connector_cfg, acct, str(connector_id))
+        except Exception as e:
+            logger.error(f"[onedrive-ingest] token refresh failed: {e}")
+            return
+
+        GRAPH = "https://graph.microsoft.com/v1.0"
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        db_service = get_db_service()
+        storage = get_storage_service()
+        async with httpx.AsyncClient(timeout=60) as client, db_service.with_session() as session:
+            idp_agent = (
+                await session.execute(
+                    _select(IdpAgent).where(
+                        (IdpAgent.id == base_agent_id) | (IdpAgent.agent_id == base_agent_id),
+                        IdpAgent.deleted_at.is_(None),
+                    )
+                )
+            ).scalars().first()
+            if idp_agent is None:
+                base_agent = await session.get(Agent, base_agent_id)
+                if base_agent is None or base_agent.deleted_at is not None:
+                    logger.warning(f"[onedrive-ingest] base agent {base_agent_id} gone; skipping batch")
+                    return
+                idp_agent = IdpAgent(
+                    agent_id=base_agent_id, extraction_mode="dynamic_prompting", dynamic_prompt="",
+                    default_rule_action="pending_review", is_active=True,
+                )
+                session.add(idp_agent)
+                await session.flush()
+
+            agent_scope = str(idp_agent.id)
+            conn_uuid = None
+            try:
+                conn_uuid = _UUID(str(connector_id))
+            except Exception:
+                conn_uuid = None
+
+            for f in files:
+                name = f.get("name", "file")
+                item_id = f.get("item_id", "")
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in ALLOWED_EXTENSIONS:
+                    logger.info(f"[onedrive-ingest] skipping unsupported file '{name}' ({ext})")
+                    continue
+                if not item_id:
+                    continue
+
+                dedup_key = f"onedrive:{connector_id}:{item_id}:{f.get('modified', '')}"
+                exists = (
+                    await session.execute(
+                        _select(IdpDocument.id)
+                        .where(IdpDocument.source_metadata["dedup_key"].astext == dedup_key)
+                        .limit(1)
+                    )
+                ).first()
+                if exists:
+                    logger.info(f"[onedrive-ingest] already ingested ({dedup_key[:60]}); skipping")
+                    continue
+
+                try:
+                    dl = await client.get(
+                        f"{GRAPH}/me/drive/items/{quote(item_id, safe='')}/content",
+                        headers=headers, follow_redirects=True,
+                    )
+                except Exception as e:
+                    logger.warning(f"[onedrive-ingest] download error for '{name}': {e}")
+                    continue
+                if dl.status_code != 200 or not dl.content:
+                    logger.warning(f"[onedrive-ingest] download failed for '{name}' ({dl.status_code})")
+                    continue
+                data = dl.content
+
+                doc_id = _uuid4()
+                storage_filename = f"idp_{doc_id}{ext}"
+                saved = False
+                try:
+                    await storage.save_file(agent_id=agent_scope, file_name=storage_filename, data=data)
+                    saved = True
+                    doc = IdpDocument(
+                        id=doc_id,
+                        agent_id=idp_agent.id,
+                        original_filename=name,
+                        file_path=f"{agent_scope}/{storage_filename}",
+                        file_type=ext.lstrip("."),
+                        mime_type=None,
+                        file_size_bytes=len(data),
+                        checksum=hashlib.sha256(data).hexdigest(),
+                        # IdpDocument.source CHECK allows upload|mail_connector|sharepoint|other.
+                        source="other",
+                        connector_id=conn_uuid,
+                        source_metadata={
+                            "provider": "onedrive",
+                            "account": acct.get("email", ""),
+                            "folder": config.get("onedrive_folder", ""),
+                            "item_id": item_id,
+                            "web_url": f.get("path", ""),
+                            "dedup_key": dedup_key,
+                        },
+                        status="queued",
+                        uploaded_by=None,
+                    )
+                    session.add(doc)
+                    await session.commit()
+                    await session.refresh(doc)
+                except Exception as e:
+                    logger.warning(f"[onedrive-ingest] failed to ingest '{name}': {e}")
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
+                    if saved:
+                        try:
+                            await storage.delete_file(agent_id=agent_scope, file_name=storage_filename)
+                        except Exception:
+                            logger.warning(f"[onedrive-ingest] could not clean up orphan {storage_filename}")
+                    continue
+
+                try:
+                    await enqueue_document(session, doc.id)
+                    logger.info(f"[onedrive-ingest] queued IdpDocument {doc.id} ('{name}')")
+                except Exception as e:
+                    logger.warning(f"[onedrive-ingest] enqueue failed for {doc.id}: {e}")
 
     async def _refresh_outlook_token(self, config: dict, acct: dict, connector_id: str, force: bool = False) -> str:
         """Refresh an Outlook OAuth token if expired, returning a valid access token."""

@@ -301,8 +301,8 @@ export default function FolderCardsView({
   });
   
   // Split folders into recent (top 4) and older
-  const recentFolders = sortedFolders.slice(0, 4);
-  const olderFolders = sortedFolders.slice(4);
+  const recentFolders = sortedFolders;
+  const olderFolders = sortedFolders.slice(0, 0);
   const searchDropdownResults = sortedFolders.slice(0, 6);
 
   const formatMatchedAgentNames = (matchedAgents: AgentType[]) => {
@@ -419,14 +419,23 @@ export default function FolderCardsView({
 
   return (
     <>
-      <div className="flex h-full w-full flex-col overflow-auto bg-background">
+      <div className="dark relative flex h-full w-full flex-col overflow-auto bg-[#070b16] text-foreground">
+        {/* ambient command-center glows */}
+        <div className="pointer-events-none fixed inset-0 overflow-hidden">
+          <div className="absolute -top-24 left-1/4 h-80 w-80 rounded-full bg-sky-500/20 blur-[130px]" />
+          <div className="absolute top-1/3 right-0 h-80 w-80 rounded-full bg-violet-500/15 blur-[130px]" />
+          <div className="absolute bottom-0 left-0 h-80 w-80 rounded-full bg-[#D04A02]/15 blur-[130px]" />
+        </div>
         {/* Header */}
-        <div ref={headerRef} className="flex items-center justify-between border-b bg-background px-6 py-4 sticky top-0 z-20">
-          <div>
-            <h1 className="text-2xl font-semibold">Projects</h1>
-            <p className="text-sm text-muted-foreground">
-              Start a new project or select an existing one
-            </p>
+        <div ref={headerRef} className="relative z-20 flex items-center justify-between border-b border-white/10 bg-white/[0.03] px-6 py-4 backdrop-blur-xl sticky top-0">
+          <div className="flex items-center gap-3">
+            <span className="h-9 w-1.5 rounded-full bg-[#D04A02]" style={{ boxShadow: "0 0 14px rgba(208,74,2,0.9)" }} />
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight">Projects</h1>
+              <p className="text-sm text-muted-foreground">
+                Start a new project or select an existing one
+              </p>
+            </div>
           </div>
           
           <div className="flex flex-wrap items-center gap-3">
@@ -832,25 +841,26 @@ export default function FolderCardsView({
           </>
         )}
 
-        {/* Cards Section - Recent Projects */}
-        <div className="border-b bg-muted/30 px-6 py-3">
-          <h2 className="mb-2 text-sm font-semibold text-muted-foreground">Recents</h2>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+        {/* Cards Section - All Projects */}
+        <div className="px-6 py-5">
+          <h2 className="mb-4 text-sm font-semibold text-muted-foreground">
+            All Projects
+            <span className="ml-1.5 font-normal text-muted-foreground/60">({filteredFolders.length})</span>
+          </h2>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
 
             {/* Create New Project Card*/}
             {can("view_projects_page") && (
             <div
               onClick={!isPending ? handleOpenCreateModal : undefined}
-              className="group relative flex cursor-pointer flex-col items-center justify-between rounded-lg border-2 border-dashed border-muted-foreground/25 bg-background p-4 transition-all hover:border-primary hover:bg-accent"
+              className="group relative flex min-h-[150px] cursor-pointer flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-white/15 bg-white/[0.02] p-4 backdrop-blur-xl transition-all duration-300 hover:-translate-y-1 hover:border-[#D04A02]/60 hover:bg-white/[0.05]"
             >
-              <div className="flex-1 flex items-center justify-center">
-                <div
-                  className={`flex h-12 w-12 items-center justify-center rounded-lg bg-primary/10 transition-colors group-hover:bg-primary/20${isPending ? " opacity-50" : ""}`}
-                >
-                  <Plus className="h-6 w-6 text-primary" />
-                </div>
+              <div
+                className={`flex h-12 w-12 items-center justify-center rounded-xl bg-[#D04A02]/15 transition-colors group-hover:bg-[#D04A02]/25${isPending ? " opacity-50" : ""}`}
+              >
+                <Plus className="h-6 w-6 text-[#D04A02]" />
               </div>
-              <span className="text-center text-xs font-medium text-muted-foreground mt-2">Blank project</span>
+              <span className="text-center text-xs font-semibold text-muted-foreground">Blank project</span>
             </div>
             )}
 
@@ -861,30 +871,52 @@ export default function FolderCardsView({
               return (
                 <div
                   key={folder.id}
-                  className="group relative flex flex-col items-center rounded-lg border bg-card p-4 transition-all hover:border-primary hover:shadow-md"
+                  className="group relative flex flex-col rounded-2xl border border-white/10 bg-white/[0.04] p-4 backdrop-blur-xl transition-all duration-300 hover:-translate-y-1 hover:bg-white/[0.07]"
+                  style={{ boxShadow: "0 0 0 1px rgba(255,255,255,0.05), 0 16px 50px -24px rgba(208,74,2,0.45)" }}
                 >
-                  {/* Top Right Icons - hover only */}
-                  <div className="absolute right-1.5 top-1.5 z-10 flex gap-0.5">
-                    {can("view_projects_page") && (
+                  {/* Header: icon + name + actions */}
+                  <div className="flex items-start gap-3">
                     <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setInfoPopoverFolderId(isPopoverOpen ? null : folder.id);
-                      }}
-                      className="flex h-6 w-6 items-center justify-center rounded-md opacity-0 transition-opacity hover:bg-blue-100 group-hover:opacity-100"
-                      title="View details"
+                      type="button"
+                      onClick={() => can("view_projects_page") && onFolderClick(folder.id)}
+                      disabled={!can("view_projects_page")}
+                      aria-label={folder.name}
+                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 transition-colors group-hover:bg-primary/15 disabled:cursor-not-allowed"
                     >
-                      <Info className="h-3.5 w-3.5 text-[var(--info-foreground)]" />
+                      <Folder className="h-5 w-5 text-primary" />
                     </button>
-                    )}
-
-                    {(can("edit_project") || can("delete_project")) && (
-                    <div className="z-20">
+                    <button
+                      type="button"
+                      onClick={() => can("view_projects_page") && onFolderClick(folder.id)}
+                      disabled={!can("view_projects_page")}
+                      className="min-w-0 flex-1 pt-0.5 text-left disabled:cursor-not-allowed"
+                    >
+                      <p className="truncate text-sm font-semibold leading-tight text-foreground">
+                        {folder.name}
+                      </p>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {agentCount} {agentCount === 1 ? "agent" : "agents"}
+                      </p>
+                    </button>
+                    <div className="flex shrink-0 items-center gap-0.5">
+                      {can("view_projects_page") && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setInfoPopoverFolderId(isPopoverOpen ? null : folder.id);
+                        }}
+                        className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100"
+                        title="View details"
+                      >
+                        <Info className="h-3.5 w-3.5" />
+                      </button>
+                      )}
+                      {(can("edit_project") || can("delete_project")) && (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <button
                             onClick={(e) => e.stopPropagation()}
-                            className="flex h-6 w-6 items-center justify-center rounded-md transition-opacity hover:bg-accent"
+                            className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                           >
                             <MoreVertical className="h-3.5 w-3.5" />
                           </button>
@@ -915,28 +947,22 @@ export default function FolderCardsView({
                           )}
                         </DropdownMenuContent>
                       </DropdownMenu>
+                      )}
                     </div>
-                    )}
                   </div>
 
-                  {/* Clean card - Icon + Name + Agent count */}
-                  <button
-                    onClick={() => can("view_projects_page") && onFolderClick(folder.id)}
-                    disabled={!can("view_projects_page")}
-                    className="flex flex-1 flex-col items-center justify-center gap-2 w-full text-center py-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-primary/10 transition-colors group-hover:bg-primary/20">
-                      <Folder className="h-6 w-6 text-primary" />
-                    </div>
-                    <p className="text-sm font-semibold line-clamp-2 leading-tight w-full">
-                      {folder.name}
-                    </p>
-                  </button>
+                  {/* Content */}
+                  <div className="mt-3 flex flex-1 flex-col gap-2">
+                    {folder.description?.trim() && (
+                      <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground" title={folder.description}>
+                        {folder.description}
+                      </p>
+                    )}
 
                   {/* Tags */}
                   {folder.tags && folder.tags.length > 0 && (
                     <div
-                      className="relative flex flex-wrap justify-center gap-1 w-full px-1 mb-2 group/tags"
+                      className="relative flex flex-wrap justify-start gap-1 mb-1 group/tags"
                       title={folder.tags.join(", ")}
                     >
                       {folder.tags.slice(0, 3).map((tag) => (
@@ -976,21 +1002,22 @@ export default function FolderCardsView({
                     </div>
                   )}
 
-                  {/* Created by + Agent count - Bottom */}
-                  <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground pt-2 border-t border-border/50 w-full">
-                    {showCreatedBy && (folder.created_by_email || folder.is_own_project) && (
-                      <>
-                        <span className="truncate max-w-[50%]" title={folder.created_by_email || ""}>
-                          {folder.is_own_project ? (
-                            <span className="text-primary font-medium">You</span>
-                          ) : (
-                            folder.created_by_email?.split("@")[0]
-                          )}
-                        </span>
-                        <span className="text-border">|</span>
-                      </>
-                    )}
-                    <span>{agentCount} {agentCount === 1 ? "agent" : "agents"}</span>
+                    {/* Created by + Agent count */}
+                    <div className="mt-auto flex items-center gap-2 border-t border-border/50 pt-2.5 text-xs text-muted-foreground">
+                      {showCreatedBy && (folder.created_by_email || folder.is_own_project) && (
+                        <>
+                          <span className="max-w-[55%] truncate" title={folder.created_by_email || ""}>
+                            {folder.is_own_project ? (
+                              <span className="font-medium text-primary">You</span>
+                            ) : (
+                              folder.created_by_email?.split("@")[0]
+                            )}
+                          </span>
+                          <span className="text-border">·</span>
+                        </>
+                      )}
+                      <span>{agentCount} {agentCount === 1 ? "agent" : "agents"}</span>
+                    </div>
                   </div>
 
                   {/* Info Popover - shown on (i) click */}

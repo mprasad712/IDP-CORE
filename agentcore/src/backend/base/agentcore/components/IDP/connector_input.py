@@ -23,6 +23,9 @@ from agentcore.schema.message import Message
 from agentcore.logging import logger
 
 _EMAIL_PROVIDERS = {"outlook"}
+_SHAREPOINT_PROVIDERS = {"sharepoint"}
+_ONEDRIVE_PROVIDERS = {"onedrive"}
+_IDP_PROVIDERS = _EMAIL_PROVIDERS | _SHAREPOINT_PROVIDERS | _ONEDRIVE_PROVIDERS
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 # Email-only inputs — hidden until the selected connector's provider is an email provider.
@@ -31,6 +34,12 @@ _EMAIL_FIELDS = [
     "filter_sender", "filter_subject", "filter_body", "filter_to", "filter_cc",
     "filter_importance", "filter_has_attachments", "unread_only", "mark_as_read", "fetch_full_body",
 ]
+
+# SharePoint-only inputs — hidden until the selected connector's provider is SharePoint.
+_SHAREPOINT_FIELDS = ["sharepoint_library", "sharepoint_folder", "sharepoint_file_types"]
+
+# OneDrive-only inputs — hidden until the selected connector's provider is OneDrive.
+_ONEDRIVE_FIELDS = ["onedrive_folder", "onedrive_file_types"]
 
 
 def _run_async(coro):
@@ -43,7 +52,10 @@ def _run_async(coro):
 
 
 def _fetch_mail_connectors() -> list[str]:
-    """Return 'name | provider | emails | uuid' strings for all connected mail connectors."""
+    """Return 'name | provider | target | uuid' strings for connected IDP-capable connectors.
+
+    Includes Outlook (target = linked mailboxes) and SharePoint (target = site URL) connectors.
+    """
     try:
         from agentcore.services.deps import get_db_service
         db_service = get_db_service()
@@ -56,7 +68,7 @@ def _fetch_mail_connectors() -> list[str]:
             async with db_service.with_session() as session:
                 stmt = (
                     select(ConnectorCatalogue)
-                    .where(ConnectorCatalogue.provider.in_(_EMAIL_PROVIDERS))
+                    .where(ConnectorCatalogue.provider.in_(_IDP_PROVIDERS))
                     .where(ConnectorCatalogue.status == "connected")
                     .order_by(ConnectorCatalogue.name)
                 )
@@ -65,14 +77,20 @@ def _fetch_mail_connectors() -> list[str]:
                 items = []
                 for r in rows:
                     config = _decrypt_provider_config(r.provider, r.provider_config or {})
-                    accounts = config.get("linked_accounts", [])
-                    emails = ", ".join(a.get("email", "") for a in accounts) or "no mailbox linked"
-                    items.append(f"{r.name} | {r.provider} | {emails} | {r.id}")
+                    if r.provider in _SHAREPOINT_PROVIDERS:
+                        target = config.get("site_url", "no site configured")
+                    elif r.provider in _ONEDRIVE_PROVIDERS:
+                        accounts = config.get("linked_accounts", [])
+                        target = ", ".join(a.get("email", "") for a in accounts) or "no account linked"
+                    else:
+                        accounts = config.get("linked_accounts", [])
+                        target = ", ".join(a.get("email", "") for a in accounts) or "no mailbox linked"
+                    items.append(f"{r.name} | {r.provider} | {target} | {r.id}")
                 return items
 
         return _run_async(_query())
     except Exception as e:
-        logger.warning(f"Could not fetch mail connectors: {e}")
+        logger.warning(f"Could not fetch IDP connectors: {e}")
         return []
 
 
@@ -115,15 +133,37 @@ class IDPConnectorInput(Node):
             name="connector",
             display_name="Connector",
             info=(
-                "Select a connector from the Connectors Catalogue. Configure Outlook connectors "
-                "on the Connectors page and link a mailbox via OAuth. The email filters below "
-                "appear once an Outlook connector is selected."
+                "Select a connector from the Connectors Catalogue. For Outlook, link a mailbox via "
+                "OAuth and the email filters appear. For SharePoint, choose the document library and "
+                "folder below and the published agent ingests new files from that folder."
             ),
-            options=_fetch_mail_connectors(),
+            options=[],
             value="",
             refresh_button=True,
             real_time_refresh=True,
             required=True,
+        ),
+        # SharePoint-only fields — revealed when a SharePoint connector is selected.
+        MessageTextInput(
+            name="sharepoint_library", display_name="Library Name", show=False, value="Shared Documents",
+            info="SharePoint document library to read from (e.g. 'Shared Documents').",
+        ),
+        MessageTextInput(
+            name="sharepoint_folder", display_name="Folder Path", show=False, value="",
+            info="Folder within the library to process (e.g. 'Invoices/2024'). Leave empty for the library root.",
+        ),
+        MessageTextInput(
+            name="sharepoint_file_types", display_name="File Type Filter", show=False, value="pdf,png,jpg,docx",
+            info="Comma-separated file extensions to process. Leave empty for all supported types.",
+        ),
+        # OneDrive-only fields — revealed when a OneDrive connector is selected.
+        MessageTextInput(
+            name="onedrive_folder", display_name="Folder Path", show=False, value="",
+            info="Folder within OneDrive to process (e.g. 'Documents/Invoices'). Leave empty for the drive root.",
+        ),
+        MessageTextInput(
+            name="onedrive_file_types", display_name="File Type Filter", show=False, value="pdf,png,jpg,docx",
+            info="Comma-separated file extensions to process. Leave empty for all supported types.",
         ),
         MessageTextInput(
             name="account_email", display_name="Account / Mailbox", show=False, value="",
@@ -201,8 +241,9 @@ class IDPConnectorInput(Node):
                 build_config["connector"]["options"] = options
                 if not options:
                     build_config["connector"]["info"] = (
-                        "No connected mail connectors found. Go to Connectors → Add Connector → "
-                        "Microsoft Outlook, save it, link a mailbox via OAuth, then refresh this field."
+                        "No connected connectors found. Go to Connectors → Add Connector → "
+                        "Microsoft Outlook (link a mailbox via OAuth) or SharePoint (set site/library), "
+                        "connect it, then refresh this field."
                     )
                 current = build_config["connector"].get("value", "")
                 if options and current not in options and not current:
@@ -211,14 +252,24 @@ class IDPConnectorInput(Node):
                 logger.warning(f"Error refreshing connector options: {e}")
                 build_config["connector"]["options"] = []
 
-            # Provider-aware visibility: show the email block only for an email provider (outlook).
+            # Provider-aware visibility: show the email block only for an email provider (outlook),
+            # and the SharePoint block only for a SharePoint connector.
             selected = build_config.get("connector", {}).get("value", "") or ""
             if field_name == "connector" and isinstance(field_value, str) and field_value:
                 selected = field_value
-            is_email = _parse_connector_provider(selected) in _EMAIL_PROVIDERS
+            provider = _parse_connector_provider(selected)
+            is_email = provider in _EMAIL_PROVIDERS
+            is_sharepoint = provider in _SHAREPOINT_PROVIDERS
+            is_onedrive = provider in _ONEDRIVE_PROVIDERS
             for fld in _EMAIL_FIELDS:
                 if fld in build_config:
                     build_config[fld]["show"] = is_email
+            for fld in _SHAREPOINT_FIELDS:
+                if fld in build_config:
+                    build_config[fld]["show"] = is_sharepoint
+            for fld in _ONEDRIVE_FIELDS:
+                if fld in build_config:
+                    build_config[fld]["show"] = is_onedrive
         return build_config
 
     # ------------------------------------------------------------------
@@ -316,12 +367,256 @@ class IDPConnectorInput(Node):
         return True
 
     # ------------------------------------------------------------------
+    # SharePoint single pull (manual / playground preview)
+    # ------------------------------------------------------------------
+
+    def _get_sharepoint_document(self) -> Message:
+        """Download the first supported file from the selected SharePoint library/folder.
+
+        Mirrors the email preview: returns one file as a Message carrying its temp ``file_path`` so
+        the downstream IDP pipeline can process it. The published agent ingests the whole folder via
+        the background SharePoint monitor (see TriggerService.sync_sharepoint_idp_monitors_for_agent).
+        """
+        from urllib.parse import quote
+        from agentcore.components.tools.sharepoint_document import (
+            GRAPH_BASE as SP_GRAPH_BASE,
+            _acquire_token_sync,
+            _get_sharepoint_config,
+            _graph_get_sync,
+            _request_sync,
+            _resolve_drive_id_sync,
+            _resolve_site_id_sync,
+        )
+
+        connector_id = _parse_connector_id(self.connector)
+        if not connector_id:
+            self.status = "Error: no connector selected"
+            return Message(text="No SharePoint connector selected. Pick one from the Connector dropdown.")
+
+        config = _get_sharepoint_config(connector_id)
+        if config is None:
+            self.status = "Error: connector not found"
+            return Message(text=f"SharePoint connector not found (id={connector_id}). It may have been deleted.")
+
+        library = (self.sharepoint_library or "").strip() or "Shared Documents"
+        folder = (self.sharepoint_folder or "").strip().strip("/")
+        types_raw = (self.sharepoint_file_types or "").strip()
+        norm_types = {t.strip().lower().lstrip(".") for t in types_raw.split(",") if t.strip()}
+
+        try:
+            access_token = _acquire_token_sync(config)
+            site_id = _resolve_site_id_sync(config, access_token)
+            drive_id = _resolve_drive_id_sync(site_id, library, access_token, config=config)
+        except Exception as e:
+            self.status = f"Error: {e}"
+            return Message(text=f"Failed to connect to SharePoint: {e}")
+
+        if folder:
+            safe_path = quote(folder, safe="/")
+            list_url = f"{SP_GRAPH_BASE}/drives/{drive_id}/root:/{safe_path}:/children"
+        else:
+            list_url = f"{SP_GRAPH_BASE}/drives/{drive_id}/root/children"
+
+        try:
+            resp = _graph_get_sync(
+                list_url, access_token, params={"$top": "100", "$select": "id,name,size,file,folder"}, config=config
+            )
+        except Exception as e:
+            self.status = f"Network error: {e}"
+            return Message(text=f"Network error listing SharePoint folder: {e}")
+        if resp.status_code != 200:
+            self.status = f"Graph API error {resp.status_code}"
+            return Message(text=f"Graph API error {resp.status_code}: {resp.text[:200]}")
+
+        files = [i for i in resp.json().get("value", []) if "file" in i]
+        if norm_types:
+            files = [
+                f for f in files
+                if (f["name"].rsplit(".", 1)[-1].lower() if "." in f["name"] else "") in norm_types
+            ]
+        if not files:
+            self.status = "No matching files found"
+            return Message(text="No files matching the filter were found in the selected SharePoint folder.")
+
+        item = files[0]
+        item_id = item.get("id", "")
+        filename = item.get("name", "document")
+        content_url = f"{SP_GRAPH_BASE}/drives/{drive_id}/items/{quote(item_id, safe='')}/content"
+        try:
+            dl = _request_sync(
+                "GET", content_url, access_token=access_token, config=config,
+                headers={"Authorization": f"Bearer {access_token}"}, timeout=60,
+            )
+        except Exception as e:
+            self.status = f"Download error: {e}"
+            return Message(text=f"Failed to download '{filename}': {e}")
+        if dl.status_code != 200:
+            self.status = f"Download error {dl.status_code}"
+            return Message(text=f"Failed to download '{filename}' ({dl.status_code}): {dl.text[:200]}")
+
+        suffix = os.path.splitext(filename)[1] or ".bin"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="idp_sp_") as f:
+            f.write(dl.content)
+            tmp_path = f.name
+
+        self.status = f"Fetched '{filename}' from SharePoint ({library}/{folder or 'root'})"
+        logger.info(f"[ConnectorInput] Downloaded SharePoint file {filename} → {tmp_path}")
+        return Message(
+            text=tmp_path,
+            data={
+                "file_path": tmp_path,
+                "filename": filename,
+                "source": "sharepoint_connector",
+                "library": library,
+                "folder": folder,
+                "item_id": item_id,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # OneDrive single pull (manual / playground preview)
+    # ------------------------------------------------------------------
+
+    def _onedrive_token(self, config: dict, acct: dict) -> str:
+        """Return a valid OneDrive access token, refreshing via /common when expired."""
+        import time as _time
+        import httpx
+
+        access_token = acct.get("access_token", "")
+        expires_at = acct.get("token_expires_at", 0)
+        if access_token and _time.time() < (expires_at - 60):
+            return access_token
+
+        refresh_token = acct.get("refresh_token", "")
+        if not refresh_token:
+            raise ValueError("OneDrive token expired and no refresh token. Re-link the account.")
+        resp = httpx.post(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            data={
+                "client_id": config.get("client_id", ""),
+                "client_secret": config.get("client_secret", ""),
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+                "scope": "Files.Read Files.ReadWrite User.Read offline_access",
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            raise ValueError(f"OneDrive token refresh failed ({resp.status_code}): {resp.text[:200]}")
+        data = resp.json()
+        return data["access_token"]
+
+    def _get_onedrive_document(self) -> Message:
+        """Download the first supported file from the selected OneDrive folder (preview pull)."""
+        import httpx
+        from urllib.parse import quote as _quote
+        from agentcore.components.tools.outlook_mail import _get_outlook_config
+
+        connector_id = _parse_connector_id(self.connector)
+        if not connector_id:
+            self.status = "Error: no connector selected"
+            return Message(text="No OneDrive connector selected. Pick one from the Connector dropdown.")
+
+        config = _get_outlook_config(connector_id)  # provider-agnostic loader (decrypts by provider)
+        if config is None:
+            self.status = "Error: connector not found"
+            return Message(text=f"OneDrive connector not found (id={connector_id}). It may have been deleted.")
+
+        accounts = config.get("linked_accounts", [])
+        if not accounts:
+            self.status = "Error: no linked account"
+            return Message(text="No linked OneDrive account. Link one via OAuth on the Connectors page.")
+        acct = accounts[0]
+
+        try:
+            access_token = self._onedrive_token(config, acct)
+        except Exception as e:
+            self.status = f"Error: {e}"
+            return Message(text=str(e))
+
+        folder = (self.onedrive_folder or "").strip().strip("/")
+        types_raw = (self.onedrive_file_types or "").strip()
+        norm_types = {t.strip().lower().lstrip(".") for t in types_raw.split(",") if t.strip()}
+
+        if folder:
+            safe = _quote(folder, safe="/")
+            url = f"{GRAPH_BASE}/me/drive/root:/{safe}:/children"
+        else:
+            url = f"{GRAPH_BASE}/me/drive/root/children"
+
+        headers = {"Authorization": f"Bearer {access_token}"}
+        try:
+            resp = httpx.get(
+                url, headers=headers,
+                params={"$top": "100", "$select": "id,name,size,file,folder"}, timeout=20,
+            )
+        except Exception as e:
+            self.status = f"Network error: {e}"
+            return Message(text=f"Network error listing OneDrive folder: {e}")
+        if resp.status_code != 200:
+            self.status = f"Graph API error {resp.status_code}"
+            return Message(text=f"Graph API error {resp.status_code}: {resp.text[:200]}")
+
+        files = [i for i in resp.json().get("value", []) if "file" in i]
+        if norm_types:
+            files = [
+                f for f in files
+                if (f["name"].rsplit(".", 1)[-1].lower() if "." in f["name"] else "") in norm_types
+            ]
+        if not files:
+            self.status = "No matching files found"
+            return Message(text="No files matching the filter were found in the selected OneDrive folder.")
+
+        item = files[0]
+        item_id = item.get("id", "")
+        filename = item.get("name", "document")
+        try:
+            dl = httpx.get(
+                f"{GRAPH_BASE}/me/drive/items/{_quote(item_id, safe='')}/content",
+                headers=headers, timeout=60, follow_redirects=True,
+            )
+        except Exception as e:
+            self.status = f"Download error: {e}"
+            return Message(text=f"Failed to download '{filename}': {e}")
+        if dl.status_code != 200:
+            self.status = f"Download error {dl.status_code}"
+            return Message(text=f"Failed to download '{filename}' ({dl.status_code}): {dl.text[:200]}")
+
+        suffix = os.path.splitext(filename)[1] or ".bin"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="idp_od_") as f:
+            f.write(dl.content)
+            tmp_path = f.name
+
+        self.status = f"Fetched '{filename}' from OneDrive ({folder or 'root'})"
+        logger.info(f"[ConnectorInput] Downloaded OneDrive file {filename} → {tmp_path}")
+        return Message(
+            text=tmp_path,
+            data={
+                "file_path": tmp_path,
+                "filename": filename,
+                "source": "onedrive_connector",
+                "folder": folder,
+                "item_id": item_id,
+            },
+        )
+
+    # ------------------------------------------------------------------
     # Main output method (manual / playground single pull)
     # ------------------------------------------------------------------
 
     def get_document(self) -> Message:
-        """Fetch the most recent matching email's first attachment (manual pull / preview)."""
+        """Fetch a document for preview (manual pull).
+
+        Routes to SharePoint folder reading when a SharePoint connector is selected, otherwise
+        pulls the most recent matching email's first attachment from an Outlook connector.
+        """
         import httpx
+
+        provider = _parse_connector_provider(self.connector or "")
+        if provider in _SHAREPOINT_PROVIDERS:
+            return self._get_sharepoint_document()
+        if provider in _ONEDRIVE_PROVIDERS:
+            return self._get_onedrive_document()
 
         try:
             config = self._get_config()

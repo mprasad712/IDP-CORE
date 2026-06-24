@@ -2460,6 +2460,40 @@ async def publish_agent(
             except Exception as mail_err:
                 logger.warning(f"Email-monitor sync failed for UAT deploy of {agent_id}: {mail_err}")
 
+            # Sync IDPConnectorInput (SharePoint) nodes → auto-create folder-monitor trigger_config
+            # (storage_type=SharePoint, ingest_mode=idp_pipeline) so the published agent polls the
+            # selected folder and ingests new files into Processed Docs.
+            try:
+                from agentcore.services.deps import get_trigger_service
+                trigger_svc = get_trigger_service()
+                await trigger_svc.sync_sharepoint_idp_monitors_for_agent(
+                    session=session,
+                    agent_id=agent_id,
+                    environment="uat",
+                    version=f"v{next_version}",
+                    deployment_id=new_record.id,
+                    flow_data=snapshot,
+                    created_by=current_user.id,
+                )
+            except Exception as sp_err:
+                logger.warning(f"SharePoint-monitor sync failed for UAT deploy of {agent_id}: {sp_err}")
+
+            # Sync IDPConnectorInput (OneDrive) nodes → folder-monitor (idp_pipeline) triggers
+            try:
+                from agentcore.services.deps import get_trigger_service
+                trigger_svc = get_trigger_service()
+                await trigger_svc.sync_onedrive_idp_monitors_for_agent(
+                    session=session,
+                    agent_id=agent_id,
+                    environment="uat",
+                    version=f"v{next_version}",
+                    deployment_id=new_record.id,
+                    flow_data=snapshot,
+                    created_by=current_user.id,
+                )
+            except Exception as od_err:
+                logger.warning(f"OneDrive-monitor sync failed for UAT deploy of {agent_id}: {od_err}")
+
             # ─── Sync agent registry after UAT publish ──
             try:
                 await sync_agent_registry(
@@ -2679,6 +2713,38 @@ async def publish_agent(
                     )
                 except Exception as mail_err:
                     logger.warning(f"Email-monitor sync failed for PROD deploy of {agent_id}: {mail_err}")
+
+                # Sync IDPConnectorInput (SharePoint) nodes → folder-monitor (idp_pipeline) triggers
+                try:
+                    from agentcore.services.deps import get_trigger_service
+                    trigger_svc = get_trigger_service()
+                    await trigger_svc.sync_sharepoint_idp_monitors_for_agent(
+                        session=session,
+                        agent_id=agent_id,
+                        environment="prod",
+                        version=f"v{next_version}",
+                        deployment_id=new_record.id,
+                        flow_data=snapshot,
+                        created_by=current_user.id,
+                    )
+                except Exception as sp_err:
+                    logger.warning(f"SharePoint-monitor sync failed for PROD deploy of {agent_id}: {sp_err}")
+
+                # Sync IDPConnectorInput (OneDrive) nodes → folder-monitor (idp_pipeline) triggers
+                try:
+                    from agentcore.services.deps import get_trigger_service
+                    trigger_svc = get_trigger_service()
+                    await trigger_svc.sync_onedrive_idp_monitors_for_agent(
+                        session=session,
+                        agent_id=agent_id,
+                        environment="prod",
+                        version=f"v{next_version}",
+                        deployment_id=new_record.id,
+                        flow_data=snapshot,
+                        created_by=current_user.id,
+                    )
+                except Exception as od_err:
+                    logger.warning(f"OneDrive-monitor sync failed for PROD deploy of {agent_id}: {od_err}")
 
                 # ─── Publish notification (DB-verified) ──
                 await _notify_publish_event(
