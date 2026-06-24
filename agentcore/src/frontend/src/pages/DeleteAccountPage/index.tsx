@@ -1,5 +1,5 @@
 import { useState } from "react";
-import MothersonLogo from "@/assets/micore.png?react";
+import MothersonLogo from "@/assets/micore-icon.svg?react";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import BaseModal from "../../modals/baseModal";

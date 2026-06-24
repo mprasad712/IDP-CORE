@@ -610,7 +610,7 @@ function GaugeRing({ value, accent, size = 78, stroke = 7 }: { value: number; ac
   const dash = (c * pct) / 100;
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="-rotate-90">
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth={stroke} />
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(148,163,184,0.25)" strokeWidth={stroke} />
       <circle
         cx={size / 2}
         cy={size / 2}
@@ -634,21 +634,21 @@ function KpiCard({ kpi, accent, icon }: { kpi: SectionKpi; accent: string; icon:
   const numeric = isPct ? parseFloat(kpi.value) : null;
   return (
     <div
-      className="group/kpi relative flex min-h-[156px] flex-col overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-5 backdrop-blur-xl transition-all duration-300 hover:-translate-y-1 hover:bg-white/[0.07]"
+      className="group/kpi relative flex min-h-[156px] flex-col overflow-hidden rounded-2xl border border-border bg-card p-5 backdrop-blur-xl transition-all duration-300 hover:-translate-y-1 hover:shadow-lg"
       style={{ boxShadow: `0 0 0 1px ${accent}1f, 0 16px 50px -22px ${accent}55` }}
     >
       {/* corner glow */}
       <div
-        className="pointer-events-none absolute -right-10 -top-10 h-24 w-24 rounded-full opacity-40 blur-2xl transition-opacity duration-300 group-hover/kpi:opacity-70"
+        className="pointer-events-none absolute -right-10 -top-10 h-24 w-24 rounded-full opacity-30 blur-2xl transition-opacity duration-300 group-hover/kpi:opacity-60"
         style={{ background: accent }}
       />
 
       <div className="relative flex items-center justify-between">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 [&>svg]:!h-[18px] [&>svg]:!w-[18px]">
+        <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#D04A02]/20 bg-[#D04A02]/10 [&>svg]:!h-[18px] [&>svg]:!w-[18px] [&>svg]:!text-[#D04A02]">
           {icon}
         </div>
         {kpi.scope === "global" && (
-          <span className="rounded-md border border-sky-400/30 bg-sky-400/10 px-1.5 py-0.5 text-xxs font-semibold uppercase tracking-wide text-sky-300">
+          <span className="rounded-md border border-[#D04A02]/20 bg-[#D04A02]/10 px-1.5 py-0.5 text-xxs font-semibold uppercase tracking-wide text-[#D04A02]">
             Global
           </span>
         )}
@@ -659,23 +659,23 @@ function KpiCard({ kpi, accent, icon }: { kpi: SectionKpi; accent: string; icon:
           <div className="relative shrink-0">
             <GaugeRing value={numeric} accent={accent} />
             <span
-              className="absolute inset-0 flex items-center justify-center text-sm font-bold text-white"
-              style={{ textShadow: `0 0 12px ${accent}` }}
+              className="absolute inset-0 flex items-center justify-center text-sm font-bold text-foreground"
+              style={{ textShadow: `0 0 12px ${accent}55` }}
             >
               {kpi.value}
             </span>
           </div>
-          <p className="text-xs leading-snug text-slate-400">{t(kpi.name)}</p>
+          <p className="text-xs leading-snug text-muted-foreground">{t(kpi.name)}</p>
         </div>
       ) : (
         <div className="relative mt-auto pt-4">
           <p
-            className="text-[32px] font-bold leading-none tracking-tight tabular-nums text-white"
-            style={{ textShadow: `0 0 22px ${accent}66` }}
+            className="text-[32px] font-bold leading-none tracking-tight tabular-nums text-foreground"
+            style={{ textShadow: `0 0 22px ${accent}40` }}
           >
             {kpi.value}
           </p>
-          <p className="mt-2.5 text-xs leading-snug text-slate-400">{t(kpi.name)}</p>
+          <p className="mt-2.5 text-xs leading-snug text-muted-foreground">{t(kpi.name)}</p>
         </div>
       )}
     </div>
@@ -696,25 +696,25 @@ function ChartCard({
   const { t } = useTranslation();
   return (
     <div
-      className="relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] backdrop-blur-xl transition-all duration-300 hover:bg-white/[0.06]"
+      className="relative overflow-hidden rounded-2xl border border-border bg-card backdrop-blur-xl transition-all duration-300 hover:shadow-lg"
       style={{ boxShadow: `0 0 0 1px ${accent}17, 0 16px 50px -24px ${accent}55` }}
     >
       <div
-        className="pointer-events-none absolute -right-12 -top-12 h-28 w-28 rounded-full opacity-30 blur-3xl"
+        className="pointer-events-none absolute -right-12 -top-12 h-28 w-28 rounded-full opacity-20 blur-3xl"
         style={{ background: accent }}
       />
       <div className="relative flex items-center justify-between gap-2 px-5 pt-4 pb-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: accent, boxShadow: `0 0 10px ${accent}` }} />
-            <p className="truncate text-sm font-semibold text-white">{t(chart.title)}</p>
+            <p className="truncate text-sm font-semibold text-foreground">{t(chart.title)}</p>
             {chart.scope === "global" && (
-              <span className="rounded-md border border-sky-400/30 bg-sky-400/10 px-1.5 py-0.5 text-xxs font-semibold uppercase tracking-wide text-sky-300">
+              <span className="rounded-md border border-[#D04A02]/20 bg-[#D04A02]/10 px-1.5 py-0.5 text-xxs font-semibold uppercase tracking-wide text-[#D04A02]">
                 Global
               </span>
             )}
           </div>
-          <p className="mt-1 pl-4 text-xs text-slate-400">{t(chart.subtitle)}</p>
+          <p className="mt-1 pl-4 text-xs text-muted-foreground">{t(chart.subtitle)}</p>
         </div>
         {rangeSelector && <div className="ml-2 shrink-0">{rangeSelector}</div>}
       </div>
@@ -1239,9 +1239,9 @@ export default function DashboardAdmin(): JSX.Element {
   );
 
   return (
-    <div className="dark flex h-full w-full flex-col overflow-hidden bg-[#070b16] text-foreground">
+    <div className="flex h-full w-full flex-col overflow-hidden bg-background text-foreground">
       {/* -- Page Header -- */}
-      <div className="relative z-10 flex-shrink-0 border-b border-white/10 bg-white/[0.03] backdrop-blur-xl">
+      <div className="relative z-10 flex-shrink-0 border-b border-border bg-card/80 backdrop-blur">
         <div className="px-4 py-4 sm:px-6 md:px-8">
           <div className="flex items-start justify-between gap-4">
             <div className="flex items-center gap-3">
@@ -1317,15 +1317,15 @@ export default function DashboardAdmin(): JSX.Element {
       <div className="relative flex-1 overflow-auto px-4 py-8 sm:px-6 md:px-8">
         {/* ambient glows */}
         <div className="pointer-events-none absolute inset-0 overflow-hidden">
-          <div className="absolute -top-24 left-1/4 h-80 w-80 rounded-full bg-sky-500/20 blur-[130px]" />
-          <div className="absolute top-1/3 right-0 h-80 w-80 rounded-full bg-violet-500/15 blur-[130px]" />
-          <div className="absolute bottom-0 left-0 h-80 w-80 rounded-full bg-amber-500/10 blur-[130px]" />
+          <div className="absolute -top-24 left-1/4 h-80 w-80 rounded-full bg-[#D04A02]/15 dark:bg-sky-500/20 blur-[130px]" />
+          <div className="absolute top-1/3 right-0 h-80 w-80 rounded-full bg-[#D04A02]/10 dark:bg-violet-500/15 blur-[130px]" />
+          <div className="absolute bottom-0 left-0 h-80 w-80 rounded-full bg-[#E8853C]/12 dark:bg-amber-500/10 blur-[130px]" />
         </div>
         <div className="relative mx-auto flex max-w-[1500px] flex-col gap-12">
           {(() => {
             const resolved = sectionsToRender.map((section) => ({
               section,
-              accent: sectionThemes[section.id].accent,
+              accent: "#D04A02",
               icon: sectionThemes[section.id].icon,
               ...resolveSection(section),
             }));
@@ -1361,13 +1361,13 @@ export default function DashboardAdmin(): JSX.Element {
                   <section>
                     <div className="mb-5 flex items-center gap-3">
                       <span className="h-2.5 w-2.5 rounded-full bg-[#D04A02]" style={{ boxShadow: "0 0 14px rgba(208,74,2,0.9)" }} />
-                      <h2 className="text-xs font-bold uppercase tracking-[0.25em] text-white/90">
+                      <h2 className="text-xs font-bold uppercase tracking-[0.25em] text-foreground">
                         {t("Key Metrics")}
                       </h2>
-                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-xxs font-medium text-slate-400">
+                      <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-xxs font-medium text-muted-foreground">
                         {allKpis.length}
                       </span>
-                      <div className="ml-1 h-px flex-1 bg-gradient-to-r from-white/15 to-transparent" />
+                      <div className="ml-1 h-px flex-1 bg-gradient-to-r from-border to-transparent" />
                     </div>
                     <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-4">
                       {allKpis.map(({ kpi, accent, icon, sectionId }, idx) => (
@@ -1387,13 +1387,13 @@ export default function DashboardAdmin(): JSX.Element {
                   <section>
                     <div className="mb-5 flex items-center gap-3">
                       <span className="h-2.5 w-2.5 rounded-full bg-[#D04A02]" style={{ boxShadow: "0 0 14px rgba(208,74,2,0.9)" }} />
-                      <h2 className="text-xs font-bold uppercase tracking-[0.25em] text-white/90">
+                      <h2 className="text-xs font-bold uppercase tracking-[0.25em] text-foreground">
                         {t("Trends & Analytics")}
                       </h2>
-                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-xxs font-medium text-slate-400">
+                      <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-xxs font-medium text-muted-foreground">
                         {allCharts.length}
                       </span>
-                      <div className="ml-1 h-px flex-1 bg-gradient-to-r from-white/15 to-transparent" />
+                      <div className="ml-1 h-px flex-1 bg-gradient-to-r from-border to-transparent" />
                     </div>
                     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3">
                       {allCharts.map(({ chart, accent, sectionId }, idx) => (

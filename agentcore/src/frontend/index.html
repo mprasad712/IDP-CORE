@@ -6,7 +6,8 @@
   <meta charset="UTF-8" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <link rel="icon" href="/favicon.ico" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="alternate icon" href="/favicon.ico" />
   <link rel="manifest" href="/manifest.json" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -33,19 +34,17 @@
       background: #09090b;
     }
 
-    #pre-app-loader .spinner {
-      width: 40px;
-      height: 40px;
-      border-radius: 50%;
-      border: 3px solid #3f3f46;
-      border-top-color: #6366f1;
-      animation: pre-spin 0.75s linear infinite;
+    #pre-app-loader .slash {
+      fill: #D04A02;
+      animation: pre-pulse 1.4s infinite ease-in-out;
     }
+    #pre-app-loader .slash-1 { animation-delay: 0s; }
+    #pre-app-loader .slash-2 { animation-delay: 0.35s; }
 
-    @keyframes pre-spin {
-      to {
-        transform: rotate(360deg);
-      }
+    @keyframes pre-pulse {
+      0%   { opacity: 0.35; }
+      50%  { opacity: 1; }
+      100% { opacity: 0.35; }
     }
   </style>
 </head>
@@ -59,7 +58,10 @@
         React replaces #root contents on mount, so this disappears automatically.
       -->
     <div id="pre-app-loader">
-      <div class="spinner"></div>
+      <svg width="200" height="90" viewBox="0 0 200 90" xmlns="http://www.w3.org/2000/svg">
+        <polygon class="slash slash-1" points="31,69 97,69 104,50 38,50"/>
+        <polygon class="slash slash-2" points="103,48 168,48 175,28 109,28"/>
+      </svg>
     </div>
   </div>
   <script type="module" src="/src/index.tsx"></script>

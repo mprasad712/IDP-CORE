@@ -29,6 +29,7 @@ from agentcore.services.idp.output import (
     serialize_table,
 )
 from agentcore.services.idp.reports import (
+    MAX_EXPORT_CELLS,
     MAX_EXPORT_ROWS,
     build_doc_meta_query,
     build_header_export_query,
@@ -270,14 +271,19 @@ def _line_row(row_index, cells: dict, line_cols: list[str], values: str) -> list
 # ── Config-driven layout: columns = the chosen config's schema; rows = line items. ──
 
 _META_COLS = [
-    "File", "Document ID", "Type", "Status", "Confidence",
+    "File", "Document ID", "Agent", "Agent ID", "Type", "Status", "Confidence",
     "Uploaded", "Processed", "Reviewed By", "Reviewed At", "Review",
 ]
 
 
-def _meta_cells(did: str, meta: dict, rv: dict | None) -> list:
+def _meta_cells(did: str, meta: dict, rv: dict | None, dm) -> list:
+    # ``dm`` is a build_doc_meta_query row carrying agent_name + agent_base_id (which agent ran the
+    # doc). To revert to the prior (no-agent) export, drop "Agent"/"Agent ID" from _META_COLS + here.
     return [
-        meta["file name"], did, meta["type"], meta["status"], meta["confidence"],
+        meta["file name"], did,
+        getattr(dm, "agent_name", None) or "—",
+        str(getattr(dm, "agent_base_id", "") or "") or "—",
+        meta["type"], meta["status"], meta["confidence"],
         meta["uploaded"], meta["processed"],
         rv["reviewer"] if rv else "—",
         rv["reviewed_at"] if rv else "—",
@@ -295,21 +301,23 @@ def _config_columns(ordered_headers: list[str], ordered_line_cols: list[str], va
 
 
 def _config_matrix(doc_rows, grouped: dict, review_map: dict, ordered_headers: list[str], ordered_line_cols: list[str], values: str) -> list[list]:
-    """Positional matrix: a fixed config column header row, then rows for EACH linked document
-    (``doc_rows`` = the authoritative per-doc list, so a doc with zero extracted fields still
-    appears). ``grouped`` is ``_group_docs`` output keyed by doc id. One row per line item with the
-    doc's meta + header values REPEATED on each row; a doc with no line items — or a config with no
-    line columns — yields one row. Positional (not dict-keyed) because a header field_name and a
-    line column_name can collide."""
+    """Positional matrix: one fixed column header row, then rows for EACH document (``doc_rows`` =
+    the authoritative per-doc list, so a doc with zero extracted fields still appears). ``grouped``
+    is ``_group_docs`` output keyed by doc id. One row per line item; the doc's meta + header values
+    appear on its FIRST line-item row only and are BLANK on the rows below (line items stack under
+    the file). A doc with no line items — or no line columns — yields one row. Positional (not
+    dict-keyed) because a header field_name and a line column_name can collide."""
     matrix: list[list] = [_config_columns(ordered_headers, ordered_line_cols, values)]
     for dm in doc_rows:
         did = str(dm.document_id)
         rv = review_map.get(did)
-        meta_cells = _meta_cells(did, _doc_meta(dm), rv)
+        meta_cells = _meta_cells(did, _doc_meta(dm), rv, dm)
         d = grouped.get(did) or {"headers": {}, "lines": {}}
         header_cells: list = []
         for h in ordered_headers:
             header_cells += _cell_values(d["headers"].get(h), values)
+        blank_meta = [""] * len(meta_cells)
+        blank_header = [""] * len(header_cells)
         lines = d["lines"]
         if not ordered_line_cols or not lines:
             blank_lines: list = []
@@ -317,13 +325,30 @@ def _config_matrix(doc_rows, grouped: dict, review_map: dict, ordered_headers: l
                 blank_lines += _cell_values(None, values)
             matrix.append([*meta_cells, *header_cells, *blank_lines])
             continue
-        for ri in sorted(lines):
+        for i, ri in enumerate(sorted(lines)):
             cells = lines[ri]
             line_cells: list = []
             for c in ordered_line_cols:
                 line_cells += _cell_values(cells.get(c), values)
-            matrix.append([*meta_cells, *header_cells, *line_cells])
+            # File info + header values only on the file's FIRST line-item row; blank below.
+            left = [*meta_cells, *header_cells] if i == 0 else [*blank_meta, *blank_header]
+            matrix.append([*left, *line_cells])
     return matrix
+
+
+def _flat_matrix_cells(doc_rows, grouped: dict, ordered_headers: list[str], ordered_line_cols: list[str], values: str) -> int:
+    """Exact cell count the flat ``_config_matrix`` WOULD produce, computed without building it.
+
+    Mirrors ``_config_matrix``'s row logic 1:1 — one fixed column-header row, then one row per line
+    item (a doc with no line items, or no line columns, emits a single row). Used to reject an
+    oversized flat export (422) BEFORE materialising a giant sparse matrix in memory, since the
+    union layout's WIDTH is unbounded (every distinct field name becomes a column)."""
+    n_cols = len(_config_columns(ordered_headers, ordered_line_cols, values))
+    n_rows = 1  # the column-header row
+    for dm in doc_rows:
+        lines = (grouped.get(str(dm.document_id)) or {}).get("lines") or {}
+        n_rows += len(lines) if (ordered_line_cols and lines) else 1
+    return n_rows * n_cols
 
 
 def _section_matrix(docs, review_map: dict, values: str) -> list[list]:
@@ -398,12 +423,25 @@ async def report_processed_docs(
     predicted_type: str | None = None,
     created_start: datetime | None = None,
     created_end: datetime | None = None,
+    config_id: UUID | None = None,
 ):
-    """Paginated date-range report: one row per processed document with its full timeline."""
+    """Paginated date-range report: one row per processed document with its full timeline.
+
+    ``config_id`` (the Field config dropdown) filters the list to documents extracted with that
+    configuration — same union filter as the config-driven export, so table + export agree.
+    """
     is_root, org_ids = await resolve_org_scope(session, current_user)
+    if config_id is not None:
+        # Access-check the config (404 if missing/soft-deleted/not accessible) — same gate the
+        # config-driven export uses, so the table and export share the exact selectable-config domain.
+        await _load_config_columns(session, current_user, config_id)
     if not is_root and not org_ids:
         return Page.create([], params=params, total=0)
-    stmt = build_report_query(is_root, org_ids, _filters(agent_id, status_filter, predicted_type, created_start, created_end))
+    stmt = build_report_query(
+        is_root, org_ids,
+        _filters(agent_id, status_filter, predicted_type, created_start, created_end),
+        config_id=config_id,
+    )
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"fastapi_pagination\.ext\.sqlalchemy")
         return await apaginate(
@@ -422,8 +460,13 @@ async def export_processed_docs_report(
     predicted_type: str | None = None,
     created_start: datetime | None = None,
     created_end: datetime | None = None,
+    config_id: UUID | None = None,
 ):
-    """Download the summary report (one row per PO) as CSV / Excel / XML."""
+    """Download the summary report (one row per PO) as CSV / Excel / XML.
+
+    Honours the same ``config_id`` filter as the table + all-data export, so the downloaded summary
+    matches the filtered list the user sees.
+    """
     fmt = (format or "").lower()
     if fmt not in SUPPORTED_TABULAR_FORMATS:
         raise HTTPException(
@@ -431,9 +474,15 @@ async def export_processed_docs_report(
             detail=f"Unsupported format '{format}'. Supported: {', '.join(sorted(SUPPORTED_TABULAR_FORMATS))}",
         )
     is_root, org_ids = await resolve_org_scope(session, current_user)
+    if config_id is not None:
+        await _load_config_columns(session, current_user, config_id)  # 404 if inaccessible (parity)
     rows: list[dict] = []
     if is_root or org_ids:
-        stmt = build_report_query(is_root, org_ids, _filters(agent_id, status_filter, predicted_type, created_start, created_end))
+        stmt = build_report_query(
+            is_root, org_ids,
+            _filters(agent_id, status_filter, predicted_type, created_start, created_end),
+            config_id=config_id,
+        )
         total = await count_query(session, stmt)
         if total > MAX_EXPORT_ROWS:
             raise HTTPException(
@@ -487,21 +536,25 @@ async def export_processed_docs_data(
     format: str = "csv",
     values: str = "both",
     config_id: UUID | None = None,
+    layout: str = "flat",
     agent_id: UUID | None = None,
     status_filter: str | None = None,
     predicted_type: str | None = None,
     created_start: datetime | None = None,
     created_end: datetime | None = None,
 ):
-    """Download in-range extracted data as a file, in one of two layouts.
+    """Download in-range extracted data as a file.
 
-    * **No ``config_id`` (default)** — the per-file SECTIONED layout: one self-contained block per
-      file (file-info header above a HEADER FIELDS table beside a LINE ITEMS table), files stacked;
-      mixed document types render cleanly.
-    * **``config_id`` set** — a CONFIG-DRIVEN per-document-row layout: fixed columns from that field
-      configuration's schema (header fields then line-item columns); one row per line item with the
-      document's meta + header values repeated on each row; restricted to documents extracted with
-      that config (named-config agent OR classifier-selected).
+    Default (``layout="flat"``) is a single **flat per-document table**: full meta columns + header
+    field columns + line-item columns; one row per line item, with each file's meta + header values
+    on its FIRST line-item row only (blank on the rows below, so line items stack under the file).
+    Columns come from the selected ``config_id``'s schema (restricted to docs extracted with that
+    config), or — with no config — the UNION of all in-range documents' fields (mixed doc types
+    leave the other types' columns blank).
+
+    ``layout="sectioned"`` (only honoured with NO ``config_id``) falls back to the legacy per-file
+    sectioned blocks — a file-info header above a HEADER FIELDS table beside a LINE ITEMS table —
+    kept so we can compare / switch back without a redeploy.
 
     ``values`` ∈ {final, predicted, audited, both}: final = one final value (audited if reviewed,
     else predicted); predicted = LLM output only; audited = human value only (blank if never
@@ -517,6 +570,16 @@ async def export_processed_docs_data(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"values must be one of: {', '.join(VALUE_MODES)}.",
+        )
+    if layout not in ("flat", "sectioned"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="layout must be 'flat' or 'sectioned'.",
+        )
+    if config_id is not None and layout == "sectioned":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="layout='sectioned' is not supported with a config_id (config exports are always flat).",
         )
 
     is_root, org_ids = await resolve_org_scope(session, current_user)
@@ -547,26 +610,67 @@ async def export_processed_docs_data(
             # Iterate the authoritative linked-doc list (incl. docs with zero extracted fields).
             doc_rows = (await session.exec(dstmt.limit(MAX_EXPORT_ROWS))).all()
             review_map = await _latest_reviews(session, [r.document_id for r in doc_rows])
+            cells = _flat_matrix_cells(doc_rows, grouped, ordered_headers, ordered_line_cols, values)
+            if cells > MAX_EXPORT_CELLS:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Export would build {cells} cells, over the {MAX_EXPORT_CELLS} limit. Narrow the date range or use fewer value columns.",
+                )
             matrix = _config_matrix(doc_rows, grouped, review_map, ordered_headers, ordered_line_cols, values)
         data, media, ext = serialize_matrix(matrix, fmt, sheet_name=cfg_name)
         return _attachment(data, media, f"processed_docs_data.{ext}")
 
-    # No config → existing SECTIONED layout (now supporting the 4 value modes).
-    matrix = []
-    if is_root or org_ids:
-        hstmt = build_header_export_query(is_root, org_ids, filters)
-        lstmt = build_line_export_query(is_root, org_ids, filters)
-        total = await count_query(session, hstmt) + await count_query(session, lstmt)
-        if total > MAX_EXPORT_ROWS:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Export has {total} field rows, over the {MAX_EXPORT_ROWS} limit. Narrow the date range.",
-            )
-        hrows = (await session.exec(hstmt.limit(MAX_EXPORT_ROWS))).all()
-        lrows = (await session.exec(lstmt.limit(MAX_EXPORT_ROWS))).all()
-        docs = _group_docs(hrows, lrows)
-        doc_ids = list({r.document_id for r in hrows} | {r.document_id for r in lrows})
-        review_map = await _latest_reviews(session, doc_ids)
-        matrix = _section_matrix(docs, review_map, values)
+    # No config selected.
+    if layout == "sectioned":
+        # Legacy per-file sectioned blocks — kept for compare / switch-back (?layout=sectioned).
+        matrix = []
+        if is_root or org_ids:
+            hstmt = build_header_export_query(is_root, org_ids, filters)
+            lstmt = build_line_export_query(is_root, org_ids, filters)
+            total = await count_query(session, hstmt) + await count_query(session, lstmt)
+            if total > MAX_EXPORT_ROWS:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Export has {total} field rows, over the {MAX_EXPORT_ROWS} limit. Narrow the date range.",
+                )
+            hrows = (await session.exec(hstmt.limit(MAX_EXPORT_ROWS))).all()
+            lrows = (await session.exec(lstmt.limit(MAX_EXPORT_ROWS))).all()
+            docs = _group_docs(hrows, lrows)
+            doc_ids = list({r.document_id for r in hrows} | {r.document_id for r in lrows})
+            review_map = await _latest_reviews(session, doc_ids)
+            matrix = _section_matrix(docs, review_map, values)
+        data, media, ext = serialize_matrix(matrix, fmt, sheet_name="All Data")
+        return _attachment(data, media, f"processed_docs_data.{ext}")
+
+    # Default FLAT layout over ALL in-range docs; columns = the UNION of every doc's fields
+    # (mixed doc types leave the other types' columns blank), same per-document row shape.
+    if not (is_root or org_ids):
+        matrix = [_config_columns([], [], values)]  # header-only (just the meta columns)
+        data, media, ext = serialize_matrix(matrix, fmt, sheet_name="All Data")
+        return _attachment(data, media, f"processed_docs_data.{ext}")
+    hstmt = build_header_export_query(is_root, org_ids, filters)
+    lstmt = build_line_export_query(is_root, org_ids, filters)
+    dstmt = build_doc_meta_query(is_root, org_ids, filters)
+    total_cells = await count_query(session, hstmt) + await count_query(session, lstmt)
+    doc_count = await count_query(session, dstmt)
+    if total_cells > MAX_EXPORT_ROWS or doc_count > MAX_EXPORT_ROWS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Export is too large ({max(total_cells, doc_count)} over the {MAX_EXPORT_ROWS} limit). Narrow the date range.",
+        )
+    hrows = (await session.exec(hstmt.limit(MAX_EXPORT_ROWS))).all()
+    lrows = (await session.exec(lstmt.limit(MAX_EXPORT_ROWS))).all()
+    grouped = _group_docs(hrows, lrows)
+    ordered_headers = sorted({r.name for r in hrows})       # union of all header field names
+    ordered_line_cols = sorted({r.name for r in lrows})     # union of all line-item column names
+    doc_rows = (await session.exec(dstmt.limit(MAX_EXPORT_ROWS))).all()
+    review_map = await _latest_reviews(session, [r.document_id for r in doc_rows])
+    cells = _flat_matrix_cells(doc_rows, grouped, ordered_headers, ordered_line_cols, values)
+    if cells > MAX_EXPORT_CELLS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Export would build {cells} cells, over the {MAX_EXPORT_CELLS} limit. Narrow the date range, pick a config, or use fewer value columns.",
+        )
+    matrix = _config_matrix(doc_rows, grouped, review_map, ordered_headers, ordered_line_cols, values)
     data, media, ext = serialize_matrix(matrix, fmt, sheet_name="All Data")
     return _attachment(data, media, f"processed_docs_data.{ext}")

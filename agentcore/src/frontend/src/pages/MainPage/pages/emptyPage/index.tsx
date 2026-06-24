@@ -1,4 +1,4 @@
-import MothersonLogo from "@/assets/micore.png?react";
+import MothersonLogo from "@/assets/micore-icon.svg?react";
 import ForwardedIconComponent from "@/components/common/genericIconComponent";
 import CardsWrapComponent from "@/components/core/cardsWrapComponent";
 import { Button } from "@/components/ui/button";

@@ -227,3 +227,141 @@ async def test_sync_email_monitors_skips_non_outlook_and_unknown():
         )
 
     assert created["n"] == 0, "no monitor for an unresolved/non-outlook connector"
+
+
+@pytest.mark.anyio
+async def test_sync_email_monitors_deactivates_orphan():
+    """Re-publishing with a connector node whose node_id CHANGED (deleted + re-added) deactivates
+    the OLD monitor (orphan), so only one active monitor remains per connector node."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from uuid import uuid4
+
+    from agentcore.services.trigger.service import TriggerService
+    from agentcore.services.database.models.trigger_config.model import TriggerTypeEnum
+
+    conn_id = uuid4()
+    fake_conn = SimpleNamespace(id=conn_id, name="MyOutlook", provider="outlook")
+    cc_result = MagicMock()
+    cc_result.scalars.return_value.all.return_value = [fake_conn]
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=cc_result)
+    session.commit = AsyncMock()
+    session.add = MagicMock()
+
+    # An existing ACTIVE email monitor for an OLD node_id (the node the user deleted).
+    old_monitor = SimpleNamespace(
+        id=uuid4(), trigger_type=TriggerTypeEnum.EMAIL_MONITOR, environment="uat",
+        deployment_id=uuid4(), is_active=True,
+        trigger_config={"node_id": "OLD-node", "ingest_mode": "idp_pipeline"},
+    )
+    # New publish: the connector node now has a DIFFERENT node id.
+    flow_data = {"nodes": [{"id": "NEW-node", "data": {"type": "ConnectorInput", "node": {
+        "display_name": "Connector Input", "template": {"connector_name": {"value": "MyOutlook"}}}}}]}
+
+    created = {}
+
+    async def _fake_create(_s, d):
+        created["cfg"] = d.trigger_config
+        return SimpleNamespace(id=uuid4(), trigger_type=d.trigger_type, trigger_config=d.trigger_config)
+
+    svc = TriggerService()
+    crud = "agentcore.services.database.models.trigger_config.crud"
+    with patch(f"{crud}.get_triggers_by_agent_id", AsyncMock(return_value=[old_monitor])), \
+         patch(f"{crud}.create_trigger_config", _fake_create), \
+         patch.object(svc, "register_email_monitor", AsyncMock()), \
+         patch.object(svc, "unregister", AsyncMock()) as unreg:
+        await svc.sync_email_monitors_for_agent(
+            session=session, agent_id=uuid4(), environment="uat", version="2",
+            deployment_id=uuid4(), flow_data=flow_data, created_by=uuid4(),
+        )
+
+    assert old_monitor.is_active is False                       # orphan deactivated
+    unreg.assert_any_await(old_monitor.id)                      # and its task unregistered
+    assert created.get("cfg", {}).get("node_id") == "NEW-node"  # one new monitor for the current node
+
+
+@pytest.mark.anyio
+async def test_sync_email_monitors_deactivates_all_when_node_removed():
+    """Publishing with NO connector node (removed entirely) deactivates the agent's email monitors."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from uuid import uuid4
+
+    from agentcore.services.trigger.service import TriggerService
+    from agentcore.services.database.models.trigger_config.model import TriggerTypeEnum
+
+    session = MagicMock()
+    session.execute = AsyncMock()
+    session.commit = AsyncMock()
+    session.add = MagicMock()
+    old = SimpleNamespace(
+        id=uuid4(), trigger_type=TriggerTypeEnum.EMAIL_MONITOR, environment="uat",
+        deployment_id=uuid4(), is_active=True, trigger_config={"node_id": "GONE-node"},
+    )
+    flow_data = {"nodes": []}  # connector node removed
+
+    svc = TriggerService()
+    crud = "agentcore.services.database.models.trigger_config.crud"
+    with patch(f"{crud}.get_triggers_by_agent_id", AsyncMock(return_value=[old])), \
+         patch.object(svc, "unregister", AsyncMock()) as unreg:
+        await svc.sync_email_monitors_for_agent(
+            session=session, agent_id=uuid4(), environment="uat", version="2",
+            deployment_id=uuid4(), flow_data=flow_data, created_by=uuid4(),
+        )
+    assert old.is_active is False
+    unreg.assert_any_await(old.id)
+
+
+@pytest.mark.anyio
+async def test_sync_email_monitors_deactivates_on_provider_change():
+    """Re-publishing where the SAME connector node (same node_id) was switched from Outlook to a
+    non-Outlook provider deactivates its now-stale email monitor — the node no longer resolves to an
+    Outlook email cfg, so it is no longer 'live' — and spawns NO replacement poller."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from uuid import uuid4
+
+    from agentcore.services.trigger.service import TriggerService
+    from agentcore.services.database.models.trigger_config.model import TriggerTypeEnum
+
+    # Catalogue has an Outlook connector, but node N1 now points at a SharePoint one (unresolvable
+    # among the Outlook rows → _cfg_from_node returns None).
+    cc_result = MagicMock()
+    cc_result.scalars.return_value.all.return_value = [
+        SimpleNamespace(id=uuid4(), name="MyOutlook", provider="outlook")
+    ]
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=cc_result)
+    session.commit = AsyncMock()
+    session.add = MagicMock()
+
+    old_monitor = SimpleNamespace(
+        id=uuid4(), trigger_type=TriggerTypeEnum.EMAIL_MONITOR, environment="uat",
+        deployment_id=uuid4(), is_active=True,
+        trigger_config={"node_id": "N1", "ingest_mode": "idp_pipeline"},
+    )
+    # Same node id N1, but its connector is now SharePoint → not an Outlook email node.
+    flow_data = {"nodes": [{"id": "N1", "data": {"type": "ConnectorInput", "node": {
+        "display_name": "Connector Input", "template": {"connector_name": {"value": "MySharePoint"}}}}}]}
+
+    created = {"n": 0}
+
+    async def _fake_create(_s, d):
+        created["n"] += 1
+        return SimpleNamespace(id=uuid4(), trigger_type=d.trigger_type, trigger_config=d.trigger_config)
+
+    svc = TriggerService()
+    crud = "agentcore.services.database.models.trigger_config.crud"
+    with patch(f"{crud}.get_triggers_by_agent_id", AsyncMock(return_value=[old_monitor])), \
+         patch(f"{crud}.create_trigger_config", _fake_create), \
+         patch.object(svc, "register_email_monitor", AsyncMock()), \
+         patch.object(svc, "unregister", AsyncMock()) as unreg:
+        await svc.sync_email_monitors_for_agent(
+            session=session, agent_id=uuid4(), environment="uat", version="2",
+            deployment_id=uuid4(), flow_data=flow_data, created_by=uuid4(),
+        )
+
+    assert old_monitor.is_active is False        # stale Outlook monitor deactivated
+    unreg.assert_any_await(old_monitor.id)        # its polling task unregistered
+    assert created["n"] == 0                       # the SharePoint node spawns no email poller
