@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import and_, func, or_
+from sqlalchemy.orm import aliased
 from sqlmodel import select
 
 from agentcore.services.database.models.agent.model import Agent
@@ -148,8 +149,13 @@ def _line_count_subq():
     )
 
 
-def build_report_query(is_root: bool, org_ids: list, filters: dict[str, Any]):
-    """Build the summary report SELECT: one row per document + timeline/job/review/counts."""
+def build_report_query(is_root: bool, org_ids: list, filters: dict[str, Any], *, config_id=None):
+    """Build the summary report SELECT: one row per document + timeline/job/review/counts.
+
+    ``config_id`` (optional) restricts the list to documents EXTRACTED WITH that field
+    configuration — the SAME union filter the config-driven export uses — so the Reports table
+    and the "Download all data" export stay consistent when a Field config is selected.
+    """
     lj = _latest_job_subq()
     lr = _latest_review_subq()
     hc = _header_count_subq()
@@ -165,7 +171,7 @@ def build_report_query(is_root: bool, org_ids: list, filters: dict[str, Any]):
         func.coalesce(hc.c.header_count, 0).label("header_count"),
         func.coalesce(lc.c.line_item_count, 0).label("line_item_count"),
     ).select_from(IdpDocument)
-    stmt = _apply_doc_scope_and_filters(stmt, is_root, org_ids, filters)
+    stmt = _apply_doc_scope_and_filters(stmt, is_root, org_ids, filters, config_id=config_id)
     stmt = stmt.outerjoin(lj, lj.c.document_id == IdpDocument.id)
     stmt = stmt.outerjoin(lr, lr.c.document_id == IdpDocument.id)
     stmt = stmt.outerjoin(hc, hc.c.document_id == IdpDocument.id)
@@ -227,7 +233,12 @@ def build_doc_meta_query(is_root: bool, org_ids: list, filters: dict[str, Any], 
     The config-driven layout iterates THIS (the authoritative doc list) — not the extracted-field
     rows — so a linked document with zero extracted headers/line items still appears as one row
     (meta + blank fields) instead of being dropped. Same ordering as the field-export queries.
+
+    Also carries the processing agent's name + base id (which agent ran the doc) via a SEPARATE
+    ``aliased(Agent)`` join — aliased so it can't collide with the conditional non-root scope
+    ``Agent`` join inside ``_apply_doc_scope_and_filters``.
     """
+    name_agent = aliased(Agent)
     stmt = select(
         IdpDocument.id.label("document_id"),
         IdpDocument.original_filename.label("filename"),
@@ -236,8 +247,11 @@ def build_doc_meta_query(is_root: bool, org_ids: list, filters: dict[str, Any], 
         IdpDocument.overall_confidence.label("overall_confidence"),
         IdpDocument.created_at.label("uploaded_at"),
         IdpDocument.processing_completed_at.label("processed_at"),
+        name_agent.name.label("agent_name"),
+        name_agent.id.label("agent_base_id"),
     ).select_from(IdpDocument)
     stmt = _apply_doc_scope_and_filters(stmt, is_root, org_ids, filters, config_id=config_id)
+    stmt = stmt.join(name_agent, IdpAgent.agent_id == name_agent.id)
     return stmt.order_by(IdpDocument.created_at.desc(), IdpDocument.id)
 
 

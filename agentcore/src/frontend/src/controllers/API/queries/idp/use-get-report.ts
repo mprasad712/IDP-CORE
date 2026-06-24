@@ -39,6 +39,7 @@ export interface GetReportParams {
   predicted_type?: string;
   created_start?: string;
   created_end?: string;
+  config_id?: string; // field-configuration id; filters the table to docs extracted with it
 }
 
 export const useGetReport: useQueryFunctionType<GetReportParams, ReportPage> = (
@@ -56,6 +57,7 @@ export const useGetReport: useQueryFunctionType<GetReportParams, ReportPage> = (
     if (params?.predicted_type) qp.predicted_type = params.predicted_type;
     if (params?.created_start) qp.created_start = params.created_start;
     if (params?.created_end) qp.created_end = params.created_end;
+    if (params?.config_id) qp.config_id = params.config_id;
 
     const res = await api.get(`${getURL("IDP_REPORTS")}/processed-docs`, {
       params: Object.keys(qp).length > 0 ? qp : undefined,
@@ -71,6 +73,7 @@ export const useGetReport: useQueryFunctionType<GetReportParams, ReportPage> = (
       params?.predicted_type ?? "all",
       params?.created_start ?? "",
       params?.created_end ?? "",
+      params?.config_id ?? "all",
       params?.page ?? 1,
       params?.size ?? 25,
     ],
