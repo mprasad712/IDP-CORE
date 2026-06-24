@@ -12,12 +12,14 @@ from __future__ import annotations
 import base64
 import json
 import secrets
+import threading
 import time
 from datetime import datetime, timezone
 from urllib.parse import quote, urlencode, urlparse
 from uuid import UUID
 
 import httpx
+from cachetools import TTLCache
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from loguru import logger
@@ -48,6 +50,11 @@ AUTHORIZE_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
 FILE_SCOPES = "Files.Read Files.ReadWrite User.Read offline_access"
 
 _STATE_TTL_SECONDS = 600  # 10 minutes
+
+# Short-lived cache of folder/file listings so repeat opens + drill-downs of the picker are instant
+# (one Graph round-trip is otherwise ~0.5–1s). Keyed by (connector_id, account_email, folder_path).
+_list_cache: TTLCache = TTLCache(maxsize=256, ttl=60)
+_list_cache_lock = threading.Lock()
 
 
 async def _store_oauth_state(state: str, data: dict) -> None:
@@ -444,6 +451,13 @@ async def list_files(
     if not acct:
         raise HTTPException(status_code=404, detail="No linked OneDrive account. Link one via OAuth first.")
 
+    # Serve from cache when warm — makes repeat opens / drill-downs of the folder picker instant.
+    cache_key = (str(connector_id), acct.get("email", ""), req.folder_path, req.top)
+    with _list_cache_lock:
+        cached = _list_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     access_token, refreshed = await _refresh_token_if_needed(config, acct)
     if refreshed:
         await _save_updated_config(session, row, config, current_user.id)
@@ -478,12 +492,15 @@ async def list_files(
             entry["mimeType"] = item["file"].get("mimeType", "")
         items.append(entry)
 
-    return {
+    result = {
         "account_email": acct.get("email", ""),
         "folder_path": req.folder_path,
         "count": len(items),
         "items": items,
     }
+    with _list_cache_lock:
+        _list_cache[cache_key] = result
+    return result
 
 
 @router.post("/{connector_id}/read")
