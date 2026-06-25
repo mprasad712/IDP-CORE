@@ -7,6 +7,7 @@ import { UseRequestProcessor } from "../../services/request-processor";
 export interface ProcessedDoc {
   id: string;
   agent_id: string;
+  agent_name?: string | null;
   parent_document_id: string | null;
   original_filename: string;
   file_path: string;

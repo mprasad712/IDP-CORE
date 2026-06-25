@@ -60,9 +60,10 @@ from .cost_limit import CostLimit
 from .cost_limit_notification import CostLimitNotification
 from .guardrail_execution_log import GuardrailExecutionLog
 
-# IDP (Intelligent Document Processing) — 16 new additive idp_* tables
+# IDP (Intelligent Document Processing) — 19 new additive idp_* tables
 from .idp import (
     IdpAgent,
+    IdpAgentMatchConfig,
     IdpAgentRule,
     IdpBulkProcessingBatch,
     IdpDetectedElement,
@@ -76,12 +77,15 @@ from .idp import (
     IdpFieldConfigHeader,
     IdpFieldConfigLineItem,
     IdpFieldConfiguration,
+    IdpMatchDiscrepancy,
+    IdpMatchResult,
     IdpProcessingJob,
     IdpReviewSession,
 )
 
 __all__ = [
     "IdpAgent",
+    "IdpAgentMatchConfig",
     "IdpAgentRule",
     "IdpBulkProcessingBatch",
     "IdpDetectedElement",
@@ -95,6 +99,8 @@ __all__ = [
     "IdpFieldConfigHeader",
     "IdpFieldConfigLineItem",
     "IdpFieldConfiguration",
+    "IdpMatchDiscrepancy",
+    "IdpMatchResult",
     "IdpProcessingJob",
     "IdpReviewSession",
     "Agent",

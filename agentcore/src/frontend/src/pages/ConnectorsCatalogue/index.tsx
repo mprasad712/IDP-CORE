@@ -24,6 +24,7 @@ import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 import OutlookConnectorForm from "./components/OutlookConnectorForm";
 import OneDriveConnectorForm from "./components/OneDriveConnectorForm";
+import SapConnectorForm, { type SapFormFields } from "./components/SapConnectorForm";
 import { ENABLE_OUTLOOK_CONNECTOR } from "@/customization/feature-flags";
 import { Button } from "@/components/ui/button";
 import {
@@ -61,7 +62,8 @@ type ProviderFilter =
   | "azure_blob"
   | "sharepoint"
   | "outlook"
-  | "onedrive";
+  | "onedrive"
+  | "sap_s4hana";
 
 const PROVIDER_LABELS: Record<string, string> = {
   postgresql: "PostgreSQL",
@@ -72,6 +74,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   sharepoint: "SharePoint",
   outlook: "Microsoft Outlook",
   onedrive: "OneDrive",
+  sap_s4hana: "SAP S/4HANA",
 };
 
 const PROVIDER_PORTS: Record<string, number> = {
@@ -85,6 +88,8 @@ const DB_PROVIDERS = new Set(["postgresql", "oracle", "sqlserver", "mysql"]);
 const STORAGE_PROVIDERS = new Set(["azure_blob", "sharepoint"]);
 // Providers that authenticate via delegated OAuth (sign-in + linked accounts): Outlook + OneDrive.
 const OAUTH_PROVIDERS = new Set(["outlook", "onedrive"]);
+// SAP S/4HANA OData providers.
+const SAP_PROVIDERS = new Set(["sap_s4hana"]);
 const DEFAULT_CONNECTOR_HOST =
   getRuntimeEnv("DEFAULT_CONNECTOR_HOST") ||
   getRuntimeEnv("HOST_IP") ||
@@ -124,6 +129,13 @@ const BLANK_FORM = {
   // OneDrive fields (delegated OAuth; /common authority needs no tenant)
   onedrive_client_id: "",
   onedrive_client_secret: "",
+  // SAP S/4HANA fields
+  sap_base_url: "https://sandbox.api.sap.com/s4hanacloud/sap/opu/odata/sap",
+  sap_auth_mode: "api_key",
+  sap_api_key: "",
+  sap_oauth_token_url: "",
+  sap_client_id: "",
+  sap_client_secret: "",
   visibility: "private",
   public_scope: "department",
   org_id: "",
@@ -530,6 +542,13 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       // OneDrive (client_secret is masked; user must re-enter to update)
       onedrive_client_id: cfg.client_id ?? "",
       onedrive_client_secret: "",
+      // SAP S/4HANA (api_key and client_secret are masked on edit)
+      sap_base_url: cfg.base_url ?? "https://sandbox.api.sap.com/s4hanacloud/sap/opu/odata/sap",
+      sap_auth_mode: (cfg.auth_mode as "api_key" | "oauth2") ?? "api_key",
+      sap_api_key: "",
+      sap_oauth_token_url: cfg.oauth_token_url ?? "",
+      sap_client_id: cfg.client_id ?? "",
+      sap_client_secret: "",
       visibility: connector.visibility ?? "private",
       public_scope: connector.public_scope ?? "department",
       org_id: connector.org_id ?? "",
@@ -656,6 +675,27 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       };
     }
 
+    if (form.provider === "sap_s4hana") {
+      const provider_config: Record<string, string> = {
+        base_url: form.sap_base_url,
+        auth_mode: form.sap_auth_mode,
+      };
+      if (form.sap_auth_mode === "api_key") {
+        if (form.sap_api_key) provider_config.api_key = form.sap_api_key;
+      } else {
+        if (form.sap_oauth_token_url) provider_config.oauth_token_url = form.sap_oauth_token_url;
+        if (form.sap_client_id) provider_config.client_id = form.sap_client_id;
+        if (form.sap_client_secret) provider_config.client_secret = form.sap_client_secret;
+      }
+      return {
+        name: form.name,
+        description: form.description || undefined,
+        provider: "sap_s4hana",
+        provider_config,
+        ...scopePayload,
+      };
+    }
+
     // DB provider
     const payload: any = {
       name: form.name,
@@ -706,6 +746,13 @@ export default function ConnectorsCatalogueView(): JSX.Element {
     } else if (form.provider === "onedrive") {
       if (!form.onedrive_client_id) return true;
       if (!editingConnector && !form.onedrive_client_secret) return true;
+    } else if (form.provider === "sap_s4hana") {
+      if (!form.sap_base_url) return true;
+      if (form.sap_auth_mode === "api_key" && !editingConnector && !form.sap_api_key) return true;
+      if (form.sap_auth_mode === "oauth2") {
+        if (!form.sap_oauth_token_url || !form.sap_client_id) return true;
+        if (!editingConnector && !form.sap_client_secret) return true;
+      }
     } else {
       // DB provider
       if (!form.host || !form.database_name || !form.username) return true;
@@ -850,6 +897,19 @@ export default function ConnectorsCatalogueView(): JSX.Element {
             client_secret: form.onedrive_client_secret,
           },
         };
+      } else if (form.provider === "sap_s4hana") {
+        const provider_config: Record<string, string> = {
+          base_url: form.sap_base_url,
+          auth_mode: form.sap_auth_mode,
+        };
+        if (form.sap_auth_mode === "api_key") {
+          provider_config.api_key = form.sap_api_key;
+        } else {
+          provider_config.oauth_token_url = form.sap_oauth_token_url;
+          provider_config.client_id = form.sap_client_id;
+          provider_config.client_secret = form.sap_client_secret;
+        }
+        payload = { provider: form.provider, provider_config };
       } else {
         payload = {
           provider: form.provider,
@@ -971,6 +1031,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       sharepoint: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
       outlook: "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400",
       onedrive: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+      sap_s4hana: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
     };
     return styles[provider] || "bg-gray-100 text-gray-700";
   };
@@ -985,16 +1046,19 @@ export default function ConnectorsCatalogueView(): JSX.Element {
     if (c.provider === "outlook" || c.provider === "onedrive") {
       return c.provider_config?.client_id ?? "—";
     }
+    if (c.provider === "sap_s4hana") {
+      return c.provider_config?.base_url ?? "—";
+    }
     return c.host ? `${c.host}:${c.port}` : "—";
   };
 
   const getConnectorDb = (c: ConnectorInfo): string => {
-    if (STORAGE_PROVIDERS.has(c.provider) || OAUTH_PROVIDERS.has(c.provider)) return "—";
+    if (STORAGE_PROVIDERS.has(c.provider) || OAUTH_PROVIDERS.has(c.provider) || SAP_PROVIDERS.has(c.provider)) return "—";
     return c.database_name ?? "—";
   };
 
   const getConnectorSchema = (c: ConnectorInfo): string => {
-    if (STORAGE_PROVIDERS.has(c.provider) || OAUTH_PROVIDERS.has(c.provider)) return "—";
+    if (STORAGE_PROVIDERS.has(c.provider) || OAUTH_PROVIDERS.has(c.provider) || SAP_PROVIDERS.has(c.provider)) return "—";
     return c.schema_name ?? "—";
   };
 
@@ -1009,7 +1073,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
     return t("Private");
   };
 
-  const FILTER_TABS: ProviderFilter[] = ["all", "postgresql", "oracle", "sqlserver", "mysql", "azure_blob", "sharepoint", "onedrive", ...(ENABLE_OUTLOOK_CONNECTOR ? ["outlook" as const] : [])];
+  const FILTER_TABS: ProviderFilter[] = ["all", "postgresql", "oracle", "sqlserver", "mysql", "azure_blob", "sharepoint", "onedrive", "sap_s4hana", ...(ENABLE_OUTLOOK_CONNECTOR ? ["outlook" as const] : [])];
 
   /* ---- JSX ---- */
   if (!canViewConnectorPage) {
@@ -1182,6 +1246,8 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                               <Cloud className="h-3 w-3" />
                             ) : c.provider === "outlook" ? (
                               <Mail className="h-3 w-3" />
+                            ) : SAP_PROVIDERS.has(c.provider) ? (
+                              <Cable className="h-3 w-3" />
                             ) : (
                               <Database className="h-3 w-3" />
                             )}
@@ -1540,6 +1606,9 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                     <option value="outlook">Microsoft Outlook</option>
                   </optgroup>
                   )}
+                  <optgroup label={t("ERP")}>
+                    <option value="sap_s4hana">SAP S/4HANA</option>
+                  </optgroup>
                 </select>
               </div>
 
@@ -1788,6 +1857,22 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                   onChange={(field, value) => setForm({ ...form, [field]: value })}
                   isEditing={!!editingConnector}
                   connectorId={editingConnector?.id}
+                />
+              )}
+
+              {/* ── SAP S/4HANA fields ── */}
+              {form.provider === "sap_s4hana" && (
+                <SapConnectorForm
+                  form={{
+                    base_url: form.sap_base_url,
+                    auth_mode: form.sap_auth_mode as "api_key" | "oauth2",
+                    api_key: form.sap_api_key,
+                    oauth_token_url: form.sap_oauth_token_url,
+                    client_id: form.sap_client_id,
+                    client_secret: form.sap_client_secret,
+                  }}
+                  onChange={(field, value) => setForm({ ...form, [`sap_${field}`]: value })}
+                  isEditing={!!editingConnector}
                 />
               )}
 

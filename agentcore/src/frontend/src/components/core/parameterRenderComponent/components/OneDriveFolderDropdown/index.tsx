@@ -45,40 +45,30 @@ export default function OneDriveFolderDropdown({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchFolders = async () => {
+  // List the folders directly under `path` and merge them into the option set. One Graph call —
+  // drilling deeper happens lazily when the user picks a folder (see onChange), so opening the
+  // dropdown is fast no matter how many folders the drive has.
+  const loadChildren = async (path: string, replace = false) => {
     if (!connector?.id) return;
     setLoading(true);
     setError(null);
     try {
-      const out: string[] = [];
-      const root = await api.post(`/api/onedrive/${connector.id}/list`, {
-        folder_path: "",
+      const res = await api.post(`/api/onedrive/${connector.id}/list`, {
+        folder_path: path,
         top: 200,
       });
-      const rootFolders = (root.data?.items ?? [])
+      const kids = (res.data?.items ?? [])
         .filter((i: any) => i.type === "folder")
-        .map((i: any) => i.name as string);
-      for (const name of rootFolders) {
-        out.push(name);
-        try {
-          const sub = await api.post(`/api/onedrive/${connector.id}/list`, {
-            folder_path: name,
-            top: 200,
-          });
-          (sub.data?.items ?? [])
-            .filter((i: any) => i.type === "folder")
-            .forEach((i: any) => out.push(`${name}/${i.name}`));
-        } catch {
-          // ignore subfolder listing failures — keep the top-level folder
-        }
-      }
-      setFolders(out);
+        .map((i: any) => (path ? `${path}/${i.name}` : (i.name as string)));
+      setFolders((prev) =>
+        replace ? kids : Array.from(new Set([...prev, ...kids])),
+      );
     } catch (e: any) {
       setError(
         e?.response?.data?.detail ||
           "Could not list folders. Make sure the OneDrive account is linked.",
       );
-      setFolders([]);
+      if (replace) setFolders([]);
     } finally {
       setLoading(false);
     }
@@ -86,7 +76,7 @@ export default function OneDriveFolderDropdown({
 
   useEffect(() => {
     if (connector?.id) {
-      void fetchFolders();
+      void loadChildren("", true); // top-level folders only — fast
     } else {
       setFolders([]);
     }
@@ -101,6 +91,8 @@ export default function OneDriveFolderDropdown({
       { value: folderValue, load_from_db: dbValue },
       { skipSnapshot },
     );
+    // Lazily fetch the picked folder's subfolders so the user can drill deeper.
+    if (folderValue) void loadChildren(folderValue);
   };
 
   const placeholder = !connectorName
@@ -134,7 +126,7 @@ export default function OneDriveFolderDropdown({
       {connector && (
         <button
           type="button"
-          onClick={() => void fetchFolders()}
+          onClick={() => void loadChildren("", true)}
           disabled={loading}
           className="self-end text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
         >
