@@ -131,6 +131,7 @@ dependencies = [
     "aiosqlite==0.21.0",
     "fastparquet>=2024.11.0,<2025.0.0",
     "opencv-python-headless>=4.11; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "onnxruntime>=1.17.0,<2.0.0",
     "toml>=0.10.2",
     "sqlparse",
     "matplotlib",

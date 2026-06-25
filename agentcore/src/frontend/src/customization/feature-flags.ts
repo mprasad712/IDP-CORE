@@ -17,3 +17,4 @@ export const ENABLE_MCP_NOTICE = false;
 export const ENABLE_KNOWLEDGE_BASES = false;
 export const ENABLE_NEW_SIDEBAR = true;
 export const ENABLE_OUTLOOK_CONNECTOR = true;
+export const ENABLE_GMAIL_CONNECTOR = true;

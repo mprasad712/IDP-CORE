@@ -344,7 +344,10 @@ async def get_processed_doc_file(
     return StreamingResponse(
         io.BytesIO(file_bytes),
         media_type=mime_type,
-        headers={"Content-Disposition": f'inline; filename="{serving_doc.original_filename}"'},
+        headers={
+            "Content-Disposition": f'inline; filename="{serving_doc.original_filename}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 
