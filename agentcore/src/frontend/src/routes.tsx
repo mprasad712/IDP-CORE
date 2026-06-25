@@ -59,6 +59,7 @@ const ProcessedDocsPage           = lazy(() => import("./pages/ProcessedDocsPage
 const ReportsPage                 = lazy(() => import("./pages/ReportsPage"));
 const IdpUploadPage               = lazy(() => import("./pages/IdpUploadPage"));
 const ObservabilityPage           = lazy(() => import("./pages/ObservabilityPage"));
+const LogsPage                    = lazy(() => import("./pages/LogsPage"));
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -271,6 +272,14 @@ const router = createBrowserRouter(
                     element={
                       <ProtectedPermissionRoute permission="view_idp">
                         <Suspense fallback={<PageLoader />}><IdpUploadPage /></Suspense>
+                      </ProtectedPermissionRoute>
+                    }
+                  />
+                  <Route
+                    path="idp-logs"
+                    element={
+                      <ProtectedPermissionRoute permission="view_idp">
+                        <Suspense fallback={<PageLoader />}><LogsPage /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />

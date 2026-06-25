@@ -9,8 +9,9 @@ from functools import lru_cache
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update as sqla_update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import get_settings
 from app.models.registry import (
@@ -147,6 +148,7 @@ async def create_model(
                 "api_key_source": "azure_key_vault",
             }
             row.api_key_secret_ref = secret_name
+        flag_modified(row, "provider_config")
 
     await session.commit()
     await session.refresh(row)
@@ -201,18 +203,28 @@ async def update_model(
 
     update_fields = data.model_dump(exclude_unset=True)
 
-    # Handle API key separately
+    # Handle API key and provider_config separately to avoid the generic field
+    # loop overwriting the encrypted key stored in provider_config.
     plain_key = update_fields.pop("api_key", None)
+    incoming_provider_config = update_fields.pop("provider_config", None)
+
     if (row.provider or "").strip().lower() in API_KEY_REQUIRED_PROVIDERS:
-        if not plain_key and not row.api_key_secret_ref:
+        existing_enc = (row.provider_config or {}).get("api_key_encrypted")
+        has_key = bool(plain_key) or bool(row.api_key_secret_ref) or bool(existing_enc)
+        if not has_key:
             raise HTTPException(status_code=400, detail="API key is required for this provider.")
+
+    # Build the new provider_config in-memory (never mutate row.provider_config via ORM
+    # to avoid SQLAlchemy JSON change-tracking silently dropping the update).
+    final_config = dict(row.provider_config or {})
+
+    new_secret_ref = row.api_key_secret_ref  # may be updated in key-vault branch
+
     if plain_key:
-        provider_config = dict(row.provider_config or {})
         if key_vault is None:
             # Local mode: encrypt the provider key into the DB (no Key Vault).
-            provider_config["api_key_source"] = "local_encrypted"
-            provider_config["api_key_encrypted"] = _encrypt_local(plain_key)
-            row.provider_config = provider_config
+            final_config["api_key_source"] = "local_encrypted"
+            final_config["api_key_encrypted"] = _encrypt_local(plain_key)
         else:
             secret_name = row.api_key_secret_ref or model_api_key_secret_name(
                 settings.key_vault_secret_prefix,
@@ -226,15 +238,43 @@ async def update_model(
                 plain_key,
                 tags={"service": "model-service", "type": "provider-api-key"},
             )
-            provider_config["api_key_source"] = "azure_key_vault"
-            row.provider_config = provider_config
-            row.api_key_secret_ref = secret_name
+            final_config["api_key_source"] = "azure_key_vault"
+            new_secret_ref = secret_name
 
+    # Merge incoming provider_config on top, preserving encrypted key fields.
+    if incoming_provider_config is not None:
+        final_config = {
+            **final_config,
+            **{k: v for k, v in incoming_provider_config.items()
+               if k not in ("api_key_encrypted", "api_key_source")},
+        }
+
+    logger.debug(
+        "update_model %s: saving provider_config, has_api_key_encrypted=%s",
+        model_id,
+        bool(final_config.get("api_key_encrypted")),
+    )
+
+    # Use a direct SQL UPDATE for provider_config to guarantee the JSON column
+    # is written regardless of SQLAlchemy's in-memory change-tracking behaviour.
+    sql_values: dict = {
+        "provider_config": final_config,
+        "updated_at": datetime.utcnow(),
+    }
+    if new_secret_ref != row.api_key_secret_ref:
+        sql_values["api_key_secret_ref"] = new_secret_ref
+
+    await session.execute(
+        sqla_update(ModelRegistry)
+        .where(ModelRegistry.id == row.id)
+        .values(**sql_values)
+        .execution_options(synchronize_session="fetch")
+    )
+
+    # Apply remaining scalar field updates via ORM (display_name, model_name, etc.)
     for field, value in update_fields.items():
         setattr(row, field, value)
 
-    row.updated_at = datetime.utcnow()
-    session.add(row)
     await session.commit()
     await session.refresh(row)
     return ModelRegistryRead.from_orm_model(row)

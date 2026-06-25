@@ -135,8 +135,32 @@ def _export(model_dir: str) -> bool:
     print(f"  Model:  {model_file}")
     print(f"  Params: {params_file}")
 
+    is_pir = model_file.endswith(".json")
+
     try:
         import paddle2onnx  # noqa: PLC0415
+
+        # paddle2onnx <2.x does not support the PIR (.json) format introduced in
+        # PaddlePaddle 3.x.  Fail fast with an actionable message instead of
+        # producing a silent 0-byte file.
+        if is_pir:
+            ver = tuple(int(x) for x in getattr(paddle2onnx, "__version__", "0").split(".")[:2])
+            if ver < (2, 0):
+                print(
+                    f"  ERROR: paddle2onnx {paddle2onnx.__version__} cannot convert PIR format.\n"
+                    "  On Windows, run the Docker-based export instead:\n"
+                    "    docker run --rm \\\n"
+                    f"      -v \"{model_dir}:/model:ro\" \\\n"
+                    f"      -v \"{_MODELS_DIR}:/output\" \\\n"
+                    "      python:3.12-slim \\\n"
+                    "      bash -c \"pip install -q paddlepaddle==3.0.0 paddle2onnx && \\\n"
+                    "        paddle2onnx --model_dir /model \\\n"
+                    "          --model_filename inference.json \\\n"
+                    "          --params_filename inference.pdiparams \\\n"
+                    f"          --save_file /output/doc_orientation.onnx \\\n"
+                    "          --opset_version 11\""
+                )
+                return False
 
         model_full = os.path.join(model_dir, model_file)
         params_full = os.path.join(model_dir, params_file)
@@ -148,10 +172,11 @@ def _export(model_dir: str) -> bool:
             opset_version=11,
             enable_onnx_checker=True,
         )
-        size_mb = os.path.getsize(_ONNX_OUT) / 1_048_576
+        size_mb = os.path.getsize(_ONNX_OUT) / 1_048_576 if os.path.exists(_ONNX_OUT) else 0
         if size_mb < 0.1:
-            print(f"  ERROR: output ONNX is only {size_mb:.2f} MB — PIR format not supported by this paddle2onnx version.")
-            os.remove(_ONNX_OUT)
+            print(f"  ERROR: output ONNX is {size_mb:.2f} MB — export failed silently.")
+            if os.path.exists(_ONNX_OUT):
+                os.remove(_ONNX_OUT)
             return False
         print(f"  Exported ({size_mb:.1f} MB) -> {_ONNX_OUT}")
         return True
