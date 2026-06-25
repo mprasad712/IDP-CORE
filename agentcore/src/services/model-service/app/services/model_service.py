@@ -98,7 +98,18 @@ async def _resolve_registry_config(request: ChatCompletionRequest) -> ChatComple
 
     # Build merged provider_config from registry data
     provider_config = dict(config.get("provider_config", {}))
-    provider_config["api_key"] = config["api_key"]
+    api_key = config.get("api_key", "")
+    if not api_key:
+        logger.error(
+            "API key missing for registry model %s (provider=%s, model=%s). "
+            "Re-save the model in the Model Registry.",
+            registry_model_id, config.get("provider"), config.get("model_name"),
+        )
+        raise ValueError(
+            f"API key not found for registry model {registry_model_id}. "
+            "Open the Model Registry, find this model, enter the API key, and save."
+        )
+    provider_config["api_key"] = api_key
     if config.get("base_url"):
         provider_config["base_url"] = config["base_url"]
         # Azure needs azure_endpoint too

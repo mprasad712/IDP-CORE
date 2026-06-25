@@ -54,6 +54,7 @@ export const URLs = {
   IDP_REPORTS: `v1/idp/reports`,
   IDP_MATCHING: `v1/idp/matching`,
   IDP_MATCHING_CONFIG: `v1/idp/matching/config`,
+  IDP_LOGS: `v1/idp/logs`,
   OBSERVABILITY: `observability`,
   TAGS: `tags`,
   COST_LIMITS: `cost-limits`,

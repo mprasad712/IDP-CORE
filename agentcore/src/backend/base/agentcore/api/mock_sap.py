@@ -33,8 +33,8 @@ _MOCK_PO: dict[str, dict[str, Any]] = {
         "SupplierName": "Acme Technologies Ltd",
         "CompanyCode": "1000",
         "DocumentCurrency": "INR",
-        "NetPaymentAmount": "118000.00",
-        "TotalNetAmount": "118000.00",
+        "NetPaymentAmount": "139240.00",
+        "TotalNetAmount": "139240.00",
         "PurchaseOrderDate": "/Date(1735689600000)/",
         "to_PurchaseOrderItem": {
             "results": [
@@ -71,16 +71,16 @@ _MOCK_PO: dict[str, dict[str, Any]] = {
         "SupplierName": "Infosys BPO Services Ltd",
         "CompanyCode": "1000",
         "DocumentCurrency": "INR",
-        "NetPaymentAmount": "269750.00",
-        "TotalNetAmount": "269750.00",
+        "NetPaymentAmount": "353410.00",
+        "TotalNetAmount": "353410.00",
         "PurchaseOrderDate": "/Date(1735689600000)/",
         "to_PurchaseOrderItem": {
             "results": [
                 {
                     "PurchaseOrder": "4500000002",
                     "PurchaseOrderItem": "00010",
-                    "Material": "SERVER-R740",
-                    "PurchaseOrderItemText": "Dell PowerEdge R740 Server",
+                    "Material": "SVC-CONSULT",
+                    "PurchaseOrderItemText": "IT Consulting Services",
                     "OrderQuantity": "2.000",
                     "BaseUnit": "EA",
                     "NetPriceAmount": "110000.00",
@@ -91,8 +91,8 @@ _MOCK_PO: dict[str, dict[str, Any]] = {
                 {
                     "PurchaseOrder": "4500000002",
                     "PurchaseOrderItem": "00020",
-                    "Material": "STORAGE-SAN",
-                    "PurchaseOrderItemText": "SAN Storage 10TB",
+                    "Material": "SVC-APPDEV",
+                    "PurchaseOrderItemText": "Application Development",
                     "OrderQuantity": "5.000",
                     "BaseUnit": "EA",
                     "NetPriceAmount": "9950.00",
@@ -103,8 +103,8 @@ _MOCK_PO: dict[str, dict[str, Any]] = {
                 {
                     "PurchaseOrder": "4500000002",
                     "PurchaseOrderItem": "00030",
-                    "Material": "RACK-42U",
-                    "PurchaseOrderItemText": "Server Rack 42U",
+                    "Material": "SVC-ANALYTICS",
+                    "PurchaseOrderItemText": "Data Analytics Setup",
                     "OrderQuantity": "1.000",
                     "BaseUnit": "EA",
                     "NetPriceAmount": "29750.00",
@@ -121,8 +121,8 @@ _MOCK_PO: dict[str, dict[str, Any]] = {
         "SupplierName": "Tata Consultancy Services Ltd",
         "CompanyCode": "1000",
         "DocumentCurrency": "INR",
-        "NetPaymentAmount": "500000.00",
-        "TotalNetAmount": "500000.00",
+        "NetPaymentAmount": "590000.00",
+        "TotalNetAmount": "590000.00",
         "PurchaseOrderDate": "/Date(1735689600000)/",
         "to_PurchaseOrderItem": {
             "results": [
@@ -300,21 +300,21 @@ async def mock_sap_info() -> dict:
         "test_scenarios": {
             "4500000001": {
                 "vendor": "Acme Technologies Ltd",
-                "total_inr": 118000.00,
+                "total_inr_incl_gst": 139240.00,
                 "lines": 2,
-                "expected_match": "full_match (upload invoice with exact same values)",
+                "expected_match": "full_match (invoice INV-2026-001 matches exactly)",
             },
             "4500000002": {
                 "vendor": "Infosys BPO Services Ltd",
-                "total_inr": 269750.00,
+                "total_inr_incl_gst": 353410.00,
                 "lines": 3,
-                "expected_match": "partial_match (upload invoice with amounts ±1.5%)",
+                "expected_match": "partial_match (invoice INV-2026-002 has prices 1-1.5% over PO, within 2% tolerance)",
             },
             "4500000003": {
                 "vendor": "Tata Consultancy Services Ltd",
-                "total_inr": 500000.00,
+                "total_inr_incl_gst": 590000.00,
                 "lines": 2,
-                "expected_match": "mismatch (upload invoice with line-1 price ~55000 vs PO 45000)",
+                "expected_match": "mismatch (invoice INV-2026-003 has line-1 price 55000 vs PO 45000, 22% over)",
             },
         },
     }

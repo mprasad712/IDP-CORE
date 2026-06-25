@@ -56,11 +56,6 @@ import { getRuntimeEnv } from "@/utils/runtime-env";
 
 type ProviderFilter =
   | "all"
-  | "postgresql"
-  | "oracle"
-  | "sqlserver"
-  | "mysql"
-  | "azure_blob"
   | "sharepoint"
   | "outlook"
   | "onedrive"
@@ -68,11 +63,6 @@ type ProviderFilter =
   | "sap_s4hana";
 
 const PROVIDER_LABELS: Record<string, string> = {
-  postgresql: "PostgreSQL",
-  oracle: "Oracle",
-  sqlserver: "SQL Server",
-  mysql: "MySQL",
-  azure_blob: "Azure Blob Storage",
   sharepoint: "SharePoint",
   outlook: "Microsoft Outlook",
   onedrive: "OneDrive",
@@ -136,7 +126,7 @@ const BLANK_FORM = {
   onedrive_client_id: "",
   onedrive_client_secret: "",
   // SAP S/4HANA fields
-  sap_base_url: "https://sandbox.api.sap.com/s4hanacloud/sap/opu/odata/sap",
+  sap_base_url: "",
   sap_auth_mode: "api_key",
   sap_api_key: "",
   sap_oauth_token_url: "",
@@ -563,7 +553,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       onedrive_client_id: cfg.client_id ?? "",
       onedrive_client_secret: "",
       // SAP S/4HANA (api_key and client_secret are masked on edit)
-      sap_base_url: cfg.base_url ?? "https://sandbox.api.sap.com/s4hanacloud/sap/opu/odata/sap",
+      sap_base_url: cfg.base_url ?? "",
       sap_auth_mode: (cfg.auth_mode as "api_key" | "oauth2") ?? "api_key",
       sap_api_key: "",
       sap_oauth_token_url: cfg.oauth_token_url ?? "",
@@ -1073,11 +1063,6 @@ export default function ConnectorsCatalogueView(): JSX.Element {
 
   const getProviderBadge = (provider: string) => {
     const styles: Record<string, string> = {
-      postgresql: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
-      oracle: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
-      sqlserver: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
-      mysql: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400",
-      azure_blob: "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400",
       sharepoint: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
       outlook: "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400",
       onedrive: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
@@ -1124,7 +1109,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
     return t("Private");
   };
 
-  const FILTER_TABS: ProviderFilter[] = ["all", "postgresql", "oracle", "sqlserver", "mysql", "azure_blob", "sharepoint", "onedrive", "sap_s4hana", ...(ENABLE_OUTLOOK_CONNECTOR ? ["outlook" as const] : []), ...(ENABLE_GMAIL_CONNECTOR ? ["gmail" as const] : [])];
+  const FILTER_TABS: ProviderFilter[] = ["all", "sharepoint", "onedrive", "sap_s4hana", ...(ENABLE_OUTLOOK_CONNECTOR ? ["outlook" as const] : []), ...(ENABLE_GMAIL_CONNECTOR ? ["gmail" as const] : [])];
 
   /* ---- JSX ---- */
   if (!canViewConnectorPage) {
@@ -1643,14 +1628,14 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                   disabled={!!editingConnector}
                   className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
                 >
-                  <optgroup label={t("Databases")}>
+                  {/* <optgroup label={t("Databases")}>
                     <option value="postgresql">PostgreSQL</option>
                     <option value="oracle">Oracle</option>
                     <option value="sqlserver">SQL Server</option>
                     <option value="mysql">MySQL</option>
-                  </optgroup>
+                  </optgroup> */}
                   <optgroup label={t("Cloud Storage")}>
-                    <option value="azure_blob">Azure Blob Storage</option>
+                    {/* <option value="azure_blob">Azure Blob Storage</option> */}
                     <option value="sharepoint">SharePoint</option>
                     <option value="onedrive">OneDrive</option>
                   </optgroup>

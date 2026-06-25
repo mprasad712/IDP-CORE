@@ -493,6 +493,13 @@ const SideBarFoldersButtonsComponent = ({
               </SidebarMenuItem>
 
               <SidebarMenuItem>
+                <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-logs")} onClick={() => _navigate("/idp-logs")} className={navBtn}>
+                  <ForwardedIconComponent name="ScrollText" className="h-4 w-4 flex-shrink-0" />
+                  {t("Logs")}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
                 <SidebarMenuButton size="md" isActive={pathname.startsWith("/observability")} onClick={() => _navigate("/observability")} className={navBtn}>
                   <ForwardedIconComponent name="Activity" className="h-4 w-4 flex-shrink-0" />
                   {t("Observability")}

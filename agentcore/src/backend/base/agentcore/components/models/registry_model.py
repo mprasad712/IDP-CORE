@@ -121,7 +121,10 @@ class RegistryModelComponent(LCModelNode):
             try:
                 options = _fetch_models_for_provider(provider_key, user_id=current_user_id)
                 build_config["registry_model"]["options"] = options if options else []
-                build_config["registry_model"]["value"] = options[0] if options else ""
+                current_val = build_config["registry_model"].get("value", "")
+                # Keep existing selection if it's still valid; otherwise reset to first option.
+                if not current_val or current_val not in options:
+                    build_config["registry_model"]["value"] = options[0] if options else ""
             except Exception as e:
                 logger.warning(f"Error fetching models for provider {provider_key}: {e}")
                 build_config["registry_model"]["options"] = []
@@ -134,8 +137,11 @@ class RegistryModelComponent(LCModelNode):
                 try:
                     options = _fetch_models_for_provider(provider_key, user_id=current_user_id)
                     build_config["registry_model"]["options"] = options if options else []
-                    if options and not build_config["registry_model"].get("value"):
-                        build_config["registry_model"]["value"] = options[0]
+                    current_val = build_config["registry_model"].get("value", "")
+                    # Clear stale value: if the saved UUID is no longer in the registry,
+                    # auto-select the first available option so the user sees a valid model.
+                    if not current_val or current_val not in options:
+                        build_config["registry_model"]["value"] = options[0] if options else ""
                 except Exception as e:
                     logger.warning(f"Error refreshing registry models: {e}")
                     build_config["registry_model"]["options"] = []

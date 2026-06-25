@@ -109,13 +109,13 @@ async def trigger_match(
 
 async def _run_match_background(document_id: UUID, payload: TriggerMatchPayload, triggered_by: UUID) -> None:
     """Background task: run the matching service and persist results."""
-    from agentcore.services.database.service import get_session_ctx
+    from agentcore.services.deps import get_db_service
     from agentcore.services.idp.matching_service import MatchConfig, MatchingService, persist_match_result
     from agentcore.services.idp.sap_client import SapS4HanaClient
     from agentcore.api.connector_catalogue import _decrypt_provider_config
     from agentcore.services.database.models.connector_catalogue.model import ConnectorCatalogue
 
-    async with get_session_ctx() as session:
+    async with get_db_service().with_session() as session:
         # Load extracted data
         headers_rows = (
             await session.exec(select(IdpExtractedHeader).where(IdpExtractedHeader.document_id == document_id))
