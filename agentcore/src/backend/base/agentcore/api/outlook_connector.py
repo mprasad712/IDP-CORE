@@ -375,12 +375,17 @@ async def oauth_callback(
             headers={"Authorization": f"Bearer {access_token}"},
         )
     if inbox_resp.status_code != 200:
+        try:
+            err_body = inbox_resp.json()
+            err_detail = err_body.get("error", {}).get("message", inbox_resp.text[:200])
+        except Exception:
+            err_detail = inbox_resp.text[:200]
         logger.warning(
             f"Outlook mailbox validation failed for {email}: "
-            f"{inbox_resp.status_code} — {inbox_resp.text[:200]}"
+            f"{inbox_resp.status_code} — {err_detail}"
         )
         return RedirectResponse(
-            url=f"{fe}/connectors?error=outlook_no_mailbox"
+            url=f"{fe}/connectors?error=outlook_no_mailbox&detail={quote(err_detail)}"
         )
 
     # Build linked account entry

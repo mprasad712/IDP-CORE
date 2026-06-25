@@ -1,5 +1,5 @@
 import { useContext, useState } from "react";
-import MothersonLogo from "@/assets/mothersonLogo.svg?react";
+import MothersonLogo from "@/assets/micore-icon.svg?react";
 import { useLoginUser } from "@/controllers/API/queries/auth";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";

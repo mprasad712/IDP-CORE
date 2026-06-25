@@ -68,6 +68,9 @@ export function DefaultEdge({
   delete domSafeProps.deletable;
   delete domSafeProps.selected;
   delete domSafeProps.pathOptions;
+  delete domSafeProps.sourcePosition;
+  delete domSafeProps.targetPosition;
+  delete domSafeProps.data;
   
   return (
     <BaseEdge

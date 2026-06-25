@@ -62,12 +62,12 @@ import miChatHistoryIcon from "@/assets/mibuddy_chat_history.svg?url";
 import miArchiveIcon from "@/assets/mibuddy_archive.svg?url";
 import miInformationIcon from "@/assets/mibuddy_information.svg?url";
 import miHelpIcon from "@/assets/mibuddy_help.svg?url";
-import talentaiIcon from "@/assets/mothersonLogo.svg";
-import capexIcon from "@/assets/mothersonLogo.svg";
-import KIPIcon from "@/assets/mothersonLogo.svg";
-import yachioIcon from "@/assets/mothersonLogo.svg";
-import MMNextIcon from "@/assets/mothersonLogo.svg";
-import spendanalyticsIcon from "@/assets/mothersonLogo.svg";
+import talentaiIcon from "@/assets/micore-icon.svg";
+import capexIcon from "@/assets/micore-icon.svg";
+import KIPIcon from "@/assets/micore-icon.svg";
+import yachioIcon from "@/assets/micore-icon.svg";
+import MMNextIcon from "@/assets/micore-icon.svg";
+import spendanalyticsIcon from "@/assets/micore-icon.svg";
 import MessagesPage from "../SettingsPage/pages/messagesPage";
 
 

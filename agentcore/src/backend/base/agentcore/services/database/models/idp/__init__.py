@@ -20,6 +20,11 @@ from agentcore.services.database.models.idp.documents import (
     IdpExtractedLineItem,
     IdpProcessingJob,
 )
+from agentcore.services.database.models.idp.match import (
+    IdpAgentMatchConfig,
+    IdpMatchDiscrepancy,
+    IdpMatchResult,
+)
 
 __all__ = [
     # surface (config / agent / rules / review / batches)
@@ -40,4 +45,8 @@ __all__ = [
     "IdpDetectedElement",
     "IdpDocumentSection",
     "IdpEntityLink",
+    # SAP matching
+    "IdpMatchResult",
+    "IdpMatchDiscrepancy",
+    "IdpAgentMatchConfig",
 ]

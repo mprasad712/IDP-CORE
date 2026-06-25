@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import time
@@ -49,6 +50,64 @@ async def _get_storage_connector_config(connector_id: str) -> dict | None:
 def _odata_escape(value: str) -> str:
     """Escape single quotes for OData filter values."""
     return value.replace("'", "''")
+
+
+def _recipient_addrs(recipients) -> list[str]:
+    """Flatten a Graph recipients array → list of email addresses."""
+    out = []
+    for r in recipients or []:
+        a = ((r or {}).get("emailAddress") or {}).get("address", "")
+        if a:
+            out.append(a)
+    return out
+
+
+# Backstop on how many Graph @odata.nextLink pages we follow for one email's attachments. Set far
+# above any real email (Outlook caps a message ~150 MB, so a few hundred attachments at most); the
+# cap exists only to bound a pathological/looping nextLink. If it IS hit, the fetch is treated as
+# INCOMPLETE (returns None → retry), never a partial success that would drop the remaining pages.
+_MAX_ATTACHMENT_PAGES = 200
+
+# Backstop on how many @odata.nextLink pages of the MESSAGE list one poll walks. Without this the
+# monitor only ever saw the first page (top N by receivedDateTime), so a burst of >N new emails
+# between polls could be missed. The walk stops early once a page has no new (unseen) message.
+_MAX_MESSAGE_PAGES = 10
+
+# Only ever follow @odata.nextLink / fetch attachment bytes from a real Microsoft Graph host — a
+# forged nextLink pointing elsewhere (e.g. cloud-metadata 169.254.169.254) must not receive the
+# bearer token (SSRF guard).
+_ALLOWED_GRAPH_HOSTS = {"graph.microsoft.com"}
+
+
+def _is_graph_url(url: str) -> bool:
+    """True iff ``url`` is an https Microsoft Graph URL (used before following a Graph-supplied link)."""
+    try:
+        from urllib.parse import urlparse
+
+        p = urlparse(url or "")
+        return (
+            p.scheme == "https"
+            and (p.hostname or "").lower() in _ALLOWED_GRAPH_HOSTS
+            and p.port in (None, 443)
+        )
+    except Exception:
+        return False
+
+
+def _as_bool(v, default: bool = False) -> bool:
+    """Parse a node-template toggle that may be a real bool OR a stringified one ('true'/'false'/
+    '1'/'0'). Naive ``bool('false')`` is ``True``, which silently inverts a disabled toggle."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off", ""):
+            return False
+    if v is None:
+        return default
+    return bool(v)
 
 
 class TriggerService(Service):
@@ -260,6 +319,608 @@ class TriggerService(Service):
 
         await session.commit()
 
+    async def sync_email_monitors_for_agent(
+        self,
+        session,
+        agent_id,
+        environment: str,
+        version: str,
+        deployment_id,
+        flow_data: dict,
+        created_by,
+    ) -> None:
+        """On publish, scan the snapshot for Outlook Connector Input nodes and create/update
+        an EMAIL_MONITOR trigger per node (ingest_mode=idp_pipeline). Mirrors the folder-monitor
+        sync: (node_id, deployment_id) versioning, deactivate-old-on-new-version.
+
+        The node is matched the same way the rest of the IDP pipeline matches nodes — by
+        ``data.node.display_name == "Connector Input"`` (the canvas saves the node under type
+        ``ConnectorInput``, not ``IDPConnectorInput``). The connector is resolved from the plain
+        connector NAME the canvas dropdown writes into ``connector_name`` (or a legacy pipe-format
+        ``connector`` field) against the Outlook connector catalogue.
+        """
+        from agentcore.services.database.models.trigger_config.crud import (
+            create_trigger_config,
+            get_triggers_by_agent_id,
+        )
+        from agentcore.services.database.models.trigger_config.model import (
+            TriggerConfigCreate,
+            TriggerTypeEnum,
+        )
+
+        nodes = flow_data.get("nodes", [])
+
+        def _is_connector_node(n: dict) -> bool:
+            nd = n.get("data", {}) or {}
+            if nd.get("type") in ("IDPConnectorInput", "ConnectorInput"):
+                return True
+            # display_name fallback: only treat it as a connector node if it actually carries a
+            # connector field, so an unrelated node named "Connector Input" can't spawn a monitor.
+            node = nd.get("node", {}) or {}
+            if node.get("display_name") != "Connector Input":
+                return False
+            tmpl = node.get("template", {}) or {}
+            return "connector_name" in tmpl or "connector" in tmpl
+
+        conn_nodes = [n for n in nodes if _is_connector_node(n)]
+
+        # Existing email monitors for this agent+env (active or not). Fetched up front so we can
+        # deactivate ORPHANS — active monitors whose node is no longer an OUTLOOK EMAIL node in the
+        # published flow. A node becomes an orphan when it is deleted, re-added with a new node_id
+        # (a fresh monitor is created while the old one keeps polling), OR has its connector switched
+        # to a non-Outlook provider (SharePoint/OneDrive) so it no longer resolves to an email cfg.
+        # On the "live" set below we deactivate the rest, leaving exactly one active monitor per
+        # current Outlook Connector Input node. (Enable/disable stays the user's Automations toggle.)
+        existing = await get_triggers_by_agent_id(session, agent_id, active_only=False)
+        existing_em = [
+            t for t in existing
+            if t.trigger_type == TriggerTypeEnum.EMAIL_MONITOR and t.environment == environment
+        ]
+
+        async def _deactivate_orphans(live_node_ids: set) -> None:
+            for t in existing_em:
+                nid = (t.trigger_config or {}).get("node_id")
+                if t.is_active and nid not in live_node_ids:
+                    t.is_active = False
+                    session.add(t)
+                    await self.unregister(t.id)
+                    logger.info(
+                        f"Deactivated orphan email monitor {t.id} (node {nid} no longer an Outlook email node)"
+                    )
+
+        if not conn_nodes:
+            # No connector nodes at all → every email monitor for this agent+env is an orphan.
+            await _deactivate_orphans(set())
+            await session.commit()
+            return
+
+        # Resolve connectors by NAME (what the canvas IDPConnectorDropdown saves into
+        # ``connector_name``) or by id. Only Outlook connectors poll.
+        from sqlalchemy import select as _select_cc
+        from agentcore.services.database.models.connector_catalogue.model import ConnectorCatalogue
+
+        cc_rows = (
+            await session.execute(
+                _select_cc(ConnectorCatalogue).where(ConnectorCatalogue.provider == "outlook")
+            )
+        ).scalars().all()
+        cc_by_id = {str(r.id): r for r in cc_rows}
+        cc_by_name: dict[str, list] = {}
+        for r in cc_rows:
+            cc_by_name.setdefault((r.name or "").strip().lower(), []).append(r)
+
+        def _resolve_by_name(nm: str):
+            cands = cc_by_name.get((nm or "").strip().lower()) or []
+            if not cands:
+                return None
+            if len(cands) == 1:
+                return cands[0]
+            # A connector name is unique only within (org_id, dept_id). Disambiguate a cross-scope
+            # collision by preferring the publisher's own connector, else a deterministic pick (+warn).
+            mine = [c for c in cands if created_by is not None and c.created_by == created_by]
+            chosen = (mine or sorted(cands, key=lambda c: str(c.id)))[0]
+            logger.warning(
+                f"sync_email_monitors: connector name '{nm}' matches {len(cands)} Outlook "
+                f"connectors across scopes; using {chosen.id}"
+            )
+            return chosen
+
+        def _cfg_from_node(template: dict, node_id: str) -> dict | None:
+            def tv(k, default=""):
+                return (template.get(k) or {}).get("value", default)
+
+            # Resolve to a REAL Outlook connector row. Accept a legacy pipe string
+            # "name | provider | emails | uuid" in ``connector`` (trusted only if the id still
+            # exists), or the plain connector NAME the canvas saves in ``connector_name``.
+            row = None
+            pipe_raw = (tv("connector", "") or "").strip()
+            if "|" in pipe_raw:
+                parts = [p.strip() for p in pipe_raw.split("|")]
+                if len(parts) >= 4:
+                    row = cc_by_id.get(parts[-1])  # verify the pipe id is a real connector
+            if row is None:
+                name_or_id = (tv("connector_name", "") or pipe_raw or "").strip()
+                row = cc_by_id.get(name_or_id) or _resolve_by_name(name_or_id)
+            if row is None or (row.provider or "").lower() != "outlook":
+                return None  # only existing Outlook connectors poll
+            connector_id = str(row.id)
+
+            def _int(v, d):
+                try:
+                    return int(v)
+                except Exception:
+                    return d
+
+            return {
+                "connector_id": connector_id,
+                "account_email": tv("account_email", "") or "",
+                "mail_folder": tv("folder", "inbox") or "inbox",
+                "max_results": _int(tv("max_emails", 10), 10),
+                "poll_interval_seconds": _int(tv("poll_interval_seconds", 60), 60),
+                "filter_sender": tv("filter_sender", "") or "",
+                "filter_subject": tv("filter_subject", "") or "",
+                "filter_body": tv("filter_body", "") or "",
+                "filter_to": tv("filter_to", "") or "",
+                "filter_cc": tv("filter_cc", "") or "",
+                "filter_importance": tv("filter_importance", "all") or "all",
+                "filter_has_attachments": _as_bool(tv("filter_has_attachments", True), True),
+                "unread_only": _as_bool(tv("unread_only", False), False),
+                "mark_as_read": _as_bool(tv("mark_as_read", False), False),
+                "fetch_full_body": _as_bool(tv("fetch_full_body", False), False),
+                "fetch_attachments": True,
+                "ingest_mode": "idp_pipeline",
+                "node_id": node_id,
+            }
+
+        # Resolve which current connector nodes actually drive an Outlook email monitor. A node that
+        # now points at a SharePoint/OneDrive/unknown connector resolves to None → it is NOT live, so
+        # its old email monitor (if any) is deactivated as an orphan below.
+        node_cfgs: dict[str, dict] = {}
+        for node in conn_nodes:
+            node_id = node.get("id")
+            template = node.get("data", {}).get("node", {}).get("template", {})
+            cfg = _cfg_from_node(template, node_id)
+            if cfg is not None:
+                node_cfgs[node_id] = cfg
+        await _deactivate_orphans(set(node_cfgs))
+
+        # (existing_em fetched above for the orphan pass — reuse it for the versioning lookups.)
+        existing_by_key: dict[tuple[str, str], object] = {}
+        existing_by_node_only: dict[str, list] = {}
+        for t in existing_em:
+            nid = (t.trigger_config or {}).get("node_id")
+            did = str(t.deployment_id) if t.deployment_id else None
+            if nid and did:
+                existing_by_key[(nid, did)] = t
+            if nid:
+                existing_by_node_only.setdefault(nid, []).append(t)
+
+        dep_id_str = str(deployment_id)
+        for node_id, cfg in node_cfgs.items():
+            exact_match = existing_by_key.get((node_id, dep_id_str))
+            if exact_match:
+                exact_match.trigger_config = cfg
+                exact_match.is_active = True
+                session.add(exact_match)
+                await session.commit()
+                await session.refresh(exact_match)
+                await self.unregister(exact_match.id)
+                try:
+                    await self.register_email_monitor(exact_match)
+                except Exception as e:
+                    logger.warning(f"Failed to re-register email monitor for node {node_id}: {e}")
+                logger.info(f"Updated email monitor {exact_match.id} for node {node_id} (same deployment)")
+            else:
+                for old_t in existing_by_node_only.get(node_id, []):
+                    if old_t.is_active:
+                        old_t.is_active = False
+                        session.add(old_t)
+                        await self.unregister(old_t.id)
+                        logger.info(f"Deactivated old email monitor {old_t.id} (superseded by {deployment_id})")
+                record = await create_trigger_config(
+                    session,
+                    TriggerConfigCreate(
+                        agent_id=agent_id,
+                        deployment_id=deployment_id,
+                        trigger_type=TriggerTypeEnum.EMAIL_MONITOR,
+                        trigger_config=cfg,
+                        is_active=True,
+                        environment=environment,
+                        version=version,
+                        created_by=created_by,
+                    ),
+                )
+                try:
+                    await self.register_email_monitor(record)
+                except Exception as e:
+                    logger.warning(f"Failed to register email monitor for node {node_id}: {e}")
+                logger.info(f"Created email monitor {record.id} for node {node_id} (new deployment)")
+
+        await session.commit()
+
+    async def sync_sharepoint_idp_monitors_for_agent(
+        self,
+        session,
+        agent_id,
+        environment: str,
+        version: str,
+        deployment_id,
+        flow_data: dict,
+        created_by,
+    ) -> None:
+        """On publish, scan the snapshot for SharePoint IDP Connector Input nodes and create/update a
+        FOLDER_MONITOR trigger per node (storage_type=SharePoint, ingest_mode=idp_pipeline).
+
+        Mirrors ``sync_email_monitors_for_agent`` for the SharePoint case: the same Connector Input
+        node feeds either an Outlook mailbox (→ EMAIL_MONITOR) or a SharePoint folder (→ FOLDER_MONITOR
+        with idp_pipeline ingest). Versioning is keyed by (node_id, deployment_id) with
+        deactivate-old-on-new-version, scoped to this function's own node_ids so it never touches the
+        FileTrigger folder monitors created by ``sync_folder_monitors_for_agent``.
+        """
+        from agentcore.services.database.models.trigger_config.crud import (
+            create_trigger_config,
+            get_triggers_by_agent_id,
+        )
+        from agentcore.services.database.models.trigger_config.model import (
+            TriggerConfigCreate,
+            TriggerTypeEnum,
+        )
+
+        nodes = flow_data.get("nodes", [])
+
+        def _is_connector_node(n: dict) -> bool:
+            nd = n.get("data", {}) or {}
+            if nd.get("type") in ("IDPConnectorInput", "ConnectorInput"):
+                return True
+            node = nd.get("node", {}) or {}
+            if node.get("display_name") != "Connector Input":
+                return False
+            tmpl = node.get("template", {}) or {}
+            return "connector_name" in tmpl or "connector" in tmpl
+
+        conn_nodes = [n for n in nodes if _is_connector_node(n)]
+        if not conn_nodes:
+            return
+
+        # Resolve connectors by NAME (what the canvas IDPConnectorDropdown saves into ``connector_name``)
+        # or by id. Only SharePoint connectors create folder monitors here.
+        from sqlalchemy import select as _select_cc
+        from agentcore.services.database.models.connector_catalogue.model import ConnectorCatalogue
+
+        cc_rows = (
+            await session.execute(
+                _select_cc(ConnectorCatalogue).where(ConnectorCatalogue.provider == "sharepoint")
+            )
+        ).scalars().all()
+        cc_by_id = {str(r.id): r for r in cc_rows}
+        cc_by_name: dict[str, list] = {}
+        for r in cc_rows:
+            cc_by_name.setdefault((r.name or "").strip().lower(), []).append(r)
+
+        def _resolve_by_name(nm: str):
+            cands = cc_by_name.get((nm or "").strip().lower()) or []
+            if not cands:
+                return None
+            if len(cands) == 1:
+                return cands[0]
+            mine = [c for c in cands if created_by is not None and c.created_by == created_by]
+            chosen = (mine or sorted(cands, key=lambda c: str(c.id)))[0]
+            logger.warning(
+                f"sync_sharepoint_idp_monitors: connector name '{nm}' matches {len(cands)} SharePoint "
+                f"connectors across scopes; using {chosen.id}"
+            )
+            return chosen
+
+        def _cfg_from_node(template: dict, node_id: str) -> dict | None:
+            def tv(k, default=""):
+                return (template.get(k) or {}).get("value", default)
+
+            row = None
+            pipe_raw = (tv("connector", "") or "").strip()
+            if "|" in pipe_raw:
+                parts = [p.strip() for p in pipe_raw.split("|")]
+                if len(parts) >= 4:
+                    row = cc_by_id.get(parts[-1])
+            if row is None:
+                name_or_id = (tv("connector_name", "") or pipe_raw or "").strip()
+                row = cc_by_id.get(name_or_id) or _resolve_by_name(name_or_id)
+            if row is None or (row.provider or "").lower() != "sharepoint":
+                return None  # only existing SharePoint connectors poll here
+
+            def _int(v, d):
+                try:
+                    return int(v)
+                except Exception:
+                    return d
+
+            file_types_raw = tv("sharepoint_file_types", "") or ""
+            file_types = [t.strip().lstrip(".") for t in file_types_raw.split(",") if t.strip()]
+
+            return {
+                "storage_type": "SharePoint",
+                "connector_id": str(row.id),
+                "sharepoint_library": tv("sharepoint_library", "") or "",
+                "sharepoint_folder": tv("sharepoint_folder", "") or "",
+                "file_types": file_types,
+                "poll_interval_seconds": _int(tv("sharepoint_poll_interval", 300), 300),
+                "trigger_on": "New Files",
+                "batch_size": 10,
+                "ingest_mode": "idp_pipeline",
+                "node_id": node_id,
+            }
+
+        existing = await get_triggers_by_agent_id(session, agent_id, active_only=False)
+        # Only consider folder monitors that WE created (ingest_mode=idp_pipeline) so we never disturb
+        # FileTrigger-created folder monitors that share the FOLDER_MONITOR type.
+        existing_fm = [
+            t for t in existing
+            if t.trigger_type == TriggerTypeEnum.FOLDER_MONITOR
+            and t.environment == environment
+            and (t.trigger_config or {}).get("ingest_mode") == "idp_pipeline"
+            and (t.trigger_config or {}).get("storage_type") == "SharePoint"
+        ]
+        existing_by_key: dict[tuple[str, str], object] = {}
+        existing_by_node_only: dict[str, list] = {}
+        for t in existing_fm:
+            nid = (t.trigger_config or {}).get("node_id")
+            did = str(t.deployment_id) if t.deployment_id else None
+            if nid and did:
+                existing_by_key[(nid, did)] = t
+            if nid:
+                existing_by_node_only.setdefault(nid, []).append(t)
+
+        dep_id_str = str(deployment_id)
+        for node in conn_nodes:
+            node_id = node.get("id")
+            template = node.get("data", {}).get("node", {}).get("template", {})
+            cfg = _cfg_from_node(template, node_id)
+            if cfg is None:
+                continue  # non-SharePoint connector → handled elsewhere (email / onedrive sync)
+
+            exact_match = existing_by_key.get((node_id, dep_id_str))
+            if exact_match:
+                cfg["_seen_keys"] = (exact_match.trigger_config or {}).get("_seen_keys", [])
+                exact_match.trigger_config = cfg
+                exact_match.is_active = True
+                session.add(exact_match)
+                await session.commit()
+                await session.refresh(exact_match)
+                await self.unregister(exact_match.id)
+                try:
+                    await self.register_folder_monitor(exact_match)
+                except Exception as e:
+                    logger.warning(f"Failed to re-register SharePoint monitor for node {node_id}: {e}")
+                logger.info(f"Updated SharePoint IDP monitor {exact_match.id} for node {node_id} (same deployment)")
+            else:
+                for old_t in existing_by_node_only.get(node_id, []):
+                    if old_t.is_active:
+                        old_t.is_active = False
+                        session.add(old_t)
+                        await self.unregister(old_t.id)
+                        logger.info(f"Deactivated old SharePoint monitor {old_t.id} (superseded by {deployment_id})")
+                record = await create_trigger_config(
+                    session,
+                    TriggerConfigCreate(
+                        agent_id=agent_id,
+                        deployment_id=deployment_id,
+                        trigger_type=TriggerTypeEnum.FOLDER_MONITOR,
+                        trigger_config=cfg,
+                        is_active=True,
+                        environment=environment,
+                        version=version,
+                        created_by=created_by,
+                    ),
+                )
+                try:
+                    await self.register_folder_monitor(record)
+                except Exception as e:
+                    logger.warning(f"Failed to register SharePoint monitor for node {node_id}: {e}")
+                logger.info(f"Created SharePoint IDP monitor {record.id} for node {node_id} (new deployment)")
+
+        await session.commit()
+
+    async def sync_onedrive_idp_monitors_for_agent(
+        self,
+        session,
+        agent_id,
+        environment: str,
+        version: str,
+        deployment_id,
+        flow_data: dict,
+        created_by,
+    ) -> None:
+        """On publish, scan for OneDrive IDP Connector Input nodes and create/update a FOLDER_MONITOR
+        trigger per node (storage_type=OneDrive, ingest_mode=idp_pipeline).
+
+        Mirrors ``sync_sharepoint_idp_monitors_for_agent`` — only the provider and per-node config keys
+        differ. Versioning is scoped to this function's own node_ids so it never touches the SharePoint
+        or FileTrigger monitors that share the FOLDER_MONITOR type.
+        """
+        from agentcore.services.database.models.trigger_config.crud import (
+            create_trigger_config,
+            get_triggers_by_agent_id,
+        )
+        from agentcore.services.database.models.trigger_config.model import (
+            TriggerConfigCreate,
+            TriggerTypeEnum,
+        )
+
+        nodes = flow_data.get("nodes", [])
+
+        def _is_connector_node(n: dict) -> bool:
+            nd = n.get("data", {}) or {}
+            if nd.get("type") in ("IDPConnectorInput", "ConnectorInput"):
+                return True
+            node = nd.get("node", {}) or {}
+            if node.get("display_name") != "Connector Input":
+                return False
+            tmpl = node.get("template", {}) or {}
+            return "connector_name" in tmpl or "connector" in tmpl
+
+        conn_nodes = [n for n in nodes if _is_connector_node(n)]
+        if not conn_nodes:
+            return
+
+        from sqlalchemy import select as _select_cc
+        from agentcore.services.database.models.connector_catalogue.model import ConnectorCatalogue
+
+        cc_rows = (
+            await session.execute(
+                _select_cc(ConnectorCatalogue).where(ConnectorCatalogue.provider == "onedrive")
+            )
+        ).scalars().all()
+        cc_by_id = {str(r.id): r for r in cc_rows}
+        cc_by_name: dict[str, list] = {}
+        for r in cc_rows:
+            cc_by_name.setdefault((r.name or "").strip().lower(), []).append(r)
+
+        def _resolve_by_name(nm: str):
+            cands = cc_by_name.get((nm or "").strip().lower()) or []
+            if not cands:
+                return None
+            if len(cands) == 1:
+                return cands[0]
+            mine = [c for c in cands if created_by is not None and c.created_by == created_by]
+            chosen = (mine or sorted(cands, key=lambda c: str(c.id)))[0]
+            logger.warning(
+                f"sync_onedrive_idp_monitors: connector name '{nm}' matches {len(cands)} OneDrive "
+                f"connectors across scopes; using {chosen.id}"
+            )
+            return chosen
+
+        def _cfg_from_node(template: dict, node_id: str) -> dict | None:
+            def tv(k, default=""):
+                return (template.get(k) or {}).get("value", default)
+
+            row = None
+            pipe_raw = (tv("connector", "") or "").strip()
+            if "|" in pipe_raw:
+                parts = [p.strip() for p in pipe_raw.split("|")]
+                if len(parts) >= 4:
+                    row = cc_by_id.get(parts[-1])
+            if row is None:
+                name_or_id = (tv("connector_name", "") or pipe_raw or "").strip()
+                row = cc_by_id.get(name_or_id) or _resolve_by_name(name_or_id)
+            if row is None or (row.provider or "").lower() != "onedrive":
+                return None
+
+            def _int(v, d):
+                try:
+                    return int(v)
+                except Exception:
+                    return d
+
+            file_types_raw = tv("onedrive_file_types", "") or ""
+            file_types = [t.strip().lstrip(".") for t in file_types_raw.split(",") if t.strip()]
+
+            return {
+                "storage_type": "OneDrive",
+                "connector_id": str(row.id),
+                "onedrive_folder": tv("onedrive_folder", "") or "",
+                "file_types": file_types,
+                "poll_interval_seconds": _int(tv("onedrive_poll_interval", 300), 300),
+                "trigger_on": "New Files",
+                "batch_size": 10,
+                "ingest_mode": "idp_pipeline",
+                "node_id": node_id,
+            }
+
+        existing = await get_triggers_by_agent_id(session, agent_id, active_only=False)
+        existing_fm = [
+            t for t in existing
+            if t.trigger_type == TriggerTypeEnum.FOLDER_MONITOR
+            and t.environment == environment
+            and (t.trigger_config or {}).get("ingest_mode") == "idp_pipeline"
+            and (t.trigger_config or {}).get("storage_type") == "OneDrive"
+        ]
+        existing_by_key: dict[tuple[str, str], object] = {}
+        existing_by_node_only: dict[str, list] = {}
+        for t in existing_fm:
+            nid = (t.trigger_config or {}).get("node_id")
+            did = str(t.deployment_id) if t.deployment_id else None
+            if nid and did:
+                existing_by_key[(nid, did)] = t
+            if nid:
+                existing_by_node_only.setdefault(nid, []).append(t)
+
+        dep_id_str = str(deployment_id)
+        for node in conn_nodes:
+            node_id = node.get("id")
+            template = node.get("data", {}).get("node", {}).get("template", {})
+            cfg = _cfg_from_node(template, node_id)
+            if cfg is None:
+                continue
+
+            exact_match = existing_by_key.get((node_id, dep_id_str))
+            if exact_match:
+                cfg["_seen_keys"] = (exact_match.trigger_config or {}).get("_seen_keys", [])
+                exact_match.trigger_config = cfg
+                exact_match.is_active = True
+                session.add(exact_match)
+                await session.commit()
+                await session.refresh(exact_match)
+                await self.unregister(exact_match.id)
+                try:
+                    await self.register_folder_monitor(exact_match)
+                except Exception as e:
+                    logger.warning(f"Failed to re-register OneDrive monitor for node {node_id}: {e}")
+                logger.info(f"Updated OneDrive IDP monitor {exact_match.id} for node {node_id} (same deployment)")
+            else:
+                for old_t in existing_by_node_only.get(node_id, []):
+                    if old_t.is_active:
+                        old_t.is_active = False
+                        session.add(old_t)
+                        await self.unregister(old_t.id)
+                        logger.info(f"Deactivated old OneDrive monitor {old_t.id} (superseded by {deployment_id})")
+                record = await create_trigger_config(
+                    session,
+                    TriggerConfigCreate(
+                        agent_id=agent_id,
+                        deployment_id=deployment_id,
+                        trigger_type=TriggerTypeEnum.FOLDER_MONITOR,
+                        trigger_config=cfg,
+                        is_active=True,
+                        environment=environment,
+                        version=version,
+                        created_by=created_by,
+                    ),
+                )
+                try:
+                    await self.register_folder_monitor(record)
+                except Exception as e:
+                    logger.warning(f"Failed to register OneDrive monitor for node {node_id}: {e}")
+                logger.info(f"Created OneDrive IDP monitor {record.id} for node {node_id} (new deployment)")
+
+        await session.commit()
+
+    async def deactivate_triggers_for_deployment(self, session, deployment_id) -> int:
+        """Mark + unregister every trigger for a deployment (called on unpublish/new version).
+
+        Does NOT commit — the ``is_active=False`` flips are flushed into the CALLER's transaction
+        so they're atomic with the unpublish (if the caller rolls back, the flips roll back too).
+        ``unregister`` (stopping the asyncio task) is idempotent; a rolled-back trigger simply
+        re-registers on the next startup.
+        """
+        from sqlalchemy import select as _select
+        from agentcore.services.database.models.trigger_config.model import TriggerConfigTable
+
+        rows = (
+            await session.execute(
+                _select(TriggerConfigTable).where(TriggerConfigTable.deployment_id == deployment_id)
+            )
+        ).scalars().all()
+        n = 0
+        for t in rows:
+            try:
+                if t.is_active:
+                    t.is_active = False
+                    session.add(t)
+                await self.unregister(t.id)
+                n += 1
+            except Exception as e:
+                logger.warning(f"deactivate_triggers_for_deployment {t.id}: {e}")
+        return n
+
     async def register_folder_monitor(self, trigger_record) -> None:
         """Register a folder monitor from a TriggerConfigTable record."""
         task_id = str(trigger_record.id)
@@ -409,6 +1070,8 @@ class TriggerService(Service):
                     new_files = await self._scan_azure_blob(task_id, config, file_types, trigger_on)
                 elif storage_type == "SharePoint":
                     new_files = await self._scan_sharepoint(task_id, config, file_types, trigger_on)
+                elif storage_type == "OneDrive":
+                    new_files = await self._scan_onedrive(task_id, config, file_types, trigger_on)
 
                 if not new_files:
                     continue
@@ -418,6 +1081,18 @@ class TriggerService(Service):
                     new_files = new_files[:batch_size]
 
                 logger.info(f"Folder monitor {task_id}: found {len(new_files)} new files")
+
+                # IDP-pipeline mode (created by sync_sharepoint_idp_monitors_for_agent for the IDP
+                # Connector Input node): download each new file and ingest it into Processed Docs via
+                # the existing IDP pipeline — exactly like the Outlook email monitor does. No flow-graph
+                # execution (the pipeline is enqueued directly).
+                if config.get("ingest_mode") == "idp_pipeline" and storage_type in ("SharePoint", "OneDrive"):
+                    if storage_type == "SharePoint":
+                        await self._ingest_sharepoint_files_to_idp(agent_id, config, new_files)
+                    else:
+                        await self._ingest_onedrive_files_to_idp(agent_id, config, new_files)
+                    await self._persist_seen_files(trigger_config_id)
+                    continue
 
                 # Trigger the agent flow with file list
                 await self._execute_trigger(
@@ -589,8 +1264,10 @@ class TriggerService(Service):
             client_id = connector_cfg.get("client_id", "")
             client_secret = connector_cfg.get("client_secret", "")
             tenant_id = connector_cfg.get("tenant_id", "")
-            library = connector_cfg.get("library", "Shared Documents")
-            folder_path = connector_cfg.get("folder", config.get("sharepoint_folder", ""))
+            # Prefer the per-node library/folder (set on the IDP Connector Input node) over the
+            # connector-level defaults, so each agent can target a different folder of the same site.
+            library = config.get("sharepoint_library") or connector_cfg.get("library", "Shared Documents")
+            folder_path = config.get("sharepoint_folder") or connector_cfg.get("folder", "")
         else:
             # Fallback: legacy inline credentials (deprecated)
             site_url = config.get("sharepoint_site_url", "")
@@ -702,6 +1379,80 @@ class TriggerService(Service):
         self._seen_files[task_id] = seen
         return new_files
 
+    async def _scan_onedrive(
+        self, task_id: str, config: dict, file_types: list[str], trigger_on: str,
+    ) -> list[dict]:
+        """Scan a OneDrive folder for new/modified files via Graph /me/drive (delegated token).
+
+        Credentials + linked account are resolved from the connector_catalogue via `connector_id`.
+        OneDrive uses the /common authority so it works for personal and work/school accounts.
+        """
+        import httpx
+        from urllib.parse import quote
+
+        GRAPH = "https://graph.microsoft.com/v1.0"
+
+        connector_id = config.get("connector_id")
+        if not connector_id:
+            logger.warning(f"TriggerService: OneDrive trigger {task_id} is missing connector_id")
+            return []
+        connector_cfg = await _get_storage_connector_config(str(connector_id))
+        if not connector_cfg:
+            logger.error(f"TriggerService: could not load OneDrive connector {connector_id}")
+            return []
+
+        accounts = connector_cfg.get("linked_accounts", [])
+        if not accounts:
+            logger.warning(f"TriggerService: OneDrive trigger {task_id} has no linked account")
+            return []
+        acct = accounts[0]
+        folder_path = (config.get("onedrive_folder", "") or "").strip().strip("/")
+
+        try:
+            access_token = await self._refresh_onedrive_token(connector_cfg, acct, str(connector_id))
+        except Exception as e:
+            logger.error(f"TriggerService: OneDrive token refresh failed for {task_id}: {e}")
+            return []
+
+        if folder_path:
+            safe = quote(folder_path, safe="/")
+            items_url = f"{GRAPH}/me/drive/root:/{safe}:/children?$top=200"
+        else:
+            items_url = f"{GRAPH}/me/drive/root/children?$top=200"
+
+        seen = self._seen_files.get(task_id, OrderedDict())
+        new_files = []
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.get(items_url, headers={"Authorization": f"Bearer {access_token}"})
+            if resp.status_code != 200:
+                logger.error(f"TriggerService: OneDrive list failed for {task_id}: {resp.text[:300]}")
+                return []
+            for item in resp.json().get("value", []):
+                if "file" not in item:
+                    continue
+                file_name = item.get("name", "")
+                if file_types:
+                    ext = Path(file_name).suffix.lstrip(".")
+                    if ext not in file_types:
+                        continue
+                modified = item.get("lastModifiedDateTime", "")
+                file_key = f"{file_name}:{modified}"
+                if file_key not in seen:
+                    new_files.append({
+                        "name": file_name,
+                        "path": item.get("webUrl", ""),
+                        "item_id": item.get("id", ""),
+                        "size": item.get("size", 0),
+                        "modified": str(modified),
+                    })
+                    seen[file_key] = None
+        except Exception:
+            logger.exception(f"Error scanning OneDrive for trigger {task_id}")
+
+        self._seen_files[task_id] = seen
+        return new_files
+
     async def _move_processed_files(self, config: dict, files: list[dict]) -> None:
         """Move processed local files to a 'processed' subfolder."""
         folder_path = config.get("folder_path", ".")
@@ -739,7 +1490,10 @@ class TriggerService(Service):
         filter_sender = config.get("filter_sender", "")
         filter_subject = config.get("filter_subject", "")
         filter_body = config.get("filter_body", "")
+        filter_to = config.get("filter_to", "")
+        filter_cc = config.get("filter_cc", "")
         filter_importance = config.get("filter_importance", "")
+        ingest_mode = config.get("ingest_mode", "")  # "idp_pipeline" → create IdpDocuments + enqueue
         filter_has_attachments = config.get("filter_has_attachments", False)
         unread_only = config.get("unread_only", True)
         mark_as_read = config.get("mark_as_read", False)
@@ -798,8 +1552,9 @@ class TriggerService(Service):
                 safe_folder = mail_folder.replace("/", "").replace("\\", "").replace("..", "") or "inbox"
                 url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{safe_folder}/messages"
                 # Include body in $select when full body is requested
-                select_fields = "id,subject,from,receivedDateTime,bodyPreview,hasAttachments,toRecipients,importance,isRead"
-                if fetch_full_body:
+                select_fields = "id,subject,from,receivedDateTime,bodyPreview,hasAttachments,toRecipients,ccRecipients,importance,isRead"
+                if fetch_full_body or filter_body:
+                    # body is needed in $select to match filter_body in the client-side fallback.
                     select_fields += ",body"
                 params: dict[str, str] = {
                     "$top": str(max_results),
@@ -815,6 +1570,10 @@ class TriggerService(Service):
                     filters.append(f"contains(subject, '{_odata_escape(filter_subject)}')")
                 if filter_body:
                     filters.append(f"contains(body/content, '{_odata_escape(filter_body)}')")
+                if filter_to:
+                    filters.append(f"toRecipients/any(r:r/emailAddress/address eq '{_odata_escape(filter_to)}')")
+                if filter_cc:
+                    filters.append(f"ccRecipients/any(c:c/emailAddress/address eq '{_odata_escape(filter_cc)}')")
                 if filter_importance and filter_importance != "all":
                     filters.append(f"importance eq '{_odata_escape(filter_importance)}'")
                 if filter_has_attachments:
@@ -867,7 +1626,10 @@ class TriggerService(Service):
                     logger.warning(f"Email monitor {task_id}: Graph API {resp.status_code}")
                     continue
 
-                messages = resp.json().get("value", [])
+                # Walk @odata.nextLink so a burst of >top-N new emails between polls isn't missed
+                # (small/quiet inboxes have no nextLink → zero extra round-trips).
+                seen_now = self._seen_files.get(task_id, OrderedDict())
+                messages, walk_ok = await self._walk_message_pages(access_token, resp.json(), seen_now, task_id)
 
                 # Apply client-side filters if OData $filter was not supported
                 if client_side_filter and messages:
@@ -875,85 +1637,123 @@ class TriggerService(Service):
                     for m in messages:
                         m_sender = m.get("from", {}).get("emailAddress", {}).get("address", "").lower()
                         m_subject = (m.get("subject") or "").lower()
-                        m_body = (m.get("bodyPreview") or "").lower()
+                        m_body = ((m.get("body") or {}).get("content") or m.get("bodyPreview") or "").lower()
                         if filter_sender and filter_sender.lower() != m_sender:
                             continue
                         if filter_subject and filter_subject.lower() not in m_subject:
                             continue
                         if filter_body and filter_body.lower() not in m_body:
                             continue
+                        if filter_to and filter_to.lower() not in [a.lower() for a in _recipient_addrs(m.get("toRecipients"))]:
+                            continue
+                        if filter_cc and filter_cc.lower() not in [a.lower() for a in _recipient_addrs(m.get("ccRecipients"))]:
+                            continue
+                        if filter_importance and filter_importance != "all" and (m.get("importance") or "").lower() != filter_importance.lower():
+                            continue
+                        if filter_has_attachments and not m.get("hasAttachments"):
+                            continue
+                        if unread_only and m.get("isRead"):
+                            continue
                         filtered.append(m)
                     messages = filtered
 
-                # 5. Filter to unseen messages only
+                # 5. Filter to unseen messages only. Do NOT mark seen yet — for IDP ingest an email
+                #    is marked seen only after it fully ingests, so a partial/crash failure is
+                #    retried next poll (the per-attachment dedup_key skips the ones already done).
                 seen = self._seen_files.get(task_id, OrderedDict())
-                new_messages = []
-                for msg in messages:
-                    msg_id = msg.get("id", "")
-                    if msg_id and msg_id not in seen:
-                        new_messages.append(msg)
-                        seen[msg_id] = None  # OrderedDict append (preserves insertion order)
-                # Cap seen set to prevent unbounded memory growth
-                _MAX_SEEN = 10_000
-                if len(seen) > _MAX_SEEN:
-                    excess = len(seen) - _MAX_SEEN
-                    for _ in range(excess):
-                        seen.popitem(last=False)  # evicts OLDEST, not random
-                self._seen_files[task_id] = seen
+                new_messages = [m for m in messages if m.get("id") and m["id"] not in seen]
 
                 if not new_messages:
                     continue
 
                 logger.info(f"Email monitor {task_id}: found {len(new_messages)} new email(s)")
 
-                # 6. Build enhanced payload with full body + attachments
-                email_payload = []
-                for msg in new_messages:
-                    from_addr = msg.get("from", {}).get("emailAddress", {})
-                    entry: dict = {
-                        "id": msg.get("id"),
-                        "subject": msg.get("subject", ""),
-                        "from_name": from_addr.get("name", ""),
-                        "from_email": from_addr.get("address", ""),
-                        "received": msg.get("receivedDateTime", ""),
-                        "preview": msg.get("bodyPreview", ""),
-                        "has_attachments": msg.get("hasAttachments", False),
-                        "importance": msg.get("importance", "normal"),
-                        "is_read": msg.get("isRead", False),
-                    }
+                processed_ids: list[str] = []  # emails to mark seen (+ optionally read)
+                if ingest_mode == "idp_pipeline":
+                    # IDP source mode (created by sync_email_monitors_for_agent): create one
+                    # IdpDocument per attachment and enqueue the EXISTING pipeline (OCR → extract
+                    # → route → Processed Docs). Skip the flow-graph execution (no double-process).
+                    for msg in new_messages:
+                        ok = False
+                        try:
+                            raw_atts = await self._fetch_attachments_raw(msg["id"], access_token, task_id)
+                            if raw_atts is None:
+                                # Attachment fetch FAILED (transient Graph error) — do NOT mark the
+                                # email seen; retry next poll so its attachments aren't lost.
+                                logger.warning(
+                                    f"Email monitor {task_id}: attachment fetch failed for "
+                                    f"{str(msg.get('id', ''))[:24]}; will retry next poll"
+                                )
+                            else:
+                                ok = await self._ingest_email_to_idp(agent_id, connector_id, msg, raw_atts)
+                        except Exception:
+                            logger.exception(
+                                f"Email monitor {task_id}: IDP ingest failed for message "
+                                f"{str(msg.get('id', ''))[:24]}"
+                            )
+                        if ok:
+                            processed_ids.append(msg["id"])
+                else:
+                    # Legacy flow-graph mode (API-created email monitors): unchanged.
+                    email_payload = []
+                    for msg in new_messages:
+                        from_addr = msg.get("from", {}).get("emailAddress", {})
+                        entry: dict = {
+                            "id": msg.get("id"),
+                            "subject": msg.get("subject", ""),
+                            "from_name": from_addr.get("name", ""),
+                            "from_email": from_addr.get("address", ""),
+                            "received": msg.get("receivedDateTime", ""),
+                            "preview": msg.get("bodyPreview", ""),
+                            "has_attachments": msg.get("hasAttachments", False),
+                            "importance": msg.get("importance", "normal"),
+                            "is_read": msg.get("isRead", False),
+                            "to": _recipient_addrs(msg.get("toRecipients")),
+                            "cc": _recipient_addrs(msg.get("ccRecipients")),
+                        }
+                        if fetch_full_body:
+                            body_obj = msg.get("body", {})
+                            entry["body"] = body_obj.get("content", "")
+                            entry["body_type"] = body_obj.get("contentType", "text")
+                        if fetch_attachments and msg.get("hasAttachments"):
+                            entry["attachments"] = await self._fetch_and_parse_attachments(
+                                msg["id"], access_token, task_id,
+                            )
+                        elif fetch_attachments:
+                            entry["attachments"] = []
+                        email_payload.append(entry)
 
-                    # Include full email body when enabled
-                    if fetch_full_body:
-                        body_obj = msg.get("body", {})
-                        entry["body"] = body_obj.get("content", "")
-                        entry["body_type"] = body_obj.get("contentType", "text")
-
-                    # Fetch and parse attachments when enabled
-                    if fetch_attachments and msg.get("hasAttachments"):
-                        entry["attachments"] = await self._fetch_and_parse_attachments(
-                            msg["id"], access_token, task_id,
-                        )
-                    elif fetch_attachments:
-                        entry["attachments"] = []
-
-                    email_payload.append(entry)
-
-                await self._execute_trigger(
-                    trigger_config_id=trigger_config_id,
-                    agent_id=agent_id,
-                    payload={"emails": email_payload, "trigger_type": "email_monitor"},
-                    environment=environment,
-                    version=version,
-                    trigger_config=config,
-                )
-
-                # 7. Mark processed emails as read if configured
-                if mark_as_read:
-                    await self._mark_emails_as_read(
-                        [m.get("id") for m in new_messages if m.get("id")],
-                        access_token,
-                        task_id,
+                    await self._execute_trigger(
+                        trigger_config_id=trigger_config_id,
+                        agent_id=agent_id,
+                        payload={"emails": email_payload, "trigger_type": "email_monitor"},
+                        environment=environment,
+                        version=version,
+                        trigger_config=config,
                     )
+                    processed_ids = [m["id"] for m in new_messages if m.get("id")]
+
+                # Mark processed emails seen (bounded) — only the ones that actually completed, AND
+                # only when the message-page walk was COMPLETE. If a later page failed (walk_ok=False)
+                # we must NOT mark these seen: the next poll re-walks from page 1 (the early-stop would
+                # otherwise skip the unreached pages forever), and the dedup_key keeps it idempotent.
+                if walk_ok:
+                    for _mid in processed_ids:
+                        seen[_mid] = None
+                    _MAX_SEEN = 10_000
+                    if len(seen) > _MAX_SEEN:
+                        for _ in range(len(seen) - _MAX_SEEN):
+                            seen.popitem(last=False)  # evict OLDEST
+                    self._seen_files[task_id] = seen
+                else:
+                    logger.warning(
+                        f"Email monitor {task_id}: message-page walk incomplete — NOT marking this "
+                        f"poll's emails seen; will re-walk next poll (dedup prevents duplicate docs)"
+                    )
+
+                # 7. Mark the successfully-processed emails as read if configured
+                if mark_as_read and processed_ids:
+                    await self._mark_emails_as_read(processed_ids, access_token, task_id)
 
                 await self._persist_seen_files(trigger_config_id)
 
@@ -1053,6 +1853,726 @@ class TriggerService(Service):
                 f"for message {message_id[:20]}...: {e}"
             )
             return []
+
+    async def _walk_message_pages(self, access_token: str, first_body: dict, seen, task_id: str) -> tuple[list[dict], bool]:
+        """Accumulate inbox messages across Graph ``@odata.nextLink`` pages, starting from an already
+        fetched first page (``first_body``). Returns ``(messages, ok)``.
+
+        Bounded by ``_MAX_MESSAGE_PAGES``; stops early once the latest page has NO new (unseen)
+        message — the list is receivedDateTime-desc, so an all-seen page means every older page is
+        seen too. Each ``next_url`` is validated with ``_is_graph_url`` (SSRF). With no
+        ``@odata.nextLink`` the loop never runs, so small/quiet inboxes pay zero extra round-trips.
+
+        ``ok`` is ``False`` when a later page FAILED to fetch (non-200/exception): the caller must
+        then NOT mark these emails seen, otherwise the early-stop would make the next poll skip the
+        unreached pages forever. With ``ok=False`` the next poll re-walks from page 1 and the
+        ``dedup_key`` prevents duplicate documents for the ones already ingested."""
+        import httpx
+
+        messages = list(first_body.get("value", []))
+        body = first_body
+        next_url = body.get("@odata.nextLink")
+        pages = 1
+        ok = True
+        while next_url and pages < _MAX_MESSAGE_PAGES and _is_graph_url(next_url):
+            if not any(m.get("id") and m["id"] not in seen for m in (body.get("value") or [])):
+                break  # latest page had no new mail → don't page further into old territory
+            try:
+                async with httpx.AsyncClient() as client:
+                    nresp = await client.get(
+                        next_url, headers={"Authorization": f"Bearer {access_token}"}, timeout=15
+                    )
+            except Exception as e:
+                logger.warning(f"Email monitor {task_id}: message page {pages + 1} fetch error: {e}; stopping (incomplete)")
+                ok = False
+                break
+            if nresp.status_code != 200:
+                logger.warning(f"Email monitor {task_id}: message page {pages + 1} HTTP {nresp.status_code}; stopping (incomplete)")
+                ok = False
+                break
+            body = nresp.json()
+            messages.extend(body.get("value", []))
+            next_url = body.get("@odata.nextLink")
+            pages += 1
+        if next_url and pages >= _MAX_MESSAGE_PAGES:
+            logger.warning(
+                f"Email monitor {task_id}: hit the {_MAX_MESSAGE_PAGES}-page message cap with more "
+                f"remaining — extreme burst; overflow waits for a later poll"
+            )
+        if pages > 1:
+            logger.info(f"Email monitor {task_id}: walked {pages} message pages ({len(messages)} messages)")
+        return messages, ok
+
+    async def _fetch_attachments_raw(self, message_id: str, access_token: str, task_id: str) -> list[dict] | None:
+        """Fetch RAW file-attachment bytes (b64) for IDP ingest.
+
+        Returns ``[{attachment_id, name, content_bytes_b64, content_type, size}]`` for
+        ``#microsoft.graph.fileAttachment`` items only (skips inline/item attachments).
+
+        Returns ``None`` when the Graph fetch itself FAILED (non-200 or exception) so the
+        caller can retry the email next poll instead of marking it seen with nothing ingested
+        (a transient ``/attachments`` error must not silently drop a real attachment). An empty
+        ``[]`` means the fetch succeeded but the email has no ingestible file attachments.
+        """
+        import base64
+        import httpx
+        from urllib.parse import quote
+
+        safe_id = quote(message_id, safe="")
+        # Page through ALL attachments. Graph paginates the attachments collection via
+        # @odata.nextLink for emails with many/large attachments; following the links guarantees we
+        # don't stop at the first page (which would silently drop the rest of, say, a 100-attachment
+        # email). nextLink is an absolute Graph URL, so we follow it verbatim.
+        url: str | None = f"https://graph.microsoft.com/v1.0/me/messages/{safe_id}/attachments"
+        out: list[dict] = []
+        pages = 0
+        try:
+            async with httpx.AsyncClient() as client:
+                while url and pages < _MAX_ATTACHMENT_PAGES:
+                    if not _is_graph_url(url):
+                        # A nextLink that isn't a Microsoft Graph https URL is forged/anomalous —
+                        # never send the bearer token to it (SSRF). Treat as incomplete → retry.
+                        logger.warning(
+                            f"Email monitor {task_id}: refusing non-Graph attachments URL for "
+                            f"{message_id[:20]}..."
+                        )
+                        return None
+                    resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
+                    if resp.status_code != 200:
+                        logger.warning(
+                            f"Email monitor {task_id}: raw attachments HTTP {resp.status_code} for "
+                            f"{message_id[:20]}... (page {pages + 1})"
+                        )
+                        # Any page failing → retry the WHOLE email next poll (the dedup_key skips
+                        # attachments already ingested), never mark it seen with a partial set.
+                        return None
+                    body = resp.json()
+                    for att in body.get("value", []):
+                        if att.get("@odata.type") != "#microsoft.graph.fileAttachment":
+                            continue
+                        cb = att.get("contentBytes", "")
+                        if not cb:
+                            # Large attachments (>~3 MB) come back from the list endpoint WITHOUT
+                            # inline contentBytes. Fetch the raw bytes via /$value so they're
+                            # processed, not silently dropped (which would also mark the email seen
+                            # with the big doc lost forever).
+                            att_id = att.get("id", "")
+                            if not att_id:
+                                logger.warning(
+                                    f"Email monitor {task_id}: attachment with no bytes and no id on "
+                                    f"{message_id[:20]}...; skipping"
+                                )
+                                continue
+                            val_url = (
+                                f"https://graph.microsoft.com/v1.0/me/messages/{safe_id}"
+                                f"/attachments/{quote(att_id, safe='')}/$value"
+                            )
+                            try:
+                                vresp = await client.get(
+                                    val_url, headers={"Authorization": f"Bearer {access_token}"}, timeout=60
+                                )
+                            except Exception as ve:
+                                logger.warning(f"Email monitor {task_id}: $value fetch error for {att.get('name')}: {ve}")
+                                return None  # transient → retry whole email
+                            if vresp.status_code != 200:
+                                logger.warning(
+                                    f"Email monitor {task_id}: $value HTTP {vresp.status_code} for "
+                                    f"'{att.get('name')}' on {message_id[:20]}..."
+                                )
+                                return None  # a real attachment we could not fetch → retry, never partial-seen
+                            cb = base64.b64encode(vresp.content).decode("ascii")
+                        out.append({
+                            "attachment_id": att.get("id", ""),
+                            "name": att.get("name", "attachment"),
+                            "content_bytes_b64": cb,
+                            "content_type": att.get("contentType", "application/octet-stream"),
+                            "size": att.get("size", 0),
+                        })
+                    url = body.get("@odata.nextLink")
+                    pages += 1
+            if url:
+                # Loop stopped at the page cap with more pages remaining → INCOMPLETE fetch (almost
+                # always a pathological/looping nextLink). Return None, NOT the partial list: the
+                # caller would otherwise mark the email seen and permanently drop the unfetched
+                # attachments. None → retry next poll; the dedup_key skips ones already ingested.
+                logger.warning(
+                    f"Email monitor {task_id}: attachments exceeded {_MAX_ATTACHMENT_PAGES} pages for "
+                    f"{message_id[:20]}... — treating as incomplete; will retry"
+                )
+                return None
+            return out
+        except Exception as e:
+            logger.warning(f"Email monitor {task_id}: raw attachments error for {message_id[:20]}...: {e}")
+            return None  # fetch failed → caller retries (do not mark seen)
+
+    async def _ingest_email_to_idp(self, base_agent_id, connector_id: str, email_msg: dict, raw_attachments: list[dict]) -> bool:
+        """Create one IdpDocument per file attachment and enqueue the existing IDP pipeline.
+
+        Mirrors ``api/idp/documents.py::upload_documents`` (agent resolve/auto-create → storage
+        save → IdpDocument row → ``enqueue_document``) so a polled email lands in Processed Docs
+        exactly like an upload, with email provenance in ``source_metadata`` and idempotent across
+        re-polls/restarts (a `dedup_key` lookup + ``enqueue_document``'s row-lock). Returns True if
+        every intended attachment ingested (caller marks the email seen) — False if any failed (the
+        email is retried next poll; already-ingested attachments are skipped by the dedup_key).
+        """
+        if not raw_attachments:
+            return True
+
+        import hashlib
+        from uuid import UUID as _UUID, uuid4 as _uuid4
+        from sqlalchemy import delete as _sql_delete, or_, select as _select
+
+        from agentcore.services.deps import get_db_service, get_storage_service
+        from agentcore.services.database.models.agent.model import Agent
+        from agentcore.services.database.models.idp.config import IdpAgent
+        from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
+        from agentcore.services.idp.pipeline import enqueue_document
+        from agentcore.api.idp.documents import ALLOWED_EXTENSIONS
+
+        from_addr = (email_msg.get("from") or {}).get("emailAddress", {})
+        message_id = email_msg.get("id", "")
+        base_meta = {
+            "from": from_addr.get("address", ""),
+            "from_name": from_addr.get("name", ""),
+            "to": _recipient_addrs(email_msg.get("toRecipients")),
+            "cc": _recipient_addrs(email_msg.get("ccRecipients")),
+            "subject": email_msg.get("subject", ""),
+            "message_id": message_id,
+            "received": email_msg.get("receivedDateTime", ""),
+        }
+        conn_uuid = None
+        if connector_id:
+            try:
+                conn_uuid = _UUID(str(connector_id))
+            except Exception:
+                conn_uuid = None
+
+        db_service = get_db_service()
+        storage = get_storage_service()
+        async with db_service.with_session() as session:
+            # Resolve / auto-create the IDP agent (mirror upload_documents).
+            idp_agent = (
+                await session.execute(
+                    _select(IdpAgent).where(
+                        or_(IdpAgent.id == base_agent_id, IdpAgent.agent_id == base_agent_id),
+                        IdpAgent.deleted_at.is_(None),
+                    )
+                )
+            ).scalars().first()
+            if idp_agent is None:
+                base_agent = await session.get(Agent, base_agent_id)
+                if base_agent is None or base_agent.deleted_at is not None:
+                    logger.warning(f"[email-ingest] base agent {base_agent_id} gone; giving up on {message_id[:20]}")
+                    return True  # agent deleted → mark seen so we don't re-fetch forever
+                idp_agent = IdpAgent(
+                    agent_id=base_agent_id, extraction_mode="dynamic_prompting", dynamic_prompt="",
+                    default_rule_action="pending_review", is_active=True,
+                )
+                session.add(idp_agent)
+                await session.flush()
+
+            agent_scope = str(idp_agent.id)
+            all_ok = True  # True only if every (intended) attachment ingested → email marked seen
+            for att in raw_attachments:
+                name = att.get("name", "attachment")
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in ALLOWED_EXTENSIONS:
+                    logger.info(f"[email-ingest] skipping unsupported attachment '{name}' ({ext})")
+                    continue  # intentional skip — not a failure
+                try:
+                    # validate=True so a structurally-malformed payload RAISES (→ retry) instead of
+                    # silently decoding to corrupted non-empty bytes. Graph fileAttachment contentBytes
+                    # is compact standard base64 (no embedded whitespace), so this never false-rejects.
+                    data = base64.b64decode(att.get("content_bytes_b64", ""), validate=True)
+                except Exception:
+                    # A real (supported) attachment we could not decode — likely a truncated/transient
+                    # Graph payload. Do NOT mark the email seen (all_ok=False → retry next poll); the
+                    # dedup_key skips any sibling attachments already ingested, so no duplicates.
+                    logger.warning(f"[email-ingest] could not decode attachment '{name}'; will retry")
+                    all_ok = False
+                    continue
+                if not data:
+                    logger.warning(f"[email-ingest] empty content for attachment '{name}'; will retry")
+                    all_ok = False
+                    continue
+
+                # Idempotency across restarts/crashes: skip if this (message, attachment) already
+                # exists. When Graph gives no attachment id, fall back to a CONTENT hash — stable
+                # across polls and order-independent (a positional index breaks if Graph reorders
+                # id-less attachments between retries): same-named attachments with different content
+                # get distinct keys, byte-identical ones correctly dedupe to one.
+                dedup_key = f"{message_id}:{att.get('attachment_id') or hashlib.sha256(data).hexdigest()}"
+                exists = (
+                    await session.execute(
+                        _select(IdpDocument.id)
+                        .where(IdpDocument.source_metadata["dedup_key"].astext == dedup_key)
+                        .limit(1)
+                    )
+                ).first()
+                if exists:
+                    logger.info(f"[email-ingest] already ingested ({dedup_key[:48]}); skipping")
+                    continue
+
+                # Each attachment is isolated: one failure must not abort the rest, and a DB failure
+                # after the file is written must not leave an orphan in storage.
+                doc_id = _uuid4()
+                storage_filename = f"idp_{doc_id}{ext}"
+                saved = False
+                try:
+                    await storage.save_file(agent_id=agent_scope, file_name=storage_filename, data=data)
+                    saved = True
+                    doc = IdpDocument(
+                        id=doc_id,
+                        agent_id=idp_agent.id,
+                        original_filename=name,
+                        file_path=f"{agent_scope}/{storage_filename}",
+                        file_type=ext.lstrip("."),
+                        mime_type=att.get("content_type"),
+                        file_size_bytes=len(data),
+                        checksum=hashlib.sha256(data).hexdigest(),
+                        source="mail_connector",
+                        connector_id=conn_uuid,
+                        source_metadata={**base_meta, "attachment_name": name, "dedup_key": dedup_key},
+                        status="queued",
+                        uploaded_by=None,
+                    )
+                    session.add(doc)
+                    await session.commit()
+                    await session.refresh(doc)
+                except Exception as e:
+                    logger.warning(f"[email-ingest] failed to ingest attachment '{name}': {e}")
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
+                    if saved:  # delete the orphan file no IdpDocument row references
+                        try:
+                            await storage.delete_file(agent_id=agent_scope, file_name=storage_filename)
+                        except Exception:
+                            logger.warning(f"[email-ingest] could not clean up orphan file {storage_filename}")
+                    all_ok = False
+                    continue
+
+                # Enqueue the pipeline. If this fails, the committed doc would sit with no runnable job
+                # AND the dedup_key would make a retry SKIP it (so it is processed NEVER). Roll the
+                # ingest back — delete the doc's job rows, the doc, and its storage file — and mark the
+                # email unseen (all_ok=False) so the NEXT poll re-creates AND re-enqueues it cleanly.
+                try:
+                    await enqueue_document(session, doc.id)
+                    logger.info(f"[email-ingest] queued IdpDocument {doc.id} ('{name}') from email {message_id[:20]}")
+                except Exception as e:
+                    logger.warning(f"[email-ingest] enqueue failed for {doc.id}: {e}; rolling back so the email retries")
+                    try:
+                        await session.execute(_sql_delete(IdpProcessingJob).where(IdpProcessingJob.document_id == doc.id))
+                        await session.delete(doc)
+                        await session.commit()
+                        # Doc row is gone → now safe to delete its file too (the retry re-creates both).
+                        # ONLY after a successful commit: if the cleanup rolled back the doc survives, and
+                        # deleting its file would strand it (dedup skips the row, but the file is gone).
+                        if saved:
+                            try:
+                                await storage.delete_file(agent_id=agent_scope, file_name=storage_filename)
+                            except Exception:
+                                logger.warning(f"[email-ingest] could not clean up file {storage_filename} after enqueue failure")
+                    except Exception:
+                        try:
+                            await session.rollback()
+                        except Exception:
+                            pass
+                    all_ok = False
+            return all_ok
+
+    async def _ingest_sharepoint_files_to_idp(self, base_agent_id, config: dict, files: list[dict]) -> None:
+        """Download new SharePoint files and ingest each into the existing IDP pipeline.
+
+        Mirrors ``_ingest_email_to_idp``: resolve/auto-create the IDP agent, save the file to storage,
+        create an ``IdpDocument`` row, and enqueue the pipeline (OCR → extract → route → Processed
+        Docs). Idempotent across re-polls/restarts via a per-file ``dedup_key``. The SharePoint folder
+        monitor (``_scan_sharepoint``) already filtered to NEW files, so a file reaching here is one we
+        have not ingested yet.
+        """
+        if not files:
+            return
+
+        import hashlib
+        from uuid import UUID as _UUID, uuid4 as _uuid4
+        from urllib.parse import urlparse
+        from sqlalchemy import select as _select
+
+        import httpx
+
+        from agentcore.services.deps import get_db_service, get_storage_service
+        from agentcore.services.database.models.agent.model import Agent
+        from agentcore.services.database.models.idp.config import IdpAgent
+        from agentcore.services.database.models.idp.documents import IdpDocument
+        from agentcore.services.idp.pipeline import enqueue_document
+        from agentcore.api.idp.documents import ALLOWED_EXTENSIONS
+
+        connector_id = config.get("connector_id", "")
+        connector_cfg = await _get_storage_connector_config(str(connector_id))
+        if not connector_cfg:
+            logger.error(f"[sharepoint-ingest] could not load connector {connector_id}")
+            return
+
+        site_url = connector_cfg.get("site_url", "")
+        client_id = connector_cfg.get("client_id", "")
+        client_secret = connector_cfg.get("client_secret", "")
+        tenant_id = connector_cfg.get("tenant_id", "")
+        library = config.get("sharepoint_library") or connector_cfg.get("library", "Shared Documents")
+        if not all([site_url, client_id, client_secret, tenant_id]):
+            logger.error("[sharepoint-ingest] connector is missing site_url/client_id/client_secret/tenant_id")
+            return
+
+        GRAPH = "https://graph.microsoft.com/v1.0"
+
+        # Acquire token + resolve drive once for the whole batch.
+        async with httpx.AsyncClient(timeout=30) as client:
+            tok = await client.post(
+                f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "scope": "https://graph.microsoft.com/.default",
+                },
+            )
+            if tok.status_code != 200:
+                logger.error(f"[sharepoint-ingest] token error: {tok.text[:300]}")
+                return
+            access_token = tok.json()["access_token"]
+            headers = {"Authorization": f"Bearer {access_token}"}
+
+            parsed = urlparse(site_url)
+            hostname = parsed.hostname or parsed.netloc
+            path = parsed.path.rstrip("/")
+            site_api = f"{GRAPH}/sites/{hostname}:{path}" if path else f"{GRAPH}/sites/{hostname}"
+            sr = await client.get(site_api, headers=headers)
+            if sr.status_code != 200:
+                logger.error(f"[sharepoint-ingest] site resolve failed: {sr.text[:300]}")
+                return
+            site_id = sr.json()["id"]
+
+            dr = await client.get(f"{GRAPH}/sites/{site_id}/drives", headers=headers)
+            if dr.status_code != 200:
+                logger.error(f"[sharepoint-ingest] drive list failed: {dr.text[:300]}")
+                return
+            drives = dr.json().get("value", [])
+            drive_id = next((d["id"] for d in drives if d.get("name", "").lower() == library.lower()), None)
+            if not drive_id and drives:
+                drive_id = drives[0]["id"]
+            if not drive_id:
+                logger.error("[sharepoint-ingest] no drive found")
+                return
+
+            db_service = get_db_service()
+            storage = get_storage_service()
+            async with db_service.with_session() as session:
+                idp_agent = (
+                    await session.execute(
+                        _select(IdpAgent).where(
+                            (IdpAgent.id == base_agent_id) | (IdpAgent.agent_id == base_agent_id),
+                            IdpAgent.deleted_at.is_(None),
+                        )
+                    )
+                ).scalars().first()
+                if idp_agent is None:
+                    base_agent = await session.get(Agent, base_agent_id)
+                    if base_agent is None or base_agent.deleted_at is not None:
+                        logger.warning(f"[sharepoint-ingest] base agent {base_agent_id} gone; skipping batch")
+                        return
+                    idp_agent = IdpAgent(
+                        agent_id=base_agent_id, extraction_mode="dynamic_prompting", dynamic_prompt="",
+                        default_rule_action="pending_review", is_active=True,
+                    )
+                    session.add(idp_agent)
+                    await session.flush()
+
+                agent_scope = str(idp_agent.id)
+                conn_uuid = None
+                try:
+                    conn_uuid = _UUID(str(connector_id))
+                except Exception:
+                    conn_uuid = None
+
+                for f in files:
+                    name = f.get("name", "file")
+                    item_id = f.get("item_id", "")
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext not in ALLOWED_EXTENSIONS:
+                        logger.info(f"[sharepoint-ingest] skipping unsupported file '{name}' ({ext})")
+                        continue
+                    if not item_id:
+                        logger.warning(f"[sharepoint-ingest] file '{name}' has no item_id; skipping")
+                        continue
+
+                    dedup_key = f"sharepoint:{connector_id}:{item_id}:{f.get('modified', '')}"
+                    exists = (
+                        await session.execute(
+                            _select(IdpDocument.id)
+                            .where(IdpDocument.source_metadata["dedup_key"].astext == dedup_key)
+                            .limit(1)
+                        )
+                    ).first()
+                    if exists:
+                        logger.info(f"[sharepoint-ingest] already ingested ({dedup_key[:60]}); skipping")
+                        continue
+
+                    try:
+                        dl = await client.get(
+                            f"{GRAPH}/drives/{drive_id}/items/{item_id}/content",
+                            headers=headers, timeout=60, follow_redirects=True,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[sharepoint-ingest] download error for '{name}': {e}")
+                        continue
+                    if dl.status_code != 200 or not dl.content:
+                        logger.warning(f"[sharepoint-ingest] download failed for '{name}' ({dl.status_code})")
+                        continue
+                    data = dl.content
+
+                    doc_id = _uuid4()
+                    storage_filename = f"idp_{doc_id}{ext}"
+                    saved = False
+                    try:
+                        await storage.save_file(agent_id=agent_scope, file_name=storage_filename, data=data)
+                        saved = True
+                        doc = IdpDocument(
+                            id=doc_id,
+                            agent_id=idp_agent.id,
+                            original_filename=name,
+                            file_path=f"{agent_scope}/{storage_filename}",
+                            file_type=ext.lstrip("."),
+                            mime_type=None,
+                            file_size_bytes=len(data),
+                            checksum=hashlib.sha256(data).hexdigest(),
+                            source="sharepoint",
+                            connector_id=conn_uuid,
+                            source_metadata={
+                                "site_url": site_url,
+                                "library": library,
+                                "folder": config.get("sharepoint_folder", ""),
+                                "item_id": item_id,
+                                "web_url": f.get("path", ""),
+                                "dedup_key": dedup_key,
+                            },
+                            status="queued",
+                            uploaded_by=None,
+                        )
+                        session.add(doc)
+                        await session.commit()
+                        await session.refresh(doc)
+                    except Exception as e:
+                        logger.warning(f"[sharepoint-ingest] failed to ingest '{name}': {e}")
+                        try:
+                            await session.rollback()
+                        except Exception:
+                            pass
+                        if saved:
+                            try:
+                                await storage.delete_file(agent_id=agent_scope, file_name=storage_filename)
+                            except Exception:
+                                logger.warning(f"[sharepoint-ingest] could not clean up orphan {storage_filename}")
+                        continue
+
+                    try:
+                        await enqueue_document(session, doc.id)
+                        logger.info(f"[sharepoint-ingest] queued IdpDocument {doc.id} ('{name}')")
+                    except Exception as e:
+                        logger.warning(f"[sharepoint-ingest] enqueue failed for {doc.id}: {e}")
+
+    async def _refresh_onedrive_token(self, config: dict, acct: dict, connector_id: str, force: bool = False) -> str:
+        """Refresh a OneDrive OAuth token if expired (via /common authority), returning a valid token."""
+        access_token = acct.get("access_token", "")
+        expires_at = acct.get("token_expires_at", 0)
+        if not force and access_token and time.time() < (expires_at - 60):
+            return access_token
+
+        refresh_token = acct.get("refresh_token", "")
+        if not refresh_token:
+            raise ValueError("OneDrive token expired, no refresh token. Re-link the account.")
+
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+                data={
+                    "client_id": config.get("client_id"),
+                    "client_secret": config.get("client_secret"),
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                    "scope": "Files.Read Files.ReadWrite User.Read offline_access",
+                },
+                timeout=15,
+            )
+        if resp.status_code != 200:
+            raise ValueError(f"OneDrive token refresh failed ({resp.status_code})")
+
+        data = resp.json()
+        acct["access_token"] = data["access_token"]
+        acct["refresh_token"] = data.get("refresh_token", refresh_token)
+        acct["token_expires_at"] = time.time() + data.get("expires_in", 3600)
+        # _persist_outlook_tokens is provider-agnostic (re-encrypts the whole config for the row).
+        await self._persist_outlook_tokens(config, connector_id)
+        return data["access_token"]
+
+    async def _ingest_onedrive_files_to_idp(self, base_agent_id, config: dict, files: list[dict]) -> None:
+        """Download new OneDrive files and ingest each into the existing IDP pipeline.
+
+        Mirrors ``_ingest_sharepoint_files_to_idp`` but uses the delegated OneDrive token + Graph
+        ``/me/drive`` paths. Idempotent across re-polls via a per-file ``dedup_key``.
+        """
+        if not files:
+            return
+
+        import hashlib
+        from uuid import UUID as _UUID, uuid4 as _uuid4
+        from urllib.parse import quote
+        from sqlalchemy import select as _select
+
+        import httpx
+
+        from agentcore.services.deps import get_db_service, get_storage_service
+        from agentcore.services.database.models.agent.model import Agent
+        from agentcore.services.database.models.idp.config import IdpAgent
+        from agentcore.services.database.models.idp.documents import IdpDocument
+        from agentcore.services.idp.pipeline import enqueue_document
+        from agentcore.api.idp.documents import ALLOWED_EXTENSIONS
+
+        connector_id = config.get("connector_id", "")
+        connector_cfg = await _get_storage_connector_config(str(connector_id))
+        if not connector_cfg:
+            logger.error(f"[onedrive-ingest] could not load connector {connector_id}")
+            return
+        accounts = connector_cfg.get("linked_accounts", [])
+        if not accounts:
+            logger.warning("[onedrive-ingest] connector has no linked account")
+            return
+        acct = accounts[0]
+        try:
+            access_token = await self._refresh_onedrive_token(connector_cfg, acct, str(connector_id))
+        except Exception as e:
+            logger.error(f"[onedrive-ingest] token refresh failed: {e}")
+            return
+
+        GRAPH = "https://graph.microsoft.com/v1.0"
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        db_service = get_db_service()
+        storage = get_storage_service()
+        async with httpx.AsyncClient(timeout=60) as client, db_service.with_session() as session:
+            idp_agent = (
+                await session.execute(
+                    _select(IdpAgent).where(
+                        (IdpAgent.id == base_agent_id) | (IdpAgent.agent_id == base_agent_id),
+                        IdpAgent.deleted_at.is_(None),
+                    )
+                )
+            ).scalars().first()
+            if idp_agent is None:
+                base_agent = await session.get(Agent, base_agent_id)
+                if base_agent is None or base_agent.deleted_at is not None:
+                    logger.warning(f"[onedrive-ingest] base agent {base_agent_id} gone; skipping batch")
+                    return
+                idp_agent = IdpAgent(
+                    agent_id=base_agent_id, extraction_mode="dynamic_prompting", dynamic_prompt="",
+                    default_rule_action="pending_review", is_active=True,
+                )
+                session.add(idp_agent)
+                await session.flush()
+
+            agent_scope = str(idp_agent.id)
+            conn_uuid = None
+            try:
+                conn_uuid = _UUID(str(connector_id))
+            except Exception:
+                conn_uuid = None
+
+            for f in files:
+                name = f.get("name", "file")
+                item_id = f.get("item_id", "")
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in ALLOWED_EXTENSIONS:
+                    logger.info(f"[onedrive-ingest] skipping unsupported file '{name}' ({ext})")
+                    continue
+                if not item_id:
+                    continue
+
+                dedup_key = f"onedrive:{connector_id}:{item_id}:{f.get('modified', '')}"
+                exists = (
+                    await session.execute(
+                        _select(IdpDocument.id)
+                        .where(IdpDocument.source_metadata["dedup_key"].astext == dedup_key)
+                        .limit(1)
+                    )
+                ).first()
+                if exists:
+                    logger.info(f"[onedrive-ingest] already ingested ({dedup_key[:60]}); skipping")
+                    continue
+
+                try:
+                    dl = await client.get(
+                        f"{GRAPH}/me/drive/items/{quote(item_id, safe='')}/content",
+                        headers=headers, follow_redirects=True,
+                    )
+                except Exception as e:
+                    logger.warning(f"[onedrive-ingest] download error for '{name}': {e}")
+                    continue
+                if dl.status_code != 200 or not dl.content:
+                    logger.warning(f"[onedrive-ingest] download failed for '{name}' ({dl.status_code})")
+                    continue
+                data = dl.content
+
+                doc_id = _uuid4()
+                storage_filename = f"idp_{doc_id}{ext}"
+                saved = False
+                try:
+                    await storage.save_file(agent_id=agent_scope, file_name=storage_filename, data=data)
+                    saved = True
+                    doc = IdpDocument(
+                        id=doc_id,
+                        agent_id=idp_agent.id,
+                        original_filename=name,
+                        file_path=f"{agent_scope}/{storage_filename}",
+                        file_type=ext.lstrip("."),
+                        mime_type=None,
+                        file_size_bytes=len(data),
+                        checksum=hashlib.sha256(data).hexdigest(),
+                        # IdpDocument.source CHECK allows upload|mail_connector|sharepoint|other.
+                        source="other",
+                        connector_id=conn_uuid,
+                        source_metadata={
+                            "provider": "onedrive",
+                            "account": acct.get("email", ""),
+                            "folder": config.get("onedrive_folder", ""),
+                            "item_id": item_id,
+                            "web_url": f.get("path", ""),
+                            "dedup_key": dedup_key,
+                        },
+                        status="queued",
+                        uploaded_by=None,
+                    )
+                    session.add(doc)
+                    await session.commit()
+                    await session.refresh(doc)
+                except Exception as e:
+                    logger.warning(f"[onedrive-ingest] failed to ingest '{name}': {e}")
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
+                    if saved:
+                        try:
+                            await storage.delete_file(agent_id=agent_scope, file_name=storage_filename)
+                        except Exception:
+                            logger.warning(f"[onedrive-ingest] could not clean up orphan {storage_filename}")
+                    continue
+
+                try:
+                    await enqueue_document(session, doc.id)
+                    logger.info(f"[onedrive-ingest] queued IdpDocument {doc.id} ('{name}')")
+                except Exception as e:
+                    logger.warning(f"[onedrive-ingest] enqueue failed for {doc.id}: {e}")
 
     async def _refresh_outlook_token(self, config: dict, acct: dict, connector_id: str, force: bool = False) -> str:
         """Refresh an Outlook OAuth token if expired, returning a valid access token."""

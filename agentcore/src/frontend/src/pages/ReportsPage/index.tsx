@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/table";
 import { api } from "@/controllers/API/api";
 import { getURL } from "@/controllers/API/helpers/constants";
+import { useGetFieldConfigs } from "@/controllers/API/queries/field-configs";
 import { useGetReport, type ReportRow } from "@/controllers/API/queries/idp";
 
 // Document statuses worth filtering a report by (subset of the idp_documents status set).
@@ -117,7 +118,8 @@ export default function ReportsPage() {
   const [end, setEnd] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("");
-  const [values, setValues] = useState<"both" | "final">("both");
+  const [values, setValues] = useState<"both" | "final" | "predicted" | "audited">("both");
+  const [configId, setConfigId] = useState("all"); // "all" = sectioned layout; else a field-config id
   const [page, setPage] = useState(1);
   const [busy, setBusy] = useState(false);
 
@@ -134,11 +136,22 @@ export default function ReportsPage() {
     predicted_type: typeParam,
     created_start: createdStart,
     created_end: createdEnd,
+    // A selected Field config filters the table to docs extracted with it (same as the export).
+    config_id: configId !== "all" ? configId : undefined,
   });
 
   const rows: ReportRow[] = data?.items ?? [];
   const total = data?.total ?? 0;
   const totalPages = data?.pages ?? 1;
+
+  // Field configurations (templates + custom) for the all-data export "type" dropdown.
+  // size=100 is the pagination max; orgs with >100 configs are a known limitation (use a
+  // searchable picker later — the free-text Type filter is an alternative in the meantime).
+  const { data: cfgPage } = useGetFieldConfigs({ size: 100, is_active: true });
+  const configs = useMemo(
+    () => [...(cfgPage?.items ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
+    [cfgPage],
+  );
 
   // Shared query params for the file-download endpoints (everything except pagination).
   const filterQP = useMemo(() => {
@@ -170,20 +183,26 @@ export default function ReportsPage() {
   }
 
   function downloadReport(fmt: string) {
+    const params: Record<string, string> = { ...filterQP, format: fmt };
+    if (configId !== "all") params.config_id = configId; // match the config-filtered table
     run(() =>
       downloadBlob(
         `${getURL("IDP_REPORTS")}/processed-docs/export`,
-        { ...filterQP, format: fmt },
+        params,
         `processed_docs_report.${EXT[fmt]}`,
       ),
     );
   }
 
   function downloadAllData(fmt: string) {
+    // A selected config switches the backend to the config-driven per-document-row layout;
+    // "all" keeps the sectioned layout.
+    const params: Record<string, string> = { ...filterQP, format: fmt, values };
+    if (configId !== "all") params.config_id = configId;
     run(() =>
       downloadBlob(
         `${getURL("IDP_REPORTS")}/processed-docs/export-data`,
-        { ...filterQP, format: fmt, values },
+        params,
         `processed_docs_data.${EXT[fmt]}`,
       ),
     );
@@ -191,10 +210,12 @@ export default function ReportsPage() {
 
   function exportDoc(row: ReportRow, fmt: string) {
     const base = row.original_filename.replace(/\.[^.]+$/, "") || "document";
+    // The per-document export endpoint only supports {both, final}; clamp the richer modes.
+    const docValues = values === "both" || values === "final" ? values : "final";
     run(() =>
       downloadBlob(
         `${getURL("IDP_PROCESSED_DOCS")}/${row.document_id}/export`,
-        { format: fmt, values },
+        { format: fmt, values: docValues },
         `${base}_export.${EXT[fmt]}`,
       ),
     );
@@ -226,12 +247,14 @@ export default function ReportsPage() {
         </div>
         <div className="flex items-center gap-2">
           {/* Values toggle (applies to per-PO and all-data exports) */}
-          <Select value={values} onValueChange={(v) => setValues(v as "both" | "final")}>
+          <Select value={values} onValueChange={(v) => setValues(v as typeof values)}>
             <SelectTrigger className="w-44 h-9 rounded-lg">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="both">Predicted + Audited</SelectItem>
+              <SelectItem value="predicted">Predicted only</SelectItem>
+              <SelectItem value="audited">Audited only</SelectItem>
               <SelectItem value="final">Final values only</SelectItem>
             </SelectContent>
           </Select>
@@ -304,6 +327,25 @@ export default function ReportsPage() {
             ))}
           </SelectContent>
         </Select>
+        {/* Field configuration for "Download all data": a selection switches that export to the
+            config-driven per-document-row layout (its schema = columns, filtered to that type). */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">Field config</span>
+          <Select value={configId} onValueChange={resetToFirstPage(setConfigId)}>
+            <SelectTrigger className="w-52 h-9 rounded-lg">
+              <SelectValue placeholder="Field configuration" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All configurations</SelectItem>
+              {configs.map((c) => (
+                <SelectItem key={c.id} value={c.id}>
+                  {c.name}
+                  {c.is_template ? " (template)" : ""}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
         <Input
           placeholder="Document type"
           value={typeFilter}

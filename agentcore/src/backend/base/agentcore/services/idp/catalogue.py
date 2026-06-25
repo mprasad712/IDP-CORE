@@ -57,14 +57,14 @@ DEFAULT_TEMPLATES = [
         "name": "Goods Receipt Note",
         "description": "Delivery inspection receipt or goods inwards record.",
         "headers": [
-            {"field_name": "grn_number", "field_type": "text", "is_required": True, "display_order": 1, "description": "Goods Receipt Note unique identifier"},
-            {"field_name": "received_date", "field_type": "date", "is_required": True, "display_order": 2, "description": "Date goods were received"},
-            {"field_name": "vendor_name", "field_type": "text", "is_required": True, "display_order": 3, "description": "Supplying vendor's name"},
-            {"field_name": "po_reference", "field_type": "text", "is_required": False, "display_order": 4, "description": "Purchase Order reference number"},
+            {"field_name": "grn_number", "field_type": "text", "is_required": True, "display_order": 1, "description": "Goods Receipt Note unique identifier", "prompt": "Extract the Goods Receipt Note (GRN) number — the unique identifier of the receipt document, usually labelled GRN No. or Receipt No."},
+            {"field_name": "received_date", "field_type": "date", "is_required": True, "display_order": 2, "description": "Date goods were received", "prompt": "Extract the date the goods were received. Formats may vary."},
+            {"field_name": "vendor_name", "field_type": "text", "is_required": True, "display_order": 3, "description": "Supplying vendor's name", "prompt": "Extract the name of the supplying vendor who delivered the goods."},
+            {"field_name": "po_reference", "field_type": "text", "is_required": False, "display_order": 4, "description": "Purchase Order reference number", "prompt": "Extract the Purchase Order (PO) number this goods receipt refers to. Leave it blank if not found."},
         ],
         "line_items": [
-            {"column_name": "description", "column_type": "text", "is_required": True, "display_order": 1},
-            {"column_name": "qty_received", "column_type": "number", "is_required": True, "display_order": 2},
+            {"column_name": "description", "column_type": "text", "is_required": True, "display_order": 1, "prompt": "Extract the description of the goods received for the line. It can span multiple lines."},
+            {"column_name": "qty_received", "column_type": "number", "is_required": True, "display_order": 2, "prompt": "Extract the quantity of goods actually received for the line item."},
         ]
     },
 
@@ -73,11 +73,11 @@ DEFAULT_TEMPLATES = [
         "name": "Cheque",
         "description": "Standard bank cheque or check clearance details.",
         "headers": [
-            {"field_name": "bank_name", "field_type": "text", "is_required": True, "display_order": 1, "description": "Bank name"},
-            {"field_name": "cheque_number", "field_type": "text", "is_required": True, "display_order": 2, "description": "The unique cheque identifier"},
-            {"field_name": "cheque_date", "field_type": "date", "is_required": True, "display_order": 3, "description": "Cheque issue date"},
-            {"field_name": "payee_name", "field_type": "text", "is_required": True, "display_order": 4, "description": "The receiver name"},
-            {"field_name": "amount", "field_type": "number", "is_required": True, "display_order": 5, "description": "Cheque transaction amount"},
+            {"field_name": "bank_name", "field_type": "text", "is_required": True, "display_order": 1, "description": "Bank name", "prompt": "Extract the name of the bank that issued the cheque, usually printed prominently at the top."},
+            {"field_name": "cheque_number", "field_type": "text", "is_required": True, "display_order": 2, "description": "The unique cheque identifier", "prompt": "Extract the cheque number. It is a numeric identifier printed on the cheque, often in the MICR line at the bottom."},
+            {"field_name": "cheque_date", "field_type": "date", "is_required": True, "display_order": 3, "description": "Cheque issue date", "prompt": "Extract the date written on the cheque. Formats may vary."},
+            {"field_name": "payee_name", "field_type": "text", "is_required": True, "display_order": 4, "description": "The receiver name", "prompt": "Extract the name of the payee — the person or organisation the cheque is made out to (the 'Pay to' line)."},
+            {"field_name": "amount", "field_type": "number", "is_required": True, "display_order": 5, "description": "Cheque transaction amount", "prompt": "Extract the cheque amount in figures. If only the amount in words is present, convert it to a number."},
         ],
         "line_items": []
     },
@@ -112,10 +112,10 @@ DEFAULT_TEMPLATES = [
         "name": "Voter ID",
         "description": "Electoral identification card.",
         "headers": [
-            {"field_name": "voter_card_number", "field_type": "text", "is_required": True, "display_order": 1, "description": "Unique voter card ID"},
-            {"field_name": "full_name", "field_type": "text", "is_required": True, "display_order": 2, "description": "Voter full name"},
-            {"field_name": "father_or_spouse_name", "field_type": "text", "is_required": False, "display_order": 3, "description": "Relative name listed"},
-            {"field_name": "date_of_birth", "field_type": "date", "is_required": False, "display_order": 4, "description": "Date of birth"},
+            {"field_name": "voter_card_number", "field_type": "text", "is_required": True, "display_order": 1, "description": "Unique voter card ID", "prompt": "Extract the unique voter ID / EPIC number printed on the card. It is usually an alphanumeric code."},
+            {"field_name": "full_name", "field_type": "text", "is_required": True, "display_order": 2, "description": "Voter full name", "prompt": "Extract the full name of the voter as printed on the card."},
+            {"field_name": "father_or_spouse_name", "field_type": "text", "is_required": False, "display_order": 3, "description": "Relative name listed", "prompt": "Extract the father's or husband's/spouse's name listed on the card. Leave it blank if not found."},
+            {"field_name": "date_of_birth", "field_type": "date", "is_required": False, "display_order": 4, "description": "Date of birth", "prompt": "Extract the voter's date of birth or age if shown. Leave it blank if not found."},
         ],
         "line_items": []
     },
@@ -137,11 +137,11 @@ DEFAULT_TEMPLATES = [
         "name": "Contract Agreement",
         "description": "Standard business contract or legal agreement layout.",
         "headers": [
-            {"field_name": "party_a", "field_type": "text", "is_required": True, "display_order": 1, "description": "First party in agreement"},
-            {"field_name": "party_b", "field_type": "text", "is_required": True, "display_order": 2, "description": "Second party in agreement"},
-            {"field_name": "effective_date", "field_type": "date", "is_required": True, "display_order": 3, "description": "Agreement effective start date"},
-            {"field_name": "termination_date", "field_type": "date", "is_required": False, "display_order": 4, "description": "Agreement termination/expiry date"},
-            {"field_name": "governing_law", "field_type": "text", "is_required": False, "display_order": 5, "description": "State or country law governing agreement"},
+            {"field_name": "party_a", "field_type": "text", "is_required": True, "display_order": 1, "description": "First party in agreement", "prompt": "Extract the name of the first party (Party A) to the agreement, usually introduced near the start."},
+            {"field_name": "party_b", "field_type": "text", "is_required": True, "display_order": 2, "description": "Second party in agreement", "prompt": "Extract the name of the second party (Party B) to the agreement. Do not confuse it with Party A."},
+            {"field_name": "effective_date", "field_type": "date", "is_required": True, "display_order": 3, "description": "Agreement effective start date", "prompt": "Extract the effective or commencement date of the agreement. Formats may vary."},
+            {"field_name": "termination_date", "field_type": "date", "is_required": False, "display_order": 4, "description": "Agreement termination/expiry date", "prompt": "Extract the termination, expiry or end date of the agreement. Leave it blank if there is no fixed end date."},
+            {"field_name": "governing_law", "field_type": "text", "is_required": False, "display_order": 5, "description": "State or country law governing agreement", "prompt": "Extract the governing law or jurisdiction — the state or country whose laws govern the agreement. Leave it blank if not found."},
         ],
         "line_items": []
     },
@@ -151,10 +151,10 @@ DEFAULT_TEMPLATES = [
         "name": "Offer Letter",
         "description": "Standard candidate employment job offer letter.",
         "headers": [
-            {"field_name": "candidate_name", "field_type": "text", "is_required": True, "display_order": 1, "description": "Name of applicant/candidate"},
-            {"field_name": "job_title", "field_type": "text", "is_required": True, "display_order": 2, "description": "Proposed job title"},
-            {"field_name": "joining_date", "field_type": "date", "is_required": True, "display_order": 3, "description": "Proposed date of joining"},
-            {"field_name": "salary_offered", "field_type": "number", "is_required": False, "display_order": 4, "description": "Offered gross base salary"},
+            {"field_name": "candidate_name", "field_type": "text", "is_required": True, "display_order": 1, "description": "Name of applicant/candidate", "prompt": "Extract the full name of the candidate or applicant the offer is addressed to."},
+            {"field_name": "job_title", "field_type": "text", "is_required": True, "display_order": 2, "description": "Proposed job title", "prompt": "Extract the job title or position being offered."},
+            {"field_name": "joining_date", "field_type": "date", "is_required": True, "display_order": 3, "description": "Proposed date of joining", "prompt": "Extract the proposed date of joining / start date. Formats may vary."},
+            {"field_name": "salary_offered", "field_type": "number", "is_required": False, "display_order": 4, "description": "Offered gross base salary", "prompt": "Extract the offered gross / base salary as a number. Leave it blank if not stated."},
         ],
         "line_items": []
     },
@@ -162,16 +162,16 @@ DEFAULT_TEMPLATES = [
         "name": "Salary Slip",
         "description": "Periodic payroll payslip detail breakdown.",
         "headers": [
-            {"field_name": "employer_name", "field_type": "text", "is_required": True, "display_order": 1, "description": "Employer/Company name"},
-            {"field_name": "employee_name", "field_type": "text", "is_required": True, "display_order": 2, "description": "Employee full name"},
-            {"field_name": "pay_period", "field_type": "text", "is_required": True, "display_order": 3, "description": "Payroll period (e.g. Oct 2026)"},
-            {"field_name": "gross_salary", "field_type": "number", "is_required": True, "display_order": 4, "description": "Total gross salary"},
-            {"field_name": "deductions", "field_type": "number", "is_required": False, "display_order": 5, "description": "Total deductions applied"},
-            {"field_name": "net_salary", "field_type": "number", "is_required": True, "display_order": 6, "description": "Total net salary paid"},
+            {"field_name": "employer_name", "field_type": "text", "is_required": True, "display_order": 1, "description": "Employer/Company name", "prompt": "Extract the name of the employer or company that issued the pay slip."},
+            {"field_name": "employee_name", "field_type": "text", "is_required": True, "display_order": 2, "description": "Employee full name", "prompt": "Extract the full name of the employee the pay slip belongs to."},
+            {"field_name": "pay_period", "field_type": "text", "is_required": True, "display_order": 3, "description": "Payroll period (e.g. Oct 2026)", "prompt": "Extract the pay period the slip covers (e.g. 'June 2026', '01-Jun to 30-Jun')."},
+            {"field_name": "gross_salary", "field_type": "number", "is_required": True, "display_order": 4, "description": "Total gross salary", "prompt": "Extract the gross salary (total earnings before deductions) for the period."},
+            {"field_name": "deductions", "field_type": "number", "is_required": False, "display_order": 5, "description": "Total deductions applied", "prompt": "Extract the total of all deductions for the period (e.g. tax, PF, insurance). Leave it blank if not found."},
+            {"field_name": "net_salary", "field_type": "number", "is_required": True, "display_order": 6, "description": "Total net salary paid", "prompt": "Extract the net salary or take-home pay (gross salary minus deductions)."},
         ],
         "line_items": [
-            {"column_name": "component_name", "column_type": "text", "is_required": True, "display_order": 1},
-            {"column_name": "component_amount", "column_type": "number", "is_required": True, "display_order": 2},
+            {"column_name": "component_name", "column_type": "text", "is_required": True, "display_order": 1, "prompt": "Extract the name of the salary component or line (e.g. Basic, HRA, Provident Fund, Income Tax)."},
+            {"column_name": "component_amount", "column_type": "number", "is_required": True, "display_order": 2, "prompt": "Extract the amount for this salary component."},
         ]
     },
 ]
@@ -218,6 +218,7 @@ async def seed_idp_templates(session: AsyncSession) -> None:
                         is_required=h["is_required"],
                         display_order=h["display_order"],
                         description=h.get("description"),
+                        prompt=h.get("prompt"),
                     )
                     for h in t_def["headers"]
                 ]
@@ -229,6 +230,7 @@ async def seed_idp_templates(session: AsyncSession) -> None:
                         column_type=l["column_type"],
                         is_required=l["is_required"],
                         display_order=l["display_order"],
+                        prompt=l.get("prompt"),
                     )
                     for l in t_def["line_items"]
                 ]

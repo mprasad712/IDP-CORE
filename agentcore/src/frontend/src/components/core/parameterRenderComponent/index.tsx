@@ -22,6 +22,8 @@ import SortableListComponent from "./components/sortableListComponent";
 import { StrRenderComponent } from "./components/strRenderComponent";
 import IDPFieldConfigDropdown from "./components/IDPFieldConfigDropdown";
 import IDPDocTypeMultiselect from "./components/IDPDocTypeMultiselect";
+import IDPConnectorDropdown from "./components/IDPConnectorDropdown";
+import OneDriveFolderDropdown from "./components/OneDriveFolderDropdown";
 import IDPFieldConfigMultiselect from "./components/IDPFieldConfigMultiselect";
 import ToolsComponent from "./components/ToolsComponent";
 import ToggleShadComponent from "./components/toggleShadComponent";
@@ -94,6 +96,28 @@ export function ParameterRenderComponent({
 
     if ((templateData as any).idp_doc_type_fetch === true) {
       return <IDPDocTypeMultiselect {...baseInputProps} />;
+    }
+
+    if ((templateData as any).idp_connector_fetch === true) {
+      return (
+        <IDPConnectorDropdown
+          {...baseInputProps}
+          nodeId={nodeId}
+          nodeClass={nodeClass}
+          handleNodeClass={handleNodeClass}
+        />
+      );
+    }
+
+    if ((templateData as any).idp_onedrive_folder_fetch === true) {
+      return (
+        <OneDriveFolderDropdown
+          {...baseInputProps}
+          nodeId={nodeId}
+          nodeClass={nodeClass}
+          handleNodeClass={handleNodeClass}
+        />
+      );
     }
 
     if ((templateData as any).idp_config_fetch_multi === true) {

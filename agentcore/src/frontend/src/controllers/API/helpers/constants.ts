@@ -52,6 +52,8 @@ export const URLs = {
   IDP_PROCESSED_DOCS: `v1/idp/processed-docs`,
   IDP_DOCUMENTS: `v1/idp/documents`,
   IDP_REPORTS: `v1/idp/reports`,
+  IDP_MATCHING: `v1/idp/matching`,
+  IDP_MATCHING_CONFIG: `v1/idp/matching/config`,
   OBSERVABILITY: `observability`,
   TAGS: `tags`,
   COST_LIMITS: `cost-limits`,

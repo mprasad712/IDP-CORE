@@ -14,6 +14,7 @@ import {
   Info,
   ListTree,
   Save,
+  GitCompare,
 } from "lucide-react";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -51,9 +52,13 @@ import {
   type ProcessedDoc as ApiProcessedDoc,
   type ProcessedDocDetail,
   type FieldUpdateItem,
+  useGetMatchResults,
+  useTriggerMatch,
 } from "@/controllers/API/queries/idp";
 import { api } from "@/controllers/API/api";
 import { ProcessingTrace } from "@/components/core/idpProcessingTrace";
+import { MatchResultsPanel } from "./components/MatchResultsPanel";
+import { RunMatchModal } from "./components/RunMatchModal";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -106,7 +111,7 @@ function listDocToPage(d: ApiProcessedDoc): ProcessedDoc {
   return {
     id: d.id,
     name: d.original_filename,
-    sourceAgent: d.agent_id.slice(0, 8),
+    sourceAgent: d.agent_name ?? d.agent_id.slice(0, 8),
     dateProcessed: (d.processing_completed_at ?? d.created_at ?? "").slice(0, 10),
     documentType: d.predicted_type ?? d.file_type ?? "—",
     fileType: (d.file_type ?? "").toLowerCase().replace(/^\./, ""),
@@ -485,7 +490,15 @@ function DocDetailView({
   const [saving, setSaving]       = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [showTrace, setShowTrace] = useState(false);
+  const [showMatchPanel, setShowMatchPanel] = useState(false);
+  const [showRunMatchModal, setShowRunMatchModal] = useState<"2way" | "3way" | null>(null);
   const isReadOnly = doc.status === "auto_approved" || doc.status === "reviewed";
+
+  const { data: matchResult, isLoading: isLoadingMatch, refetch: refetchMatch } = useGetMatchResults(
+    { documentId: doc.id },
+    { enabled: showMatchPanel },
+  );
+  const triggerMatch = useTriggerMatch(doc.id);
 
   // Persistence: PATCH edited field values, then POST the review (records reviewer + timestamp,
   // moves the doc to the Reviewed tab). The hooks invalidate the queries on success so the list
@@ -729,6 +742,57 @@ function DocDetailView({
               </div>
             )}
           </section>
+
+          {/* SAP Match Results */}
+          <section>
+            <div className="flex items-center justify-between gap-2">
+              <button
+                onClick={() => setShowMatchPanel((v) => !v)}
+                className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 hover:text-foreground transition-colors"
+              >
+                <GitCompare className="h-3.5 w-3.5" />
+                {showMatchPanel ? "Hide" : "View"} SAP Match Results
+              </button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 rounded-lg">
+                    <GitCompare className="h-3 w-3" /> Run Match
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={() => setShowRunMatchModal("2way")}>
+                    2-Way Match (Invoice vs PO)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setShowRunMatchModal("3way")}>
+                    3-Way Match (Invoice vs PO vs GR)
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+            {showMatchPanel && (
+              <div className="mt-2 rounded-xl border bg-muted/5 overflow-hidden p-3">
+                <MatchResultsPanel
+                  documentId={doc.id}
+                  matchResult={matchResult}
+                  isLoading={isLoadingMatch}
+                  onTriggerMatch={() => setShowRunMatchModal("2way")}
+                />
+              </div>
+            )}
+          </section>
+
+          {showRunMatchModal && (
+            <RunMatchModal
+              documentId={doc.id}
+              defaultMatchType={showRunMatchModal}
+              onClose={() => setShowRunMatchModal(null)}
+              onSuccess={() => {
+                setShowRunMatchModal(null);
+                setShowMatchPanel(true);
+                setTimeout(() => refetchMatch(), 2500);
+              }}
+            />
+          )}
 
           {/* Review actions */}
           {!isReadOnly && (

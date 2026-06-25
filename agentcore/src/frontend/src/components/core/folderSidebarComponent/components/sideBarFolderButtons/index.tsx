@@ -411,7 +411,7 @@ const SideBarFoldersButtonsComponent = ({
   const SectionLabel = ({ label }: { label: string }) =>
     sidebarOpen ? (
       <div className="px-3 pb-1 pt-5 first:pt-2">
-        <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-muted-foreground/40">
+        <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-foreground/70">
           {label}
         </span>
       </div>
@@ -460,6 +460,44 @@ const SideBarFoldersButtonsComponent = ({
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               )}
+
+              {/* ─ IDP ─ always visible to all authenticated users ─ */}
+              <SectionLabel label="IDP" />
+
+              <SidebarMenuItem>
+                <SidebarMenuButton size="md" isActive={pathname.startsWith("/field-configurations")} onClick={() => _navigate("/field-configurations")} className={navBtn}>
+                  <ForwardedIconComponent name="ClipboardList" className="h-4 w-4 flex-shrink-0" />
+                  {t("Field Configurations")}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton size="md" isActive={pathname.startsWith("/processed-docs")} onClick={() => _navigate("/processed-docs")} className={navBtn}>
+                  <ForwardedIconComponent name="FileCheck" className="h-4 w-4 flex-shrink-0" />
+                  {t("Processed Docs")}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-reports")} onClick={() => _navigate("/idp-reports")} className={navBtn}>
+                  <ForwardedIconComponent name="BarChart3" className="h-4 w-4 flex-shrink-0" />
+                  {t("Reports")}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-upload")} onClick={() => _navigate("/idp-upload")} className={navBtn}>
+                  <ForwardedIconComponent name="UploadCloud" className="h-4 w-4 flex-shrink-0" />
+                  {t("Document Upload")}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton size="md" isActive={pathname.startsWith("/observability")} onClick={() => _navigate("/observability")} className={navBtn}>
+                  <ForwardedIconComponent name="Activity" className="h-4 w-4 flex-shrink-0" />
+                  {t("Observability")}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
 
               {/* ─ Governance ─ */}
               {(can("view_approval_page") || can("view_published_agents") || can("view_models")) && (
@@ -524,44 +562,6 @@ const SideBarFoldersButtonsComponent = ({
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               )}
-
-              {/* ─ IDP ─ always visible to all authenticated users ─ */}
-              <SectionLabel label="IDP" />
-
-              <SidebarMenuItem>
-                <SidebarMenuButton size="md" isActive={pathname.startsWith("/field-configurations")} onClick={() => _navigate("/field-configurations")} className={navBtn}>
-                  <ForwardedIconComponent name="ClipboardList" className="h-4 w-4 flex-shrink-0" />
-                  {t("Field Configurations")}
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton size="md" isActive={pathname.startsWith("/processed-docs")} onClick={() => _navigate("/processed-docs")} className={navBtn}>
-                  <ForwardedIconComponent name="FileCheck" className="h-4 w-4 flex-shrink-0" />
-                  {t("Processed Docs")}
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-reports")} onClick={() => _navigate("/idp-reports")} className={navBtn}>
-                  <ForwardedIconComponent name="BarChart3" className="h-4 w-4 flex-shrink-0" />
-                  {t("Reports")}
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-upload")} onClick={() => _navigate("/idp-upload")} className={navBtn}>
-                  <ForwardedIconComponent name="UploadCloud" className="h-4 w-4 flex-shrink-0" />
-                  {t("Document Upload")}
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton size="md" isActive={pathname.startsWith("/observability")} onClick={() => _navigate("/observability")} className={navBtn}>
-                  <ForwardedIconComponent name="Activity" className="h-4 w-4 flex-shrink-0" />
-                  {t("Observability")}
-                </SidebarMenuButton>
-              </SidebarMenuItem>
 
               {/* ─ System ─ */}
               {(can("view_platform_configs") || can("view_help_support_page")) && (

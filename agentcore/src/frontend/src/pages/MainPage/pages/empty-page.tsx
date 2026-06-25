@@ -1,7 +1,7 @@
 import { ExternalLink } from "lucide-react";
 import { FaDiscord, FaGithub } from "react-icons/fa";
 import { useShallow } from "zustand/react/shallow";
-import MothersonLogo from "@/assets/mothersonLogo.svg?react";
+import MothersonLogo from "@/assets/micore-icon.svg?react";
 import { ForwardedIconComponent } from "@/components/common/genericIconComponent";
 import CardsWrapComponent from "@/components/core/cardsWrapComponent";
 import { Button } from "@/components/ui/button";

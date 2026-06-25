@@ -112,10 +112,26 @@ def _evaluate_single_rule(
     overall_confidence: float | None,
     headers: list[any],
     line_items: list[any],
-    detected_elements: list[any]
+    detected_elements: list[any],
+    match_result: str | None = None,
 ) -> bool:
     """Evaluate a single rule condition."""
     cond = rule.condition_type
+
+    # match_result — SAP two-way/three-way match outcome
+    if cond == "match_result":
+        if match_result is None:
+            return False
+        expected = str(rule.value).strip().lower()
+        actual = match_result.strip().lower()
+        if rule.operator in ("==", "equals", "eq"):
+            return actual == expected
+        if rule.operator in ("!=", "not_equals", "neq"):
+            return actual != expected
+        if rule.operator == "in":
+            values = [v.strip().lower() for v in str(rule.value).split(",")]
+            return actual in values
+        return actual == expected
 
     # 1. confidence_overall
     if cond == "confidence_overall":
@@ -245,7 +261,8 @@ def evaluate_rules(
     line_items: list[any],
     detected_elements: list[any],
     rules: list[any],
-    default_action: str = "pending_review"
+    default_action: str = "pending_review",
+    match_result: str | None = None,
 ) -> dict:
     """Evaluate IDP Agent Rules grouped by rule_group.
 
@@ -273,7 +290,7 @@ def evaluate_rules(
         group_passed = True
         
         for rule in group_rules:
-            passed = _evaluate_single_rule(rule, overall_confidence, headers, line_items, detected_elements)
+            passed = _evaluate_single_rule(rule, overall_confidence, headers, line_items, detected_elements, match_result=match_result)
             if not passed:
                 group_passed = False
                 failed_conditions.append({
