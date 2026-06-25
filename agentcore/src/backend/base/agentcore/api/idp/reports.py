@@ -273,12 +273,32 @@ def _line_row(row_index, cells: dict, line_cols: list[str], values: str) -> list
 _META_COLS = [
     "File", "Document ID", "Agent", "Agent ID", "Type", "Status", "Confidence",
     "Uploaded", "Processed", "Reviewed By", "Reviewed At", "Review",
+    # Source provenance — populated for connector-ingested docs (which email it came from); "—" for uploads.
+    "Source", "Email From", "Email Subject", "Attachment",
 ]
+
+
+def _source_cells(dm) -> list:
+    """The 4 source-provenance cells: where a doc came from + (for email) the source email's from /
+    subject / attachment name. Connector docs carry this in ``source_metadata``; uploads get "—"."""
+    src = (getattr(dm, "source", "") or "")
+    sm = getattr(dm, "source_metadata", None)
+    if not isinstance(sm, dict):
+        sm = {}
+    is_mail = src == "mail_connector"
+    label = "Email" if is_mail else ("Upload" if src in ("", "upload") else src)
+    return [
+        label,
+        (sm.get("from") or "—") if is_mail else "—",
+        (sm.get("subject") or "—") if is_mail else "—",
+        (sm.get("attachment_name") or "—") if is_mail else "—",
+    ]
 
 
 def _meta_cells(did: str, meta: dict, rv: dict | None, dm) -> list:
     # ``dm`` is a build_doc_meta_query row carrying agent_name + agent_base_id (which agent ran the
-    # doc). To revert to the prior (no-agent) export, drop "Agent"/"Agent ID" from _META_COLS + here.
+    # doc) + source/source_metadata. To revert to the prior export, drop the trailing _META_COLS +
+    # the matching cells here.
     return [
         meta["file name"], did,
         getattr(dm, "agent_name", None) or "—",
@@ -288,6 +308,7 @@ def _meta_cells(did: str, meta: dict, rv: dict | None, dm) -> list:
         rv["reviewer"] if rv else "—",
         rv["reviewed_at"] if rv else "—",
         rv["final_status"] if rv else "—",
+        *_source_cells(dm),
     ]
 
 

@@ -439,7 +439,23 @@ async def test_report_org_isolation(setup_report_data):
 # ──────────────────────────────────────────────────────────────────────
 
 _META = ["File", "Document ID", "Agent", "Agent ID", "Type", "Status", "Confidence",
-         "Uploaded", "Processed", "Reviewed By", "Reviewed At", "Review"]
+         "Uploaded", "Processed", "Reviewed By", "Reviewed At", "Review",
+         "Source", "Email From", "Email Subject", "Attachment"]
+
+
+def test_source_cells_email_provenance():
+    """Connector-ingested docs surface their source email (from/subject/attachment); uploads → '—'."""
+    from types import SimpleNamespace
+    from agentcore.api.idp.reports import _source_cells
+
+    mail = SimpleNamespace(source="mail_connector", source_metadata={
+        "from": "basudps@gmail.com", "subject": "Re: yo", "attachment_name": "inv.pdf"})
+    assert _source_cells(mail) == ["Email", "basudps@gmail.com", "Re: yo", "inv.pdf"]
+
+    assert _source_cells(SimpleNamespace(source="upload", source_metadata=None)) == ["Upload", "—", "—", "—"]
+    # a mail doc missing some fields → still "Email", "—" for the missing ones
+    assert _source_cells(SimpleNamespace(source="mail_connector", source_metadata={"from": "x@y.com"})) \
+        == ["Email", "x@y.com", "—", "—"]
 
 
 def _csv_rows(resp):
