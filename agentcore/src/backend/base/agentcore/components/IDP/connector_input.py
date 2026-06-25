@@ -120,6 +120,83 @@ def _addr_list(recipients) -> list[str]:
     return out
 
 
+def _fetch_message_file_attachments_sync(access_token: str, message_id: str) -> list[dict] | None:
+    """Sync: list a message's downloadable FILE attachments — following Graph ``@odata.nextLink``
+    pagination AND fetching large attachments (no inline ``contentBytes``, ~>3 MB) via ``/$value``.
+
+    Mirrors ``TriggerService._fetch_attachments_raw`` for the manual-pull / playground preview path
+    (reuses ``_is_graph_url`` + ``_MAX_ATTACHMENT_PAGES`` so the SSRF guard and page cap stay in one
+    place). Returns ``[{"name": str, "data": bytes}, ...]`` (possibly empty), or ``None`` when the
+    INITIAL attachments-list request fails so the caller can fall through to the next message. Preview
+    is best-effort: a forged non-Graph nextLink stops paging, a failed ``/$value`` skips that one — no
+    raise, no infinite retry (unlike the production ingest path).
+    """
+    import base64 as _b64
+    import httpx
+    from urllib.parse import quote as _quote
+
+    from agentcore.services.trigger.service import _MAX_ATTACHMENT_PAGES, _is_graph_url
+
+    safe_id = _quote(message_id, safe="")
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url: str | None = f"{GRAPH_BASE}/me/messages/{safe_id}/attachments"
+    out: list[dict] = []
+    pages = 0
+    first = True
+    while url and pages < _MAX_ATTACHMENT_PAGES:
+        if not _is_graph_url(url):
+            logger.warning(f"[ConnectorInput] refusing non-Graph attachments URL for {message_id[:20]}...")
+            break  # best-effort: stop paging, keep what we have
+        try:
+            resp = httpx.get(url, headers=headers, timeout=30)
+        except Exception as e:
+            logger.warning(f"[ConnectorInput] attachments fetch error for {message_id[:20]}...: {e}")
+            return None if first else out
+        if resp.status_code != 200:
+            logger.warning(f"[ConnectorInput] attachments HTTP {resp.status_code} for {message_id[:20]}...")
+            return None if first else out
+        try:
+            body = resp.json()
+        except Exception as e:
+            logger.warning(f"[ConnectorInput] bad attachments JSON for {message_id[:20]}...: {e}")
+            return None if first else out
+        if not isinstance(body, dict):
+            logger.warning(f"[ConnectorInput] unexpected attachments payload for {message_id[:20]}...")
+            return None if first else out
+        first = False
+        for att in body.get("value", []) or []:
+            if att.get("@odata.type") != "#microsoft.graph.fileAttachment":
+                continue
+            name = att.get("name", "attachment")
+            cb = att.get("contentBytes", "")
+            if cb:
+                try:
+                    data = _b64.b64decode(cb)
+                except Exception:
+                    logger.warning(f"[ConnectorInput] could not decode attachment '{name}'; skipping")
+                    continue
+            else:
+                # Large attachment (no inline bytes) → fetch raw via /$value.
+                att_id = att.get("id", "")
+                if not att_id:
+                    continue
+                val_url = f"{GRAPH_BASE}/me/messages/{safe_id}/attachments/{_quote(att_id, safe='')}/$value"
+                try:
+                    vresp = httpx.get(val_url, headers=headers, timeout=60)
+                except Exception as e:
+                    logger.warning(f"[ConnectorInput] $value error for '{name}': {e}; skipping")
+                    continue
+                if vresp.status_code != 200:
+                    logger.warning(f"[ConnectorInput] $value HTTP {vresp.status_code} for '{name}'; skipping")
+                    continue
+                data = vresp.content
+            if data:
+                out.append({"name": name, "data": data})
+        url = body.get("@odata.nextLink")
+        pages += 1
+    return out
+
+
 class IDPConnectorInput(Node):
     """Pull email attachments from a connected mail connector for IDP processing."""
 
@@ -685,45 +762,37 @@ class IDPConnectorInput(Node):
             subject = msg.get("subject", "(no subject)")
             from_addr = (((msg.get("from") or {}).get("emailAddress")) or {}).get("address", "")
 
-            att_url = f"{GRAPH_BASE}/me/messages/{quote(msg_id, safe='')}/attachments"
-            try:
-                att_resp = httpx.get(att_url, headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
-                if att_resp.status_code != 200:
-                    continue
-                attachments = att_resp.json().get("value", [])
-            except Exception:
-                continue
+            # Follows attachment pagination + fetches large (>3 MB) attachments via /$value, so the
+            # preview surfaces big files instead of "No downloadable attachments". Single-doc preview:
+            # we still return the FIRST downloadable attachment of the first matching email.
+            atts = _fetch_message_file_attachments_sync(access_token, msg_id)
+            if not atts:
+                continue  # None (list fetch failed) or [] (no downloadable files) → try next message
 
-            for att in attachments:
-                if att.get("@odata.type") != "#microsoft.graph.fileAttachment":
-                    continue
-                content_b64 = att.get("contentBytes", "")
-                if not content_b64:
-                    continue
+            att = atts[0]
+            filename = att["name"]
+            content_bytes = att["data"]
+            suffix = os.path.splitext(filename)[1] or ".bin"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="idp_conn_") as f:
+                f.write(content_bytes)
+                tmp_path = f.name
 
-                filename = att.get("name", "attachment")
-                content_bytes = base64.b64decode(content_b64)
-                suffix = os.path.splitext(filename)[1] or ".bin"
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="idp_conn_") as f:
-                    f.write(content_bytes)
-                    tmp_path = f.name
-
-                self.status = f"Fetched attachment '{filename}' from '{subject}' ({from_addr})"
-                logger.info(f"[ConnectorInput] Downloaded {filename} → {tmp_path}")
-                return Message(
-                    text=tmp_path,
-                    data={
-                        "file_path": tmp_path,
-                        "filename": filename,
-                        "source": "mail_connector",
-                        "subject": subject,
-                        "from": from_addr,
-                        "to": _addr_list(msg.get("toRecipients")),
-                        "cc": _addr_list(msg.get("ccRecipients")),
-                        "message_id": msg_id,
-                        "received": msg.get("receivedDateTime", ""),
-                    },
-                )
+            self.status = f"Fetched attachment '{filename}' from '{subject}' ({from_addr})"
+            logger.info(f"[ConnectorInput] Downloaded {filename} → {tmp_path}")
+            return Message(
+                text=tmp_path,
+                data={
+                    "file_path": tmp_path,
+                    "filename": filename,
+                    "source": "mail_connector",
+                    "subject": subject,
+                    "from": from_addr,
+                    "to": _addr_list(msg.get("toRecipients")),
+                    "cc": _addr_list(msg.get("ccRecipients")),
+                    "message_id": msg_id,
+                    "received": msg.get("receivedDateTime", ""),
+                },
+            )
 
         self.status = "No downloadable attachments found"
         return Message(text="No downloadable file attachments found in matching emails.")

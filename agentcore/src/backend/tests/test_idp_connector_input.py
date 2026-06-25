@@ -365,3 +365,351 @@ async def test_sync_email_monitors_deactivates_on_provider_change():
     assert old_monitor.is_active is False        # stale Outlook monitor deactivated
     unreg.assert_any_await(old_monitor.id)        # its polling task unregistered
     assert created["n"] == 0                       # the SharePoint node spawns no email poller
+
+
+def _graph_resp(status, payload):
+    from unittest.mock import MagicMock
+    r = MagicMock()
+    r.status_code = status
+    r.json = MagicMock(return_value=payload)
+    return r
+
+
+def _graph_client(responses):
+    """A mock httpx.AsyncClient async-context-manager whose .get() yields `responses` in order."""
+    from unittest.mock import AsyncMock, MagicMock
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(side_effect=responses)
+    return client
+
+
+@pytest.mark.anyio
+async def test_fetch_attachments_raw_follows_pagination():
+    """Graph paginates the attachments collection via @odata.nextLink. The fetch must follow ALL
+    pages — otherwise a single email with many attachments loses everything past the first page.
+    Also: item-attachments and attachments without inline contentBytes are skipped."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.services.trigger.service import TriggerService
+
+    page1 = {
+        "value": [
+            {"@odata.type": "#microsoft.graph.fileAttachment", "id": "a1", "name": "doc1.pdf",
+             "contentBytes": "QUJD", "contentType": "application/pdf", "size": 3},
+            {"@odata.type": "#microsoft.graph.itemAttachment", "id": "i1", "name": "nested.eml"},  # skipped
+        ],
+        "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages/m1/attachments?$skiptoken=P2",
+    }
+    page2 = {
+        "value": [
+            {"@odata.type": "#microsoft.graph.fileAttachment", "id": "a2", "name": "doc2.pdf",
+             "contentBytes": "REVG", "contentType": "application/pdf", "size": 3},
+            {"@odata.type": "#microsoft.graph.fileAttachment", "id": "", "name": "noid.pdf",
+             "contentBytes": "", "size": 10},  # no inline bytes AND no id → skipped (can't $value-fetch)
+        ],
+    }
+    client = _graph_client([_graph_resp(200, page1), _graph_resp(200, page2)])
+    svc = TriggerService()
+    with patch("httpx.AsyncClient", MagicMock(return_value=client)):
+        out = await svc._fetch_attachments_raw("m1", "tok", "task1")
+
+    assert out is not None
+    assert [a["name"] for a in out] == ["doc1.pdf", "doc2.pdf"]  # BOTH pages; item + empty-bytes skipped
+    assert client.get.await_count == 2                            # followed nextLink to page 2
+
+
+@pytest.mark.anyio
+async def test_fetch_attachments_raw_retries_on_mid_page_failure():
+    """If a LATER page fails, return None so the whole email is retried next poll (dedup skips the
+    attachments already ingested) — never mark it seen with a partial attachment set."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.services.trigger.service import TriggerService
+
+    page1 = {
+        "value": [{"@odata.type": "#microsoft.graph.fileAttachment", "id": "a1", "name": "doc1.pdf",
+                   "contentBytes": "QUJD", "contentType": "application/pdf", "size": 3}],
+        "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages/m1/attachments?$skiptoken=P2",
+    }
+    client = _graph_client([_graph_resp(200, page1), _graph_resp(500, {})])
+    svc = TriggerService()
+    with patch("httpx.AsyncClient", MagicMock(return_value=client)):
+        out = await svc._fetch_attachments_raw("m1", "tok", "task1")
+
+    assert out is None                  # page-2 failure → retry whole email (no partial ingest)
+    assert client.get.await_count == 2
+
+
+@pytest.mark.anyio
+async def test_fetch_attachments_raw_returns_none_when_page_cap_exceeded():
+    """Hitting the page-cap with pages still remaining is an INCOMPLETE fetch → return None (retry),
+    never the partial list (else the caller marks the email seen and permanently drops the rest)."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.services.trigger.service import TriggerService
+
+    # Every page has a nextLink → the cap (patched to 1) is hit with more remaining.
+    page = {
+        "value": [{"@odata.type": "#microsoft.graph.fileAttachment", "id": "a1", "name": "d.pdf",
+                   "contentBytes": "QUJD", "contentType": "application/pdf", "size": 3}],
+        "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages/m1/attachments?$skiptoken=NEXT",
+    }
+    client = _graph_client([_graph_resp(200, page), _graph_resp(200, page)])
+    svc = TriggerService()
+    with patch("agentcore.services.trigger.service._MAX_ATTACHMENT_PAGES", 1), \
+         patch("httpx.AsyncClient", MagicMock(return_value=client)):
+        out = await svc._fetch_attachments_raw("m1", "tok", "task1")
+
+    assert out is None                  # cap hit + pages remain → incomplete → retry (no partial)
+    assert client.get.await_count == 1  # stopped exactly at the cap
+
+
+def _value_resp(raw: bytes):
+    from unittest.mock import MagicMock
+    r = MagicMock()
+    r.status_code = 200
+    r.content = raw
+    return r
+
+
+@pytest.mark.anyio
+async def test_fetch_attachments_raw_fetches_large_via_value():
+    """A large attachment (no inline contentBytes from the list endpoint) is fetched via /$value
+    instead of being silently dropped (which would also mark the email seen with the doc lost)."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.services.trigger.service import TriggerService
+
+    page = {"value": [
+        {"@odata.type": "#microsoft.graph.fileAttachment", "id": "big1", "name": "big.pdf",
+         "contentBytes": "", "contentType": "application/pdf", "size": 9_000_000},
+    ]}
+    client = _graph_client([_graph_resp(200, page), _value_resp(b"RAWPDFBYTES")])
+    svc = TriggerService()
+    with patch("httpx.AsyncClient", MagicMock(return_value=client)):
+        out = await svc._fetch_attachments_raw("m1", "tok", "t")
+
+    import base64
+    assert out is not None and len(out) == 1
+    assert base64.b64decode(out[0]["content_bytes_b64"]) == b"RAWPDFBYTES"  # large file via $value
+    assert client.get.await_count == 2  # list page + $value fetch
+
+
+@pytest.mark.anyio
+async def test_fetch_attachments_raw_rejects_non_graph_nextlink():
+    """A nextLink to a non-Graph host (SSRF) is refused — return None, never send the token there."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.services.trigger.service import TriggerService
+
+    page = {
+        "value": [{"@odata.type": "#microsoft.graph.fileAttachment", "id": "a1", "name": "d.pdf",
+                   "contentBytes": "QUJD", "contentType": "application/pdf", "size": 3}],
+        "@odata.nextLink": "http://169.254.169.254/latest/meta-data/",  # SSRF target
+    }
+    client = _graph_client([_graph_resp(200, page)])
+    svc = TriggerService()
+    with patch("httpx.AsyncClient", MagicMock(return_value=client)):
+        out = await svc._fetch_attachments_raw("m1", "tok", "t")
+
+    assert out is None                  # bad nextLink refused
+    assert client.get.await_count == 1  # only the legit first page was fetched
+
+
+def test_as_bool_handles_stringified_toggles():
+    """bool('false') is True — a stringified toggle must be parsed, not coerced, or a disabled
+    'Has Attachments Only' would still filter."""
+    from agentcore.services.trigger.service import _as_bool
+    assert _as_bool(True) is True and _as_bool(False) is False
+    assert _as_bool("false") is False and _as_bool("true") is True
+    assert _as_bool("0") is False and _as_bool("1") is True
+    assert _as_bool("", True) is False and _as_bool(None, True) is True
+
+
+def test_is_graph_url_guards_ssrf():
+    from agentcore.services.trigger.service import _is_graph_url
+    assert _is_graph_url("https://graph.microsoft.com/v1.0/me/messages/x/attachments?$skiptoken=Y")
+    assert not _is_graph_url("http://graph.microsoft.com/x")            # not https
+    assert not _is_graph_url("https://graph.microsoft.com:8443/x")      # non-443 port
+    assert not _is_graph_url("https://169.254.169.254/latest/meta-data/")
+    assert not _is_graph_url("https://evil.com/graph.microsoft.com")
+    assert not _is_graph_url("")
+
+
+# ── Manual-pull / preview attachment fetch (get_document) — large files + pagination ──
+
+def _sync_resp(status, payload=None, content=None):
+    from unittest.mock import MagicMock
+    r = MagicMock()
+    r.status_code = status
+    if payload is not None:
+        r.json = MagicMock(return_value=payload)
+    if content is not None:
+        r.content = content
+    return r
+
+
+def test_fetch_message_attachments_sync_pagination_and_value():
+    """The preview fetch follows @odata.nextLink AND fetches a large attachment (no inline bytes)
+    via /$value; item-attachments and no-id/no-bytes items are skipped."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.components.IDP.connector_input import _fetch_message_file_attachments_sync
+
+    page1 = {
+        "value": [
+            {"@odata.type": "#microsoft.graph.fileAttachment", "id": "s1", "name": "small.pdf",
+             "contentBytes": "QUJD"},  # inline → b"ABC"
+            {"@odata.type": "#microsoft.graph.itemAttachment", "id": "i1", "name": "nested.eml"},  # skip
+        ],
+        "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages/m1/attachments?$skiptoken=P2",
+    }
+    page2 = {
+        "value": [
+            {"@odata.type": "#microsoft.graph.fileAttachment", "id": "big1", "name": "big.pdf",
+             "contentBytes": ""},  # large → /$value
+            {"@odata.type": "#microsoft.graph.fileAttachment", "id": "", "name": "noid.pdf",
+             "contentBytes": ""},  # no id + no bytes → skip
+        ],
+    }
+    # list page1 → list page2 → $value(big)
+    responses = [_sync_resp(200, payload=page1), _sync_resp(200, payload=page2), _sync_resp(200, content=b"BIGPDF")]
+    with patch("httpx.get", MagicMock(side_effect=responses)) as g:
+        out = _fetch_message_file_attachments_sync("tok", "m1")
+
+    assert out is not None
+    assert [a["name"] for a in out] == ["small.pdf", "big.pdf"]
+    assert out[0]["data"] == b"ABC" and out[1]["data"] == b"BIGPDF"  # inline + $value
+    assert g.call_count == 3
+
+
+def test_fetch_message_attachments_sync_ssrf_rejects_nextlink():
+    """A non-Graph @odata.nextLink (SSRF) is not followed — keep page-1 results, stop paging."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.components.IDP.connector_input import _fetch_message_file_attachments_sync
+
+    page = {
+        "value": [{"@odata.type": "#microsoft.graph.fileAttachment", "id": "a1", "name": "d.pdf",
+                   "contentBytes": "QUJD"}],
+        "@odata.nextLink": "http://169.254.169.254/latest/meta-data/",
+    }
+    with patch("httpx.get", MagicMock(side_effect=[_sync_resp(200, payload=page)])) as g:
+        out = _fetch_message_file_attachments_sync("tok", "m1")
+
+    assert [a["name"] for a in out] == ["d.pdf"]   # page-1 attachment kept
+    assert g.call_count == 1                        # did NOT follow the metadata-host nextLink
+
+
+def test_fetch_message_attachments_sync_initial_failure_returns_none():
+    """Initial attachments-list GET failing → None, so get_document falls through to the next email."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.components.IDP.connector_input import _fetch_message_file_attachments_sync
+
+    with patch("httpx.get", MagicMock(side_effect=[_sync_resp(500)])):
+        assert _fetch_message_file_attachments_sync("tok", "m1") is None
+
+
+def test_fetch_message_attachments_sync_malformed_200_no_crash():
+    """A 200 whose body isn't a JSON object degrades to best-effort (None), never crashes preview."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.components.IDP.connector_input import _fetch_message_file_attachments_sync
+
+    bad = _sync_resp(200, payload=["not", "an", "object"])  # array, not a dict
+    with patch("httpx.get", MagicMock(side_effect=[bad])):
+        assert _fetch_message_file_attachments_sync("tok", "m1") is None
+
+
+# ── Message-list pagination (monitor walks @odata.nextLink so high-volume inboxes don't miss mail) ──
+
+@pytest.mark.anyio
+async def test_walk_message_pages_follows_nextlink_while_new():
+    """Walks to the next page while the latest page still has NEW (unseen) mail; accumulates both."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.services.trigger.service import TriggerService
+
+    first = {"value": [{"id": "m1"}, {"id": "m2"}],
+             "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skiptoken=P2"}
+    seen = {"m2": None}  # m1 is new → page further
+    client = _graph_client([_graph_resp(200, {"value": [{"id": "m3"}, {"id": "m4"}]})])  # no nextLink → last
+    svc = TriggerService()
+    with patch("httpx.AsyncClient", MagicMock(return_value=client)):
+        out, ok = await svc._walk_message_pages("tok", first, seen, "t")
+    assert ok is True
+    assert [m["id"] for m in out] == ["m1", "m2", "m3", "m4"]
+    assert client.get.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_walk_message_pages_stops_when_page_all_seen():
+    """If the latest page has no new mail, do NOT fetch further pages (don't refetch old mail)."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.services.trigger.service import TriggerService
+
+    first = {"value": [{"id": "m1"}, {"id": "m2"}],
+             "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skiptoken=P2"}
+    seen = {"m1": None, "m2": None}  # both seen → no new on page 1
+    client = _graph_client([_graph_resp(200, {"value": [{"id": "m3"}]})])
+    svc = TriggerService()
+    with patch("httpx.AsyncClient", MagicMock(return_value=client)):
+        out, ok = await svc._walk_message_pages("tok", first, seen, "t")
+    assert ok is True
+    assert [m["id"] for m in out] == ["m1", "m2"]
+    assert client.get.await_count == 0
+
+
+@pytest.mark.anyio
+async def test_walk_message_pages_rejects_non_graph_nextlink():
+    """A non-Graph @odata.nextLink (SSRF) is not followed."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.services.trigger.service import TriggerService
+
+    first = {"value": [{"id": "m1"}], "@odata.nextLink": "http://169.254.169.254/latest/meta-data/"}
+    client = _graph_client([_graph_resp(200, {"value": [{"id": "m2"}]})])
+    svc = TriggerService()
+    with patch("httpx.AsyncClient", MagicMock(return_value=client)):
+        out, ok = await svc._walk_message_pages("tok", first, {}, "t")
+    assert ok is True
+    assert [m["id"] for m in out] == ["m1"]
+    assert client.get.await_count == 0
+
+
+@pytest.mark.anyio
+async def test_walk_message_pages_incomplete_on_page_failure():
+    """A later-page fetch failure → ok=False so the caller does NOT mark these seen (they'd be
+    skipped by the next poll's early-stop). Only the successfully-fetched page-1 is returned."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.services.trigger.service import TriggerService
+
+    first = {"value": [{"id": "m1"}],
+             "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skiptoken=P2"}
+    client = _graph_client([_graph_resp(500, {})])  # page 2 fetch fails
+    svc = TriggerService()
+    with patch("httpx.AsyncClient", MagicMock(return_value=client)):
+        out, ok = await svc._walk_message_pages("tok", first, {}, "t")
+    assert ok is False
+    assert [m["id"] for m in out] == ["m1"]
+    assert client.get.await_count == 1
+
+
+def test_get_document_returns_large_attachment():
+    """get_document surfaces a big file (previously skipped) and keeps the Message/data shape."""
+    import os
+    from unittest.mock import MagicMock, patch
+
+    node = _node(connector="", folder="inbox", max_emails=10, fetch_full_body=False)
+    node._get_config = MagicMock(return_value={})
+    node._get_account = MagicMock(return_value={"email": "x@y.com"})
+    node._get_token = MagicMock(return_value="tok")
+
+    msg = {"id": "m1", "subject": "Inv", "from": {"emailAddress": {"address": "basudps@gmail.com"}},
+           "hasAttachments": True, "toRecipients": [], "ccRecipients": [], "receivedDateTime": "2026-06-25T00:00:00Z"}
+    messages_resp = _sync_resp(200, payload={"value": [msg]})
+
+    cim = "agentcore.components.IDP.connector_input"
+    with patch("httpx.get", MagicMock(return_value=messages_resp)), \
+         patch(f"{cim}._fetch_message_file_attachments_sync",
+               MagicMock(return_value=[{"name": "big.pdf", "data": b"BIGDATA"}])):
+        out = node.get_document()
+
+    assert out.data["filename"] == "big.pdf"
+    assert out.data["source"] == "mail_connector" and out.data["from"] == "basudps@gmail.com"
+    assert os.path.exists(out.data["file_path"])
+    with open(out.data["file_path"], "rb") as f:
+        assert f.read() == b"BIGDATA"
+    os.remove(out.data["file_path"])
