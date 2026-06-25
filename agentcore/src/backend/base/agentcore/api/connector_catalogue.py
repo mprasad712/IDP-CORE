@@ -23,7 +23,7 @@ router = APIRouter(prefix="/connector-catalogue", tags=["Connector Catalogue"])
 
 DB_PROVIDERS = {"postgresql", "oracle", "sqlserver", "mysql"}
 STORAGE_PROVIDERS = {"azure_blob", "sharepoint"}
-EMAIL_PROVIDERS = {"outlook"}
+EMAIL_PROVIDERS = {"outlook", "gmail"}
 # Delegated-OAuth file connectors (sign-in + refresh token, like Outlook). OneDrive works for both
 # personal and work/school accounts via the /common authority + Graph /me/drive.
 FILE_OAUTH_PROVIDERS = {"onedrive"}
@@ -201,7 +201,12 @@ def _ensure_provider_secret_present(provider: str, config: dict, existing_config
             or existing.get("client_secret")
         )
         if not has_secret:
-            label = "OneDrive" if provider in FILE_OAUTH_PROVIDERS else "Outlook"
+            if provider in FILE_OAUTH_PROVIDERS:
+                label = "OneDrive"
+            elif provider == "gmail":
+                label = "Gmail"
+            else:
+                label = "Outlook"
             raise HTTPException(status_code=400, detail=f"client_secret is required for {label} connector")
 
 
@@ -713,7 +718,12 @@ def _test_connector_payload_or_raise(payload: TestConnectionPayload) -> dict:
         return _test_sap_connection_sync(config)
 
     if provider in OAUTH_PROVIDERS:
-        label = "OneDrive" if provider in FILE_OAUTH_PROVIDERS else "Outlook"
+        if provider in FILE_OAUTH_PROVIDERS:
+            label = "OneDrive"
+        elif provider == "gmail":
+            label = "Gmail"
+        else:
+            label = "Outlook"
         raise HTTPException(
             status_code=400,
             detail=f"{label} connectors must be saved first and linked via OAuth before they can be tested.",
@@ -1164,6 +1174,82 @@ async def _test_onedrive_connection(config: dict) -> dict:
     }
 
 
+async def _test_gmail_connection(config: dict) -> dict:
+    """Test a Gmail connection by calling the Gmail profile endpoint."""
+    import httpx
+
+    start = time.time()
+    tokens_refreshed = False
+
+    linked_accounts = config.get("linked_accounts", [])
+    if not linked_accounts:
+        raise HTTPException(
+            status_code=400,
+            detail="No linked Gmail accounts. Use the OAuth flow to link an account first.",
+        )
+
+    acct = linked_accounts[0]
+    access_token = acct.get("access_token", "")
+    account_email = acct.get("email", "unknown")
+
+    if not access_token:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No access token for account '{account_email}'. Re-link via OAuth.",
+        )
+
+    expires_at = acct.get("token_expires_at", 0)
+    if expires_at and time.time() >= (expires_at - 60):
+        refresh_token = acct.get("refresh_token", "")
+        client_id = config.get("client_id", "")
+        client_secret = config.get("client_secret", "")
+        if refresh_token and client_id and client_secret:
+            async with httpx.AsyncClient(timeout=15) as client:
+                refresh_resp = await client.post(
+                    "https://oauth2.googleapis.com/token",
+                    data={
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "refresh_token": refresh_token,
+                        "grant_type": "refresh_token",
+                    },
+                )
+            if refresh_resp.status_code == 200:
+                token_data = refresh_resp.json()
+                access_token = token_data["access_token"]
+                acct["access_token"] = access_token
+                if token_data.get("refresh_token"):
+                    acct["refresh_token"] = token_data["refresh_token"]
+                acct["token_expires_at"] = time.time() + token_data.get("expires_in", 3600)
+                tokens_refreshed = True
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+    latency_ms = round((time.time() - start) * 1000, 2)
+
+    if resp.status_code != 200:
+        detail = resp.text[:300] if resp.text else str(resp.status_code)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Gmail API returned {resp.status_code}: {detail}",
+        )
+
+    data = resp.json()
+    email_address = data.get("emailAddress", account_email)
+    messages_total = data.get("messagesTotal", 0)
+    return {
+        "success": True,
+        "message": f"Connected to Gmail as {email_address} ({messages_total} messages)",
+        "latency_ms": latency_ms,
+        "tables_metadata": None,
+        "_tokens_refreshed": tokens_refreshed,
+    }
+
+
 # ---------- Endpoints ----------
 
 @router.get("")
@@ -1579,6 +1665,8 @@ async def test_connector_connection(
                     config["linked_accounts"] = linked
             if provider in FILE_OAUTH_PROVIDERS:
                 result = await _test_onedrive_connection(config)
+            elif provider == "gmail":
+                result = await _test_gmail_connection(config)
             else:
                 result = await _test_outlook_connection(config)
         else:

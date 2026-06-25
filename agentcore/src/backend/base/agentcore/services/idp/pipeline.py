@@ -758,6 +758,9 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             ocr_bytes = await _maybe_preprocess(original_bytes, file_type, cfg, flow)
             if trace_ctx:
                 end_span(trace_ctx, "preprocessing", outputs={"bytes_length": len(ocr_bytes)})
+            if ocr_bytes is not original_bytes:
+                await _save_artifact(storage, agent_scope, file_name, ocr_bytes)
+                logger.info(f"[pipeline] {document_id}: corrected file saved back to storage for preview")
 
             if trace_ctx:
                 start_span(trace_ctx, "ocr", inputs={"ocr_lang": cfg.ocr_lang})
@@ -783,6 +786,9 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             ocr_bytes = await _maybe_preprocess(original_bytes, file_type, cfg, flow)
             if trace_ctx:
                 end_span(trace_ctx, "preprocessing", outputs={"bytes_length": len(ocr_bytes)})
+            if ocr_bytes is not original_bytes:
+                await _save_artifact(storage, agent_scope, file_name, ocr_bytes)
+                logger.info(f"[pipeline] {document_id}: corrected file saved back to storage for preview")
 
             if trace_ctx:
                 start_span(trace_ctx, "ocr", inputs={"ocr_lang": cfg.ocr_lang})
