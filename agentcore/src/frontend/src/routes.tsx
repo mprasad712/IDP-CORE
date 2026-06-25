@@ -57,9 +57,9 @@ const SetPasswordPage             = lazy(() => import("./pages/SetPasswordPage")
 const FieldConfigurationsPage     = lazy(() => import("./pages/FieldConfigurationsPage"));
 const ProcessedDocsPage           = lazy(() => import("./pages/ProcessedDocsPage"));
 const ReportsPage                 = lazy(() => import("./pages/ReportsPage"));
-const AutomationsPage             = lazy(() => import("./pages/AutomationsPage"));
 const IdpUploadPage               = lazy(() => import("./pages/IdpUploadPage"));
 const ObservabilityPage           = lazy(() => import("./pages/ObservabilityPage"));
+const LogsPage                    = lazy(() => import("./pages/LogsPage"));
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -268,18 +268,18 @@ const router = createBrowserRouter(
                     }
                   />
                   <Route
-                    path="idp-automations"
-                    element={
-                      <ProtectedPermissionRoute permission="view_idp">
-                        <Suspense fallback={<PageLoader />}><AutomationsPage /></Suspense>
-                      </ProtectedPermissionRoute>
-                    }
-                  />
-                  <Route
                     path="idp-upload"
                     element={
                       <ProtectedPermissionRoute permission="view_idp">
                         <Suspense fallback={<PageLoader />}><IdpUploadPage /></Suspense>
+                      </ProtectedPermissionRoute>
+                    }
+                  />
+                  <Route
+                    path="idp-logs"
+                    element={
+                      <ProtectedPermissionRoute permission="view_idp">
+                        <Suspense fallback={<PageLoader />}><LogsPage /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />

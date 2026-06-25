@@ -24,7 +24,9 @@ import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 import OutlookConnectorForm from "./components/OutlookConnectorForm";
 import OneDriveConnectorForm from "./components/OneDriveConnectorForm";
-import { ENABLE_OUTLOOK_CONNECTOR } from "@/customization/feature-flags";
+import GmailConnectorForm from "./components/GmailConnectorForm";
+import SapConnectorForm, { type SapFormFields } from "./components/SapConnectorForm";
+import { ENABLE_OUTLOOK_CONNECTOR, ENABLE_GMAIL_CONNECTOR } from "@/customization/feature-flags";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -54,24 +56,18 @@ import { getRuntimeEnv } from "@/utils/runtime-env";
 
 type ProviderFilter =
   | "all"
-  | "postgresql"
-  | "oracle"
-  | "sqlserver"
-  | "mysql"
-  | "azure_blob"
   | "sharepoint"
   | "outlook"
-  | "onedrive";
+  | "onedrive"
+  | "gmail"
+  | "sap_s4hana";
 
 const PROVIDER_LABELS: Record<string, string> = {
-  postgresql: "PostgreSQL",
-  oracle: "Oracle",
-  sqlserver: "SQL Server",
-  mysql: "MySQL",
-  azure_blob: "Azure Blob Storage",
   sharepoint: "SharePoint",
   outlook: "Microsoft Outlook",
   onedrive: "OneDrive",
+  gmail: "Google Gmail",
+  sap_s4hana: "SAP S/4HANA",
 };
 
 const PROVIDER_PORTS: Record<string, number> = {
@@ -83,8 +79,10 @@ const PROVIDER_PORTS: Record<string, number> = {
 
 const DB_PROVIDERS = new Set(["postgresql", "oracle", "sqlserver", "mysql"]);
 const STORAGE_PROVIDERS = new Set(["azure_blob", "sharepoint"]);
-// Providers that authenticate via delegated OAuth (sign-in + linked accounts): Outlook + OneDrive.
-const OAUTH_PROVIDERS = new Set(["outlook", "onedrive"]);
+// Providers that authenticate via delegated OAuth (sign-in + linked accounts): Outlook + OneDrive + Gmail.
+const OAUTH_PROVIDERS = new Set(["outlook", "onedrive", "gmail"]);
+// SAP S/4HANA OData providers.
+const SAP_PROVIDERS = new Set(["sap_s4hana"]);
 const DEFAULT_CONNECTOR_HOST =
   getRuntimeEnv("DEFAULT_CONNECTOR_HOST") ||
   getRuntimeEnv("HOST_IP") ||
@@ -121,9 +119,19 @@ const BLANK_FORM = {
   outlook_tenant_id: "",
   outlook_client_id: "",
   outlook_client_secret: "",
+  // Gmail fields (Google OAuth 2.0; no tenant required)
+  gmail_client_id: "",
+  gmail_client_secret: "",
   // OneDrive fields (delegated OAuth; /common authority needs no tenant)
   onedrive_client_id: "",
   onedrive_client_secret: "",
+  // SAP S/4HANA fields
+  sap_base_url: "",
+  sap_auth_mode: "api_key",
+  sap_api_key: "",
+  sap_oauth_token_url: "",
+  sap_client_id: "",
+  sap_client_secret: "",
   visibility: "private",
   public_scope: "department",
   org_id: "",
@@ -185,11 +193,22 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       setTestResult({ success: true, message });
       setSuccessData({ title: message });
       void refetch();
+    } else if (success === "gmail_account_linked") {
+      const email = searchParams.get("email") || "";
+      const message = email
+        ? t("Gmail account linked successfully: {{email}}", { email })
+        : t("Gmail account linked successfully");
+      setTestResult({ success: true, message });
+      setSuccessData({ title: message });
+      void refetch();
     } else if (errorParam) {
       const detail = searchParams.get("detail") || errorParam;
-      const message = t("Outlook OAuth failed: {{detail}}", { detail });
+      const isGmailError = errorParam.startsWith("gmail_");
+      const message = isGmailError
+        ? t("Gmail OAuth failed: {{detail}}", { detail })
+        : t("Outlook OAuth failed: {{detail}}", { detail });
       setTestResult({ success: false, message });
-      setErrorData({ title: t("Mailbox linking failed"), list: [detail] });
+      setErrorData({ title: t("Account linking failed"), list: [detail] });
     }
 
     if (success || errorParam) {
@@ -527,9 +546,19 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       outlook_tenant_id: cfg.tenant_id ?? "",
       outlook_client_id: cfg.client_id ?? "",
       outlook_client_secret: "",
+      // Gmail (client_secret is masked; user must re-enter to update)
+      gmail_client_id: cfg.client_id ?? "",
+      gmail_client_secret: "",
       // OneDrive (client_secret is masked; user must re-enter to update)
       onedrive_client_id: cfg.client_id ?? "",
       onedrive_client_secret: "",
+      // SAP S/4HANA (api_key and client_secret are masked on edit)
+      sap_base_url: cfg.base_url ?? "",
+      sap_auth_mode: (cfg.auth_mode as "api_key" | "oauth2") ?? "api_key",
+      sap_api_key: "",
+      sap_oauth_token_url: cfg.oauth_token_url ?? "",
+      sap_client_id: cfg.client_id ?? "",
+      sap_client_secret: "",
       visibility: connector.visibility ?? "private",
       public_scope: connector.public_scope ?? "department",
       org_id: connector.org_id ?? "",
@@ -615,6 +644,22 @@ export default function ConnectorsCatalogueView(): JSX.Element {
       };
     }
 
+    if (form.provider === "gmail") {
+      const provider_config: Record<string, string> = {
+        client_id: form.gmail_client_id,
+      };
+      if (form.gmail_client_secret) {
+        provider_config.client_secret = form.gmail_client_secret;
+      }
+      return {
+        name: form.name,
+        description: form.description || undefined,
+        provider: "gmail",
+        provider_config,
+        ...scopePayload,
+      };
+    }
+
     if (form.provider === "azure_blob") {
       const provider_config: Record<string, string> = {
         account_url: form.azure_account_url,
@@ -651,6 +696,27 @@ export default function ConnectorsCatalogueView(): JSX.Element {
         name: form.name,
         description: form.description || undefined,
         provider: form.provider,
+        provider_config,
+        ...scopePayload,
+      };
+    }
+
+    if (form.provider === "sap_s4hana") {
+      const provider_config: Record<string, string> = {
+        base_url: form.sap_base_url,
+        auth_mode: form.sap_auth_mode,
+      };
+      if (form.sap_auth_mode === "api_key") {
+        if (form.sap_api_key) provider_config.api_key = form.sap_api_key;
+      } else {
+        if (form.sap_oauth_token_url) provider_config.oauth_token_url = form.sap_oauth_token_url;
+        if (form.sap_client_id) provider_config.client_id = form.sap_client_id;
+        if (form.sap_client_secret) provider_config.client_secret = form.sap_client_secret;
+      }
+      return {
+        name: form.name,
+        description: form.description || undefined,
+        provider: "sap_s4hana",
         provider_config,
         ...scopePayload,
       };
@@ -706,6 +772,16 @@ export default function ConnectorsCatalogueView(): JSX.Element {
     } else if (form.provider === "onedrive") {
       if (!form.onedrive_client_id) return true;
       if (!editingConnector && !form.onedrive_client_secret) return true;
+    } else if (form.provider === "gmail") {
+      if (!form.gmail_client_id) return true;
+      if (!editingConnector && !form.gmail_client_secret) return true;
+    } else if (form.provider === "sap_s4hana") {
+      if (!form.sap_base_url) return true;
+      if (form.sap_auth_mode === "api_key" && !editingConnector && !form.sap_api_key) return true;
+      if (form.sap_auth_mode === "oauth2") {
+        if (!form.sap_oauth_token_url || !form.sap_client_id) return true;
+        if (!editingConnector && !form.sap_client_secret) return true;
+      }
     } else {
       // DB provider
       if (!form.host || !form.database_name || !form.username) return true;
@@ -850,6 +926,27 @@ export default function ConnectorsCatalogueView(): JSX.Element {
             client_secret: form.onedrive_client_secret,
           },
         };
+      } else if (form.provider === "gmail") {
+        payload = {
+          provider: form.provider,
+          provider_config: {
+            client_id: form.gmail_client_id,
+            client_secret: form.gmail_client_secret,
+          },
+        };
+      } else if (form.provider === "sap_s4hana") {
+        const provider_config: Record<string, string> = {
+          base_url: form.sap_base_url,
+          auth_mode: form.sap_auth_mode,
+        };
+        if (form.sap_auth_mode === "api_key") {
+          provider_config.api_key = form.sap_api_key;
+        } else {
+          provider_config.oauth_token_url = form.sap_oauth_token_url;
+          provider_config.client_id = form.sap_client_id;
+          provider_config.client_secret = form.sap_client_secret;
+        }
+        payload = { provider: form.provider, provider_config };
       } else {
         payload = {
           provider: form.provider,
@@ -904,9 +1001,12 @@ export default function ConnectorsCatalogueView(): JSX.Element {
   };
 
   const [linkingMailbox, setLinkingMailbox] = useState(false);
-  // Works for both Outlook (mailbox) and OneDrive (account) — picks the endpoint by provider.
+  // Works for Outlook (mailbox), OneDrive, and Gmail — picks the endpoint by provider.
   const handleLinkAccount = async (connector: ConnectorInfo) => {
-    const base = connector.provider === "onedrive" ? "onedrive" : "outlook";
+    const base =
+      connector.provider === "onedrive" ? "onedrive" :
+      connector.provider === "gmail" ? "gmail" :
+      "outlook";
     try {
       setLinkingMailbox(true);
       const res = await api.get(`/api/${base}/${connector.id}/oauth/start`);
@@ -963,14 +1063,11 @@ export default function ConnectorsCatalogueView(): JSX.Element {
 
   const getProviderBadge = (provider: string) => {
     const styles: Record<string, string> = {
-      postgresql: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
-      oracle: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
-      sqlserver: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
-      mysql: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400",
-      azure_blob: "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400",
       sharepoint: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
       outlook: "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400",
       onedrive: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+      gmail: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+      sap_s4hana: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
     };
     return styles[provider] || "bg-gray-100 text-gray-700";
   };
@@ -982,19 +1079,22 @@ export default function ConnectorsCatalogueView(): JSX.Element {
     if (c.provider === "sharepoint") {
       return c.provider_config?.site_url ?? "—";
     }
-    if (c.provider === "outlook" || c.provider === "onedrive") {
+    if (c.provider === "outlook" || c.provider === "onedrive" || c.provider === "gmail") {
       return c.provider_config?.client_id ?? "—";
+    }
+    if (c.provider === "sap_s4hana") {
+      return c.provider_config?.base_url ?? "—";
     }
     return c.host ? `${c.host}:${c.port}` : "—";
   };
 
   const getConnectorDb = (c: ConnectorInfo): string => {
-    if (STORAGE_PROVIDERS.has(c.provider) || OAUTH_PROVIDERS.has(c.provider)) return "—";
+    if (STORAGE_PROVIDERS.has(c.provider) || OAUTH_PROVIDERS.has(c.provider) || SAP_PROVIDERS.has(c.provider)) return "—";
     return c.database_name ?? "—";
   };
 
   const getConnectorSchema = (c: ConnectorInfo): string => {
-    if (STORAGE_PROVIDERS.has(c.provider) || OAUTH_PROVIDERS.has(c.provider)) return "—";
+    if (STORAGE_PROVIDERS.has(c.provider) || OAUTH_PROVIDERS.has(c.provider) || SAP_PROVIDERS.has(c.provider)) return "—";
     return c.schema_name ?? "—";
   };
 
@@ -1009,7 +1109,7 @@ export default function ConnectorsCatalogueView(): JSX.Element {
     return t("Private");
   };
 
-  const FILTER_TABS: ProviderFilter[] = ["all", "postgresql", "oracle", "sqlserver", "mysql", "azure_blob", "sharepoint", "onedrive", ...(ENABLE_OUTLOOK_CONNECTOR ? ["outlook" as const] : [])];
+  const FILTER_TABS: ProviderFilter[] = ["all", "sharepoint", "onedrive", "sap_s4hana", ...(ENABLE_OUTLOOK_CONNECTOR ? ["outlook" as const] : []), ...(ENABLE_GMAIL_CONNECTOR ? ["gmail" as const] : [])];
 
   /* ---- JSX ---- */
   if (!canViewConnectorPage) {
@@ -1182,6 +1282,8 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                               <Cloud className="h-3 w-3" />
                             ) : c.provider === "outlook" ? (
                               <Mail className="h-3 w-3" />
+                            ) : SAP_PROVIDERS.has(c.provider) ? (
+                              <Cable className="h-3 w-3" />
                             ) : (
                               <Database className="h-3 w-3" />
                             )}
@@ -1295,6 +1397,8 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                                   title={
                                     c.provider === "onedrive"
                                       ? t("Link OneDrive Account (OAuth)")
+                                      : c.provider === "gmail"
+                                      ? t("Link Gmail Account (OAuth)")
                                       : t("Link Mailbox (OAuth)")
                                   }
                                 >
@@ -1524,22 +1628,26 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                   disabled={!!editingConnector}
                   className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
                 >
-                  <optgroup label={t("Databases")}>
+                  {/* <optgroup label={t("Databases")}>
                     <option value="postgresql">PostgreSQL</option>
                     <option value="oracle">Oracle</option>
                     <option value="sqlserver">SQL Server</option>
                     <option value="mysql">MySQL</option>
-                  </optgroup>
+                  </optgroup> */}
                   <optgroup label={t("Cloud Storage")}>
-                    <option value="azure_blob">Azure Blob Storage</option>
+                    {/* <option value="azure_blob">Azure Blob Storage</option> */}
                     <option value="sharepoint">SharePoint</option>
                     <option value="onedrive">OneDrive</option>
                   </optgroup>
-                  {ENABLE_OUTLOOK_CONNECTOR && (
+                  {(ENABLE_OUTLOOK_CONNECTOR || ENABLE_GMAIL_CONNECTOR) && (
                   <optgroup label={t("Email")}>
-                    <option value="outlook">Microsoft Outlook</option>
+                    {ENABLE_OUTLOOK_CONNECTOR && <option value="outlook">Microsoft Outlook</option>}
+                    {ENABLE_GMAIL_CONNECTOR && <option value="gmail">Google Gmail</option>}
                   </optgroup>
                   )}
+                  <optgroup label={t("ERP")}>
+                    <option value="sap_s4hana">SAP S/4HANA</option>
+                  </optgroup>
                 </select>
               </div>
 
@@ -1781,6 +1889,16 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                 />
               )}
 
+              {/* ── Gmail fields ── */}
+              {form.provider === "gmail" && (
+                <GmailConnectorForm
+                  form={form}
+                  onChange={(field, value) => setForm({ ...form, [field]: value })}
+                  isEditing={!!editingConnector}
+                  connectorId={editingConnector?.id}
+                />
+              )}
+
               {/* ── OneDrive fields ── */}
               {form.provider === "onedrive" && (
                 <OneDriveConnectorForm
@@ -1788,6 +1906,22 @@ export default function ConnectorsCatalogueView(): JSX.Element {
                   onChange={(field, value) => setForm({ ...form, [field]: value })}
                   isEditing={!!editingConnector}
                   connectorId={editingConnector?.id}
+                />
+              )}
+
+              {/* ── SAP S/4HANA fields ── */}
+              {form.provider === "sap_s4hana" && (
+                <SapConnectorForm
+                  form={{
+                    base_url: form.sap_base_url,
+                    auth_mode: form.sap_auth_mode as "api_key" | "oauth2",
+                    api_key: form.sap_api_key,
+                    oauth_token_url: form.sap_oauth_token_url,
+                    client_id: form.sap_client_id,
+                    client_secret: form.sap_client_secret,
+                  }}
+                  onChange={(field, value) => setForm({ ...form, [`sap_${field}`]: value })}
+                  isEditing={!!editingConnector}
                 />
               )}
 

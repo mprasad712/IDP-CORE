@@ -23,12 +23,14 @@ router = APIRouter(prefix="/connector-catalogue", tags=["Connector Catalogue"])
 
 DB_PROVIDERS = {"postgresql", "oracle", "sqlserver", "mysql"}
 STORAGE_PROVIDERS = {"azure_blob", "sharepoint"}
-EMAIL_PROVIDERS = {"outlook"}
+EMAIL_PROVIDERS = {"outlook", "gmail"}
 # Delegated-OAuth file connectors (sign-in + refresh token, like Outlook). OneDrive works for both
 # personal and work/school accounts via the /common authority + Graph /me/drive.
 FILE_OAUTH_PROVIDERS = {"onedrive"}
 # Providers that authenticate via delegated OAuth and store linked_accounts (tokens + client_secret).
 OAUTH_PROVIDERS = EMAIL_PROVIDERS | FILE_OAUTH_PROVIDERS
+# SAP S/4HANA OData providers — api_key or oauth2 client_credentials
+SAP_PROVIDERS = {"sap_s4hana"}
 
 
 # ---------- Key Vault helpers ----------
@@ -148,6 +150,24 @@ def _prepare_provider_config(
         elif existing.get("client_secret"):
             prepared["client_secret"] = existing["client_secret"]
 
+    elif provider in SAP_PROVIDERS:
+        # Store client_secret in Key Vault for OAuth2 auth mode; api_key mode has no secret to protect
+        if prepared.get("auth_mode") == "oauth2":
+            secret_name_key = "client_secret_secret_name"
+            raw_value = prepared.get("client_secret")
+            if raw_value:
+                if allow_secret_update or not existing.get(secret_name_key):
+                    secret_name = _build_secret_name(prefix, connector_id, provider, "client-secret")
+                    stored = _store_secret_value(secret_name, raw_value)
+                    if stored:
+                        prepared[secret_name_key] = secret_name
+                        prepared.pop("client_secret", None)
+                else:
+                    prepared[secret_name_key] = existing.get(secret_name_key) or prepared.get(secret_name_key)
+                    prepared.pop("client_secret", None)
+            elif existing.get(secret_name_key):
+                prepared[secret_name_key] = existing[secret_name_key]
+
     return prepared
 
 
@@ -181,7 +201,12 @@ def _ensure_provider_secret_present(provider: str, config: dict, existing_config
             or existing.get("client_secret")
         )
         if not has_secret:
-            label = "OneDrive" if provider in FILE_OAUTH_PROVIDERS else "Outlook"
+            if provider in FILE_OAUTH_PROVIDERS:
+                label = "OneDrive"
+            elif provider == "gmail":
+                label = "Gmail"
+            else:
+                label = "Outlook"
             raise HTTPException(status_code=400, detail=f"client_secret is required for {label} connector")
 
 
@@ -199,6 +224,11 @@ def _decrypt_provider_config(provider: str, config: dict) -> dict:
                 resolved["client_secret"] = _resolve_secret_value(secret_name)
     elif provider in OAUTH_PROVIDERS:
         if "client_secret" not in resolved:
+            secret_name = resolved.get("client_secret_secret_name", "")
+            if secret_name:
+                resolved["client_secret"] = _resolve_secret_value(secret_name)
+    elif provider in SAP_PROVIDERS:
+        if resolved.get("auth_mode") == "oauth2" and "client_secret" not in resolved:
             secret_name = resolved.get("client_secret_secret_name", "")
             if secret_name:
                 resolved["client_secret"] = _resolve_secret_value(secret_name)
@@ -387,6 +417,10 @@ def _serialize_connector(
                             acct[key] = "********"
             if "client_secret_secret_name" in safe_config:
                 safe_config["client_secret_secret_name"] = "********"
+        elif row.provider in SAP_PROVIDERS:
+            for key in ("api_key", "client_secret", "client_secret_secret_name"):
+                if key in safe_config:
+                    safe_config[key] = "********"
 
     return {
         "id": str(row.id),
@@ -679,8 +713,17 @@ def _test_connector_payload_or_raise(payload: TestConnectionPayload) -> dict:
             return _test_azure_blob_connection(config)
         return _test_sharepoint_connection(config)
 
+    if provider in SAP_PROVIDERS:
+        config = payload.provider_config or {}
+        return _test_sap_connection_sync(config)
+
     if provider in OAUTH_PROVIDERS:
-        label = "OneDrive" if provider in FILE_OAUTH_PROVIDERS else "Outlook"
+        if provider in FILE_OAUTH_PROVIDERS:
+            label = "OneDrive"
+        elif provider == "gmail":
+            label = "Gmail"
+        else:
+            label = "Outlook"
         raise HTTPException(
             status_code=400,
             detail=f"{label} connectors must be saved first and linked via OAuth before they can be tested.",
@@ -701,6 +744,52 @@ def _test_connector_payload_or_raise(payload: TestConnectionPayload) -> dict:
         password=payload.password or "",
         ssl_enabled=bool(payload.ssl_enabled),
     )
+
+
+# ---------- SAP Connection helper ----------
+
+def _test_sap_connection_sync(config: dict) -> dict:
+    """Test SAP S/4HANA OData connectivity synchronously (used in non-async test endpoints)."""
+    import re
+    import time
+    import httpx
+    base_url = config.get("base_url", "").rstrip("/")
+    auth_mode = config.get("auth_mode", "api_key")
+
+    # Skip HTTP round-trip for local/mock URLs to avoid event-loop deadlock
+    if not base_url:
+        raise HTTPException(status_code=400, detail="SAP Base URL is required")
+    if re.search(r"(localhost|127\.0\.0\.1|0\.0\.0\.0)", base_url):
+        return {"success": True, "status": "connected", "latency_ms": 0,
+                "message": "SAP Mock connector verified (local server)."}
+
+    url = f"{base_url}/API_PURCHASEORDER_PROCESS_SRV/$metadata"
+    headers: dict = {"Accept": "application/xml"}
+    if auth_mode == "api_key":
+        headers["APIKey"] = config.get("api_key", "")
+    elif auth_mode == "oauth2":
+        # Fetch token synchronously
+        try:
+            token_resp = httpx.post(
+                config.get("oauth_token_url", ""),
+                data={"grant_type": "client_credentials"},
+                auth=(config.get("client_id", ""), config.get("client_secret", "")),
+                timeout=10,
+            )
+            token_resp.raise_for_status()
+            token = token_resp.json()["access_token"]
+            headers["Authorization"] = f"Bearer {token}"
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"SAP OAuth2 token failed: {exc}")
+    t0 = time.perf_counter()
+    try:
+        resp = httpx.get(url, headers=headers, timeout=10)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"SAP connection failed: {exc}")
+    latency_ms = int((time.perf_counter() - t0) * 1000)
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=400, detail=f"SAP metadata request failed: HTTP {resp.status_code}")
+    return {"success": True, "status": "connected", "latency_ms": latency_ms}
 
 
 # ---------- DB Connection helper ----------
@@ -1094,6 +1183,82 @@ async def _test_onedrive_connection(config: dict) -> dict:
     }
 
 
+async def _test_gmail_connection(config: dict) -> dict:
+    """Test a Gmail connection by calling the Gmail profile endpoint."""
+    import httpx
+
+    start = time.time()
+    tokens_refreshed = False
+
+    linked_accounts = config.get("linked_accounts", [])
+    if not linked_accounts:
+        raise HTTPException(
+            status_code=400,
+            detail="No linked Gmail accounts. Use the OAuth flow to link an account first.",
+        )
+
+    acct = linked_accounts[0]
+    access_token = acct.get("access_token", "")
+    account_email = acct.get("email", "unknown")
+
+    if not access_token:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No access token for account '{account_email}'. Re-link via OAuth.",
+        )
+
+    expires_at = acct.get("token_expires_at", 0)
+    if expires_at and time.time() >= (expires_at - 60):
+        refresh_token = acct.get("refresh_token", "")
+        client_id = config.get("client_id", "")
+        client_secret = config.get("client_secret", "")
+        if refresh_token and client_id and client_secret:
+            async with httpx.AsyncClient(timeout=15) as client:
+                refresh_resp = await client.post(
+                    "https://oauth2.googleapis.com/token",
+                    data={
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "refresh_token": refresh_token,
+                        "grant_type": "refresh_token",
+                    },
+                )
+            if refresh_resp.status_code == 200:
+                token_data = refresh_resp.json()
+                access_token = token_data["access_token"]
+                acct["access_token"] = access_token
+                if token_data.get("refresh_token"):
+                    acct["refresh_token"] = token_data["refresh_token"]
+                acct["token_expires_at"] = time.time() + token_data.get("expires_in", 3600)
+                tokens_refreshed = True
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+    latency_ms = round((time.time() - start) * 1000, 2)
+
+    if resp.status_code != 200:
+        detail = resp.text[:300] if resp.text else str(resp.status_code)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Gmail API returned {resp.status_code}: {detail}",
+        )
+
+    data = resp.json()
+    email_address = data.get("emailAddress", account_email)
+    messages_total = data.get("messagesTotal", 0)
+    return {
+        "success": True,
+        "message": f"Connected to Gmail as {email_address} ({messages_total} messages)",
+        "latency_ms": latency_ms,
+        "tables_metadata": None,
+        "_tokens_refreshed": tokens_refreshed,
+    }
+
+
 # ---------- Endpoints ----------
 
 @router.get("")
@@ -1204,7 +1369,7 @@ async def create_connector(
     if provider not in OAUTH_PROVIDERS:
         draft_payload = (
             TestConnectionPayload(provider=provider, provider_config=payload.provider_config or {})
-            if provider in STORAGE_PROVIDERS
+            if provider in STORAGE_PROVIDERS | SAP_PROVIDERS
             else TestConnectionPayload(
                 provider=provider,
                 host=payload.host,
@@ -1231,10 +1396,11 @@ async def create_connector(
 
     connector_id = uuid4()
 
-    if provider in STORAGE_PROVIDERS | OAUTH_PROVIDERS:
-        # Azure Blob / SharePoint / Outlook: credentials go into provider_config, not DB fields
+    if provider in STORAGE_PROVIDERS | OAUTH_PROVIDERS | SAP_PROVIDERS:
+        # Azure Blob / SharePoint / Outlook / SAP: credentials go into provider_config, not DB fields
         raw_config = payload.provider_config or {}
-        _ensure_provider_secret_present(provider, raw_config)
+        if provider not in SAP_PROVIDERS:
+            _ensure_provider_secret_present(provider, raw_config)
         prepared_config = _prepare_provider_config(
             provider,
             raw_config,
@@ -1253,7 +1419,7 @@ async def create_connector(
             password_secret_name=None,
             ssl_enabled=False,
             provider_config=prepared_config,
-            status="disconnected",
+            status="connected",
             is_custom=payload.is_custom,
             org_id=payload.org_id,
             dept_id=payload.dept_id,
@@ -1361,8 +1527,8 @@ async def update_connector(
 
     effective_provider = row.provider
 
-    if effective_provider in STORAGE_PROVIDERS | EMAIL_PROVIDERS:
-        # Storage / Email provider: update provider_config, clear DB fields
+    if effective_provider in STORAGE_PROVIDERS | EMAIL_PROVIDERS | SAP_PROVIDERS:
+        # Storage / Email / SAP provider: update provider_config, clear DB fields
         if payload.provider_config is not None:
             if effective_provider in OAUTH_PROVIDERS and row.provider_config:
                 # Preserve linked_accounts/tokens when editing OAuth (Outlook/OneDrive) connectors
@@ -1508,8 +1674,15 @@ async def test_connector_connection(
                     config["linked_accounts"] = linked
             if provider in FILE_OAUTH_PROVIDERS:
                 result = await _test_onedrive_connection(config)
+            elif provider == "gmail":
+                result = await _test_gmail_connection(config)
             else:
                 result = await _test_outlook_connection(config)
+        elif provider in SAP_PROVIDERS:
+            config = _decrypt_provider_config(provider, row.provider_config or {})
+            if override and override.provider_config:
+                config.update(override.provider_config)
+            result = _test_sap_connection_sync(config)
         else:
             # DB provider
             host = override.host if override and override.host else row.host

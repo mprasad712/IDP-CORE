@@ -1,7 +1,8 @@
-import { ArrowUpToLine, Filter, Info, Search, Share2, X } from "lucide-react";
+import { Activity, ArrowUpToLine, Clock, Filter, Info, Loader2, Pause, Play, Plus, RefreshCw, Search, Share2, X } from "lucide-react";
 import { useContext, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import ShadTooltip from "@/components/common/shadTooltipComponent";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -31,6 +32,23 @@ import {
   usePutControlPanelAgentSharing,
   useToggleControlPanelAgent,
 } from "@/controllers/API/queries/control-panel";
+import {
+  useGetAllTriggers,
+  type TriggerInfo,
+} from "@/controllers/API/queries/triggers/use-get-all-triggers";
+import {
+  useCreateTrigger,
+  useRunTriggerNow,
+  useToggleTrigger,
+} from "@/controllers/API/queries/triggers/use-mutate-trigger";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import CustomLoader from "@/customization/components/custom-loader";
 import { useCustomNavigate } from "@/customization/hooks/use-custom-navigate";
 import EmbedModal from "@/modals/EmbedModal/embed-modal";
@@ -66,6 +84,40 @@ interface WorkagentType {
 }
 
 const EMPTY_WORKFLOWS: WorkagentType[] = [];
+
+const TRIGGER_TYPE_LABEL: Record<string, string> = {
+  email_monitor: "Email monitor",
+  folder_monitor: "Folder monitor",
+  schedule: "Schedule",
+};
+
+function fmtTriggerDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "—" : `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+function triggerConfigSummary(trig: TriggerInfo): string {
+  const c = trig.trigger_config || {};
+  if (trig.trigger_type === "email_monitor") {
+    const bits: string[] = [];
+    if (c.mail_folder) bits.push(`folder=${c.mail_folder}`);
+    if (c.poll_interval_seconds) bits.push(`every ${c.poll_interval_seconds}s`);
+    const f: string[] = [];
+    if (c.filter_subject) f.push(`subject~"${c.filter_subject}"`);
+    if (c.filter_body) f.push(`body~"${c.filter_body}"`);
+    if (c.filter_sender) f.push(`from=${c.filter_sender}`);
+    if (c.filter_to) f.push(`to=${c.filter_to}`);
+    if (c.filter_cc) f.push(`cc=${c.filter_cc}`);
+    if (c.unread_only) f.push("unread");
+    if (f.length) bits.push(f.join(", "));
+    return bits.join(" · ") || "—";
+  }
+  if (trig.trigger_type === "folder_monitor") {
+    return [c.storage_type, c.poll_interval_seconds && `every ${c.poll_interval_seconds}s`].filter(Boolean).join(" · ") || "—";
+  }
+  return c.cron || "—";
+}
 
 interface WorkflowsViewProps {
   workflows?: WorkagentType[];
@@ -159,6 +211,13 @@ export default function WorkflowsView({
   const [exportAgentData, setExportAgentData] = useState<AgentType | undefined>(
     undefined,
   );
+  const [schedulerDialogOpen, setSchedulerDialogOpen] = useState(false);
+  const [schedulerWorkflow, setSchedulerWorkflow] = useState<WorkagentType | null>(null);
+  const [schedulerBusyId, setSchedulerBusyId] = useState<string | null>(null);
+  const [showAddSchedule, setShowAddSchedule] = useState(false);
+  const [cronPreset, setCronPreset] = useState("");
+  const [cronExpression, setCronExpression] = useState("");
+  const [isCreatingSchedule, setIsCreatingSchedule] = useState(false);
   const { permissions, userData } = useContext(AuthContext);
   const navigate = useCustomNavigate();
   const isAuth = true;
@@ -168,9 +227,52 @@ export default function WorkflowsView({
   const promoteMutation = usePostControlPanelPromote();
   const updateSharingMutation = usePutControlPanelAgentSharing();
   const validatePublishEmail = useValidatePublishEmail();
+  const toggleTrigger = useToggleTrigger();
+  const runTriggerNow = useRunTriggerNow();
+  const createTrigger = useCreateTrigger();
+  const { data: allTriggers, isLoading: isLoadingTriggers } = useGetAllTriggers(
+    undefined,
+    { enabled: schedulerDialogOpen },
+  );
   const can = (permissionKey: string) => permissions?.includes(permissionKey);
   const canDirectPromoteToProd = can("prod_publish_approval_not_required");
   const requiresProdApproval = !canDirectPromoteToProd;
+  const schedulerAgentTriggers = useMemo(
+    () => (allTriggers ?? []).filter((trig) => trig.agent_id === schedulerWorkflow?.agentId),
+    [allTriggers, schedulerWorkflow?.agentId],
+  );
+
+  const resetScheduleForm = () => {
+    setShowAddSchedule(false);
+    setCronExpression("");
+    setCronPreset("");
+  };
+
+  const handleCreateSchedule = async () => {
+    if (!schedulerWorkflow || !cronExpression.trim()) return;
+    setIsCreatingSchedule(true);
+    try {
+      await createTrigger.mutateAsync({
+        agentId: schedulerWorkflow.agentId ?? "",
+        payload: {
+          trigger_type: "schedule",
+          trigger_config: { cron: cronExpression.trim() },
+          environment: activeTab.toLowerCase(),
+          version: schedulerWorkflow.version ?? undefined,
+          deployment_id: schedulerWorkflow.id,
+        },
+      });
+      setSuccessData({ title: t("Schedule created successfully.") });
+      resetScheduleForm();
+    } catch (error: any) {
+      setErrorData({
+        title: t("Failed to create schedule"),
+        list: [error?.response?.data?.detail || error?.message || t("Unknown error")],
+      });
+    } finally {
+      setIsCreatingSchedule(false);
+    }
+  };
 
   const handleRowDoubleClick = (workflow: WorkagentType) => {
     const agentId = workflow.agentId;
@@ -987,7 +1089,7 @@ export default function WorkflowsView({
   }, [searchQuery, setSearch]);
 
   const tableColumnCount =
-    6 +
+    7 +
     (activeTab === "PROD" ? 1 : 0) +
     (can("share_agent") ? 1 : 0) +
     (can("move_uat_to_prod") && activeTab === "UAT" ? 1 : 0) +
@@ -1338,6 +1440,7 @@ export default function WorkflowsView({
               {can("move_uat_to_prod") && activeTab === "UAT" && <col className="w-[8rem]" />}
               {can("start_stop_agent") && <col className="w-[6rem]" />}
               {can("enable_disable_agent") && <col className="w-[7rem]" />}
+              <col className="w-[7rem]" />
             </colgroup>
             <thead className="sticky top-0 z-10 border-b bg-card">
               <tr>
@@ -1386,6 +1489,9 @@ export default function WorkflowsView({
                     {t("Enable/Disable")}
                   </th>
                 )}
+                <th className="bg-muted/30 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  {t("Scheduler")}
+                </th>
               </tr>
             </thead>
 
@@ -1661,6 +1767,20 @@ export default function WorkflowsView({
                         </button>
                       </td>
                     )}
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs hover:bg-muted"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSchedulerWorkflow(workflow);
+                          setSchedulerDialogOpen(true);
+                        }}
+                      >
+                        <Clock className="h-3.5 w-3.5" />
+                        {t("Schedule")}
+                      </button>
+                    </td>
                   </tr>
                 ))
               )}
@@ -2107,6 +2227,189 @@ export default function WorkflowsView({
         tweaksBuildedObject={{}}
         activeTweaks={false}
       />
+
+      <Dialog open={schedulerDialogOpen} onOpenChange={(open) => {
+        setSchedulerDialogOpen(open);
+        if (!open) resetScheduleForm();
+      }}>
+        <DialogContent className="sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Clock className="h-4 w-4 text-[#D04A02]" />
+              {t("Scheduler")}
+              {schedulerWorkflow ? ` — ${schedulerWorkflow.name}` : ""}
+            </DialogTitle>
+            <DialogDescription>
+              {t("Background triggers for this agent — schedule, email monitors, and folder monitors.")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="mt-2">
+            {isLoadingTriggers ? (
+              <div className="flex items-center justify-center py-12 text-muted-foreground">
+                <Loader2 className="h-5 w-5 animate-spin mr-2" /> {t("Loading…")}
+              </div>
+            ) : schedulerAgentTriggers.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                <Activity className="h-8 w-8 mb-2 opacity-40" />
+                <p className="text-sm">{t("No automations configured for this agent.")}</p>
+              </div>
+            ) : (
+              <div className="rounded-lg border overflow-hidden">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/30 hover:bg-muted/30">
+                      <TableHead className="font-semibold text-xs uppercase tracking-wide w-36">{t("Type")}</TableHead>
+                      <TableHead className="font-semibold text-xs uppercase tracking-wide">{t("Config")}</TableHead>
+                      <TableHead className="font-semibold text-xs uppercase tracking-wide w-24">{t("Status")}</TableHead>
+                      <TableHead className="font-semibold text-xs uppercase tracking-wide w-40">{t("Last Run")}</TableHead>
+                      <TableHead className="font-semibold text-xs uppercase tracking-wide w-16 text-center">{t("Runs")}</TableHead>
+                      <TableHead className="w-24 text-right" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {schedulerAgentTriggers.map((trigger) => (
+                      <TableRow key={trigger.id} className="hover:bg-muted/20 transition-colors">
+                        <TableCell className="text-sm text-muted-foreground">
+                          {TRIGGER_TYPE_LABEL[trigger.trigger_type] ?? trigger.trigger_type}
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground max-w-[16rem] truncate" title={triggerConfigSummary(trigger)}>
+                          {triggerConfigSummary(trigger)}
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant="outline"
+                            className={
+                              trigger.is_active
+                                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                : "bg-muted text-muted-foreground border-border"
+                            }
+                          >
+                            {trigger.is_active ? t("Active") : t("Paused")}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {fmtTriggerDateTime(trigger.last_triggered_at)}
+                        </TableCell>
+                        <TableCell className="text-sm text-center text-muted-foreground">
+                          {trigger.trigger_count}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 gap-1 rounded-lg"
+                              title={trigger.is_active ? t("Pause") : t("Activate")}
+                              disabled={schedulerBusyId === trigger.id}
+                              onClick={async () => {
+                                setSchedulerBusyId(trigger.id);
+                                try { await toggleTrigger.mutateAsync(trigger.id); }
+                                finally { setSchedulerBusyId(null); }
+                              }}
+                            >
+                              {trigger.is_active ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 gap-1 rounded-lg"
+                              title={t("Run now")}
+                              disabled={schedulerBusyId === trigger.id}
+                              onClick={async () => {
+                                setSchedulerBusyId(trigger.id);
+                                try { await runTriggerNow.mutateAsync(trigger.id); }
+                                finally { setSchedulerBusyId(null); }
+                              }}
+                            >
+                              <RefreshCw className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-4 border-t pt-4">
+            {!showAddSchedule ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                onClick={() => setShowAddSchedule(true)}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                {t("Add Schedule")}
+              </Button>
+            ) : (
+              <div className="rounded-lg border bg-muted/20 p-4 space-y-3">
+                <h4 className="text-sm font-semibold flex items-center gap-2">
+                  <Clock className="h-3.5 w-3.5 text-[#D04A02]" />
+                  {t("New Schedule")}
+                </h4>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      {t("Quick pick")}
+                    </label>
+                    <select
+                      className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                      value={cronPreset}
+                      onChange={(e) => {
+                        setCronPreset(e.target.value);
+                        if (e.target.value) setCronExpression(e.target.value);
+                      }}
+                    >
+                      <option value="">— {t("Custom")} —</option>
+                      <option value="*/15 * * * *">{t("Every 15 minutes")}</option>
+                      <option value="0 * * * *">{t("Every hour")}</option>
+                      <option value="0 9 * * *">{t("Daily at 9:00 AM")}</option>
+                      <option value="0 12 * * *">{t("Daily at 12:00 PM")}</option>
+                      <option value="0 18 * * *">{t("Daily at 6:00 PM")}</option>
+                      <option value="0 9 * * 1-5">{t("Weekdays at 9:00 AM")}</option>
+                      <option value="0 9 * * 1">{t("Every Monday at 9:00 AM")}</option>
+                      <option value="0 0 1 * *">{t("1st of every month")}</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      {t("Cron expression")}
+                    </label>
+                    <input
+                      type="text"
+                      className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm font-mono"
+                      placeholder="*/15 * * * *"
+                      value={cronExpression}
+                      onChange={(e) => {
+                        setCronExpression(e.target.value);
+                        setCronPreset("");
+                      }}
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {t("Format:")} <span className="font-mono">minute hour day-of-month month day-of-week</span>
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    disabled={!cronExpression.trim() || isCreatingSchedule}
+                    onClick={() => void handleCreateSchedule()}
+                  >
+                    {isCreatingSchedule ? t("Saving…") : t("Save Schedule")}
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={resetScheduleForm}>
+                    {t("Cancel")}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

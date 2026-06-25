@@ -24,7 +24,8 @@ export default function IDPConnectorDropdown({
         c.status === "connected" &&
         (c.provider === "outlook" ||
           c.provider === "sharepoint" ||
-          c.provider === "onedrive"),
+          c.provider === "onedrive" ||
+          c.provider === "gmail"),
     )
     .map((c) => c.name);
 
