@@ -1,13 +1,13 @@
 """Document Logs — returns ALL documents regardless of agent pipeline config."""
 from datetime import datetime
 from uuid import UUID
+import warnings
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi_pagination import Params, Page
 from fastapi_pagination.ext.sqlmodel import apaginate
 from pydantic import BaseModel
 from sqlmodel import select
-import warnings
 
 from agentcore.api.utils import CurrentActiveUser, DbSession
 from agentcore.services.auth.permissions import normalize_role
@@ -25,7 +25,6 @@ class DocumentLogRead(BaseModel):
     status: str
     created_at: datetime
     agent_id: UUID
-    agent_name: str | None = None
 
     class Config:
         from_attributes = True
@@ -48,14 +47,15 @@ async def list_document_logs(
     *,
     session: DbSession,
     current_user: CurrentActiveUser,
-    params: Params,
+    params: Params = Depends(),
     status_filter: str | None = None,
 ):
     """List ALL documents with their current status — no pipeline-config gating."""
     role = normalize_role(getattr(current_user, "role", None))
 
+    # Select only IdpDocument; join IdpAgent+Agent purely for org-scope filtering
     stmt = (
-        select(IdpDocument, IdpAgent, Agent)
+        select(IdpDocument)
         .join(IdpAgent, IdpDocument.agent_id == IdpAgent.id)
         .join(Agent, IdpAgent.agent_id == Agent.id)
     )
@@ -75,20 +75,4 @@ async def list_document_logs(
             category=DeprecationWarning,
             module=r"fastapi_pagination\.ext\.sqlalchemy",
         )
-        raw_page = await apaginate(session, stmt, params=params)
-
-    items: list[DocumentLogRead] = []
-    for row in raw_page.items:
-        doc, _idp_agent, agent = row
-        items.append(
-            DocumentLogRead(
-                id=doc.id,
-                original_filename=doc.original_filename,
-                status=doc.status,
-                created_at=doc.created_at,
-                agent_id=doc.agent_id,
-                agent_name=agent.name if agent else None,
-            )
-        )
-
-    return raw_page.model_copy(update={"items": items})
+        return await apaginate(session, stmt, params=params)
