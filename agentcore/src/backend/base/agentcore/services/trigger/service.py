@@ -62,6 +62,54 @@ def _recipient_addrs(recipients) -> list[str]:
     return out
 
 
+# Backstop on how many Graph @odata.nextLink pages we follow for one email's attachments. Set far
+# above any real email (Outlook caps a message ~150 MB, so a few hundred attachments at most); the
+# cap exists only to bound a pathological/looping nextLink. If it IS hit, the fetch is treated as
+# INCOMPLETE (returns None → retry), never a partial success that would drop the remaining pages.
+_MAX_ATTACHMENT_PAGES = 200
+
+# Backstop on how many @odata.nextLink pages of the MESSAGE list one poll walks. Without this the
+# monitor only ever saw the first page (top N by receivedDateTime), so a burst of >N new emails
+# between polls could be missed. The walk stops early once a page has no new (unseen) message.
+_MAX_MESSAGE_PAGES = 10
+
+# Only ever follow @odata.nextLink / fetch attachment bytes from a real Microsoft Graph host — a
+# forged nextLink pointing elsewhere (e.g. cloud-metadata 169.254.169.254) must not receive the
+# bearer token (SSRF guard).
+_ALLOWED_GRAPH_HOSTS = {"graph.microsoft.com"}
+
+
+def _is_graph_url(url: str) -> bool:
+    """True iff ``url`` is an https Microsoft Graph URL (used before following a Graph-supplied link)."""
+    try:
+        from urllib.parse import urlparse
+
+        p = urlparse(url or "")
+        return (
+            p.scheme == "https"
+            and (p.hostname or "").lower() in _ALLOWED_GRAPH_HOSTS
+            and p.port in (None, 443)
+        )
+    except Exception:
+        return False
+
+
+def _as_bool(v, default: bool = False) -> bool:
+    """Parse a node-template toggle that may be a real bool OR a stringified one ('true'/'false'/
+    '1'/'0'). Naive ``bool('false')`` is ``True``, which silently inverts a disabled toggle."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off", ""):
+            return False
+    if v is None:
+        return default
+    return bool(v)
+
+
 class TriggerService(Service):
     """Manages non-schedule triggers: folder monitors and email monitors.
 
@@ -418,10 +466,10 @@ class TriggerService(Service):
                 "filter_to": tv("filter_to", "") or "",
                 "filter_cc": tv("filter_cc", "") or "",
                 "filter_importance": tv("filter_importance", "all") or "all",
-                "filter_has_attachments": bool(tv("filter_has_attachments", True)),
-                "unread_only": bool(tv("unread_only", False)),
-                "mark_as_read": bool(tv("mark_as_read", False)),
-                "fetch_full_body": bool(tv("fetch_full_body", False)),
+                "filter_has_attachments": _as_bool(tv("filter_has_attachments", True), True),
+                "unread_only": _as_bool(tv("unread_only", False), False),
+                "mark_as_read": _as_bool(tv("mark_as_read", False), False),
+                "fetch_full_body": _as_bool(tv("fetch_full_body", False), False),
                 "fetch_attachments": True,
                 "ingest_mode": "idp_pipeline",
                 "node_id": node_id,
@@ -1594,7 +1642,10 @@ class TriggerService(Service):
                     logger.warning(f"Email monitor {task_id}: Graph API {resp.status_code}")
                     continue
 
-                messages = resp.json().get("value", [])
+                # Walk @odata.nextLink so a burst of >top-N new emails between polls isn't missed
+                # (small/quiet inboxes have no nextLink → zero extra round-trips).
+                seen_now = self._seen_files.get(task_id, OrderedDict())
+                messages, walk_ok = await self._walk_message_pages(access_token, resp.json(), seen_now, task_id)
 
                 # Apply client-side filters if OData $filter was not supported
                 if client_side_filter and messages:
@@ -1698,14 +1749,23 @@ class TriggerService(Service):
                     )
                     processed_ids = [m["id"] for m in new_messages if m.get("id")]
 
-                # Mark processed emails seen (bounded) — only the ones that actually completed.
-                for _mid in processed_ids:
-                    seen[_mid] = None
-                _MAX_SEEN = 10_000
-                if len(seen) > _MAX_SEEN:
-                    for _ in range(len(seen) - _MAX_SEEN):
-                        seen.popitem(last=False)  # evict OLDEST
-                self._seen_files[task_id] = seen
+                # Mark processed emails seen (bounded) — only the ones that actually completed, AND
+                # only when the message-page walk was COMPLETE. If a later page failed (walk_ok=False)
+                # we must NOT mark these seen: the next poll re-walks from page 1 (the early-stop would
+                # otherwise skip the unreached pages forever), and the dedup_key keeps it idempotent.
+                if walk_ok:
+                    for _mid in processed_ids:
+                        seen[_mid] = None
+                    _MAX_SEEN = 10_000
+                    if len(seen) > _MAX_SEEN:
+                        for _ in range(len(seen) - _MAX_SEEN):
+                            seen.popitem(last=False)  # evict OLDEST
+                    self._seen_files[task_id] = seen
+                else:
+                    logger.warning(
+                        f"Email monitor {task_id}: message-page walk incomplete — NOT marking this "
+                        f"poll's emails seen; will re-walk next poll (dedup prevents duplicate docs)"
+                    )
 
                 # 7. Mark the successfully-processed emails as read if configured
                 if mark_as_read and processed_ids:
@@ -1810,6 +1870,66 @@ class TriggerService(Service):
             )
             return []
 
+    async def _walk_message_pages(self, access_token: str, first_body: dict, seen, task_id: str) -> tuple[list[dict], bool]:
+        """Accumulate inbox messages across Graph ``@odata.nextLink`` pages, starting from an already
+        fetched first page (``first_body``). Returns ``(messages, ok)``.
+
+        Bounded by ``_MAX_MESSAGE_PAGES``; stops early once the latest page has NO new (unseen)
+        message — the list is receivedDateTime-desc, so an all-seen page means every older page is
+        seen too. Each ``next_url`` is validated with ``_is_graph_url`` (SSRF). With no
+        ``@odata.nextLink`` the loop never runs, so small/quiet inboxes pay zero extra round-trips.
+
+        ``ok`` is ``False`` when a later page FAILED to fetch (non-200/exception): the caller must
+        then NOT mark these emails seen, otherwise the early-stop would make the next poll skip the
+        unreached pages forever. With ``ok=False`` the next poll re-walks from page 1 and the
+        ``dedup_key`` prevents duplicate documents for the ones already ingested."""
+        import httpx
+
+        messages = list(first_body.get("value", []))
+        body = first_body
+        next_url = body.get("@odata.nextLink")
+        pages = 1
+        ok = True
+        while next_url and pages < _MAX_MESSAGE_PAGES:
+            if not _is_graph_url(next_url):
+                # A non-Graph nextLink is forged/anomalous (SSRF guard). Treat as INCOMPLETE: set
+                # ok=False so the caller does NOT mark these emails seen (otherwise the next poll's
+                # early-stop would skip the unreached pages forever); the next poll re-walks.
+                logger.warning(f"Email monitor {task_id}: refusing non-Graph message nextLink; stopping (incomplete)")
+                ok = False
+                break
+            if not any(m.get("id") and m["id"] not in seen for m in (body.get("value") or [])):
+                break  # latest page had no new mail → don't page further into old territory
+            try:
+                async with httpx.AsyncClient() as client:
+                    nresp = await client.get(
+                        next_url, headers={"Authorization": f"Bearer {access_token}"}, timeout=15
+                    )
+            except Exception as e:
+                logger.warning(f"Email monitor {task_id}: message page {pages + 1} fetch error: {e}; stopping (incomplete)")
+                ok = False
+                break
+            if nresp.status_code != 200:
+                logger.warning(f"Email monitor {task_id}: message page {pages + 1} HTTP {nresp.status_code}; stopping (incomplete)")
+                ok = False
+                break
+            body = nresp.json()
+            messages.extend(body.get("value", []))
+            next_url = body.get("@odata.nextLink")
+            pages += 1
+        if next_url and pages >= _MAX_MESSAGE_PAGES:
+            # Cap hit with pages still remaining → INCOMPLETE. Set ok=False so the caller does NOT
+            # mark this batch seen (which would let the next poll's all-seen early-stop hide the
+            # overflow pages); the next poll re-walks and the dedup prevents duplicate docs.
+            logger.warning(
+                f"Email monitor {task_id}: hit the {_MAX_MESSAGE_PAGES}-page message cap with more "
+                f"remaining — extreme burst; treating as incomplete (re-walk next poll)"
+            )
+            ok = False
+        if pages > 1:
+            logger.info(f"Email monitor {task_id}: walked {pages} message pages ({len(messages)} messages)")
+        return messages, ok
+
     async def _fetch_attachments_raw(self, message_id: str, access_token: str, task_id: str) -> list[dict] | None:
         """Fetch RAW file-attachment bytes (b64) for IDP ingest.
 
@@ -1821,31 +1941,92 @@ class TriggerService(Service):
         (a transient ``/attachments`` error must not silently drop a real attachment). An empty
         ``[]`` means the fetch succeeded but the email has no ingestible file attachments.
         """
+        import base64
         import httpx
         from urllib.parse import quote
 
         safe_id = quote(message_id, safe="")
-        url = f"https://graph.microsoft.com/v1.0/me/messages/{safe_id}/attachments"
+        # Page through ALL attachments. Graph paginates the attachments collection via
+        # @odata.nextLink for emails with many/large attachments; following the links guarantees we
+        # don't stop at the first page (which would silently drop the rest of, say, a 100-attachment
+        # email). nextLink is an absolute Graph URL, so we follow it verbatim.
+        url: str | None = f"https://graph.microsoft.com/v1.0/me/messages/{safe_id}/attachments"
         out: list[dict] = []
+        pages = 0
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
-            if resp.status_code != 200:
-                logger.warning(f"Email monitor {task_id}: raw attachments HTTP {resp.status_code} for {message_id[:20]}...")
-                return None  # fetch failed → caller retries (do not mark seen)
-            for att in resp.json().get("value", []):
-                if att.get("@odata.type") != "#microsoft.graph.fileAttachment":
-                    continue
-                cb = att.get("contentBytes", "")
-                if not cb:
-                    continue
-                out.append({
-                    "attachment_id": att.get("id", ""),
-                    "name": att.get("name", "attachment"),
-                    "content_bytes_b64": cb,
-                    "content_type": att.get("contentType", "application/octet-stream"),
-                    "size": att.get("size", 0),
-                })
+                while url and pages < _MAX_ATTACHMENT_PAGES:
+                    if not _is_graph_url(url):
+                        # A nextLink that isn't a Microsoft Graph https URL is forged/anomalous —
+                        # never send the bearer token to it (SSRF). Treat as incomplete → retry.
+                        logger.warning(
+                            f"Email monitor {task_id}: refusing non-Graph attachments URL for "
+                            f"{message_id[:20]}..."
+                        )
+                        return None
+                    resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
+                    if resp.status_code != 200:
+                        logger.warning(
+                            f"Email monitor {task_id}: raw attachments HTTP {resp.status_code} for "
+                            f"{message_id[:20]}... (page {pages + 1})"
+                        )
+                        # Any page failing → retry the WHOLE email next poll (the dedup_key skips
+                        # attachments already ingested), never mark it seen with a partial set.
+                        return None
+                    body = resp.json()
+                    for att in body.get("value", []):
+                        if att.get("@odata.type") != "#microsoft.graph.fileAttachment":
+                            continue
+                        cb = att.get("contentBytes", "")
+                        if not cb:
+                            # Large attachments (>~3 MB) come back from the list endpoint WITHOUT
+                            # inline contentBytes. Fetch the raw bytes via /$value so they're
+                            # processed, not silently dropped (which would also mark the email seen
+                            # with the big doc lost forever).
+                            att_id = att.get("id", "")
+                            if not att_id:
+                                logger.warning(
+                                    f"Email monitor {task_id}: attachment with no bytes and no id on "
+                                    f"{message_id[:20]}...; skipping"
+                                )
+                                continue
+                            val_url = (
+                                f"https://graph.microsoft.com/v1.0/me/messages/{safe_id}"
+                                f"/attachments/{quote(att_id, safe='')}/$value"
+                            )
+                            try:
+                                vresp = await client.get(
+                                    val_url, headers={"Authorization": f"Bearer {access_token}"}, timeout=60
+                                )
+                            except Exception as ve:
+                                logger.warning(f"Email monitor {task_id}: $value fetch error for {att.get('name')}: {ve}")
+                                return None  # transient → retry whole email
+                            if vresp.status_code != 200:
+                                logger.warning(
+                                    f"Email monitor {task_id}: $value HTTP {vresp.status_code} for "
+                                    f"'{att.get('name')}' on {message_id[:20]}..."
+                                )
+                                return None  # a real attachment we could not fetch → retry, never partial-seen
+                            cb = base64.b64encode(vresp.content).decode("ascii")
+                        out.append({
+                            "attachment_id": att.get("id", ""),
+                            "name": att.get("name", "attachment"),
+                            "content_bytes_b64": cb,
+                            "content_type": att.get("contentType", "application/octet-stream"),
+                            "size": att.get("size", 0),
+                        })
+                    url = body.get("@odata.nextLink")
+                    pages += 1
+            if url:
+                # Loop stopped at the page cap with more pages remaining → INCOMPLETE fetch (almost
+                # always a pathological/looping nextLink). Return None, NOT the partial list: the
+                # caller would otherwise mark the email seen and permanently drop the unfetched
+                # attachments. None → retry next poll; the dedup_key skips ones already ingested.
+                logger.warning(
+                    f"Email monitor {task_id}: attachments exceeded {_MAX_ATTACHMENT_PAGES} pages for "
+                    f"{message_id[:20]}... — treating as incomplete; will retry"
+                )
+                return None
             return out
         except Exception as e:
             logger.warning(f"Email monitor {task_id}: raw attachments error for {message_id[:20]}...: {e}")
@@ -1866,12 +2047,12 @@ class TriggerService(Service):
 
         import hashlib
         from uuid import UUID as _UUID, uuid4 as _uuid4
-        from sqlalchemy import or_, select as _select
+        from sqlalchemy import delete as _sql_delete, or_, select as _select
 
         from agentcore.services.deps import get_db_service, get_storage_service
         from agentcore.services.database.models.agent.model import Agent
         from agentcore.services.database.models.idp.config import IdpAgent
-        from agentcore.services.database.models.idp.documents import IdpDocument
+        from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
         from agentcore.services.idp.pipeline import enqueue_document
         from agentcore.api.idp.documents import ALLOWED_EXTENSIONS
 
@@ -1942,12 +2123,21 @@ class TriggerService(Service):
                     all_ok = False
                     continue
 
-                # Idempotency across restarts/crashes: skip if this (message, attachment) already exists.
-                dedup_key = f"{message_id}:{att.get('attachment_id') or name}"
+                # Idempotency across restarts/crashes: skip if this (message, attachment) already
+                # exists. When Graph gives no attachment id, fall back to a CONTENT hash — stable
+                # across polls and order-independent (a positional index breaks if Graph reorders
+                # id-less attachments between retries): same-named attachments with different content
+                # get distinct keys, byte-identical ones correctly dedupe to one.
+                dedup_key = f"{message_id}:{att.get('attachment_id') or hashlib.sha256(data).hexdigest()}"
+                # Scope the existence check to THIS agent so two agents monitoring the same mailbox
+                # each ingest their own copy (a global lookup let the 2nd agent skip the doc). Keeping
+                # the key format unchanged means existing docs are still recognised (no re-ingest), and
+                # a same-agent re-poll still dedupes on (agent_id, key).
                 exists = (
                     await session.execute(
                         _select(IdpDocument.id)
                         .where(IdpDocument.source_metadata["dedup_key"].astext == dedup_key)
+                        .where(IdpDocument.agent_id == idp_agent.id)
                         .limit(1)
                     )
                 ).first()
@@ -1995,13 +2185,33 @@ class TriggerService(Service):
                     all_ok = False
                     continue
 
-                # Document committed; enqueue is best-effort — the row exists either way and the
-                # dedup_key prevents a duplicate if the email is retried.
+                # Enqueue the pipeline. If this fails, the committed doc would sit with no runnable job
+                # AND the dedup_key would make a retry SKIP it (so it is processed NEVER). Roll the
+                # ingest back — delete the doc's job rows, the doc, and its storage file — and mark the
+                # email unseen (all_ok=False) so the NEXT poll re-creates AND re-enqueues it cleanly.
                 try:
                     await enqueue_document(session, doc.id)
                     logger.info(f"[email-ingest] queued IdpDocument {doc.id} ('{name}') from email {message_id[:20]}")
                 except Exception as e:
-                    logger.warning(f"[email-ingest] enqueue failed for {doc.id}: {e}")
+                    logger.warning(f"[email-ingest] enqueue failed for {doc.id}: {e}; rolling back so the email retries")
+                    try:
+                        await session.execute(_sql_delete(IdpProcessingJob).where(IdpProcessingJob.document_id == doc.id))
+                        await session.delete(doc)
+                        await session.commit()
+                        # Doc row is gone → now safe to delete its file too (the retry re-creates both).
+                        # ONLY after a successful commit: if the cleanup rolled back the doc survives, and
+                        # deleting its file would strand it (dedup skips the row, but the file is gone).
+                        if saved:
+                            try:
+                                await storage.delete_file(agent_id=agent_scope, file_name=storage_filename)
+                            except Exception:
+                                logger.warning(f"[email-ingest] could not clean up file {storage_filename} after enqueue failure")
+                    except Exception:
+                        try:
+                            await session.rollback()
+                        except Exception:
+                            pass
+                    all_ok = False
             return all_ok
 
     async def _ingest_sharepoint_files_to_idp(self, base_agent_id, config: dict, files: list[dict]) -> None:

@@ -117,7 +117,7 @@ async def get_user_traces(
         if session_id:
             traces = [t for t in traces if t.session_id == session_id]
 
-        items = traces_to_list_items(traces)
+        items = traces_to_list_items(traces, clients=scoped_clients)
         total = len(items)
         start_idx = (page - 1) * limit
         paginated = items[start_idx:start_idx + limit]

@@ -254,6 +254,8 @@ def build_doc_meta_query(is_root: bool, org_ids: list, filters: dict[str, Any], 
         IdpDocument.processing_completed_at.label("processed_at"),
         name_agent.name.label("agent_name"),
         name_agent.id.label("agent_base_id"),
+        IdpDocument.source.label("source"),
+        IdpDocument.source_metadata.label("source_metadata"),
     ).select_from(IdpDocument)
     stmt = _apply_doc_scope_and_filters(stmt, is_root, org_ids, filters, config_id=config_id)
     stmt = stmt.join(name_agent, IdpAgent.agent_id == name_agent.id)
