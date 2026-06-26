@@ -146,7 +146,7 @@ class MatchingService:
 
         # ── Vendor name ──
         inv_vendor = headers.get("supplier_name", "")
-        sap_vendor = po_data.get("Supplier", "") or po_data.get("SupplierName", "")
+        sap_vendor = po_data.get("SupplierName", "") or po_data.get("Supplier", "")
         if inv_vendor or sap_vendor:
             ratio = SequenceMatcher(None, inv_vendor.lower(), sap_vendor.lower()).ratio()
             if ratio >= self._config.vendor_name_fuzzy_threshold:

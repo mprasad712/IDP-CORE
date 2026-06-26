@@ -18,6 +18,12 @@ COPY base/agentcore ./base/agentcore
 RUN uv sync --frozen
 RUN uv pip install --python .venv/bin/python sqlparse cryptography faker
 
+# Export PP-LCNet orientation model to ONNX (baked into image; no runtime download needed)
+# Requires paddle2onnx — install it temporarily here then clean up
+RUN .venv/bin/pip install --quiet paddle2onnx && \
+    .venv/bin/python scripts/export_orientation_model.py && \
+    .venv/bin/pip uninstall -y paddle2onnx || true
+
 FROM python:3.12-slim AS runtime
 
 RUN apt-get update && \

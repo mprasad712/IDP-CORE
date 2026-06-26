@@ -401,7 +401,9 @@ class TriggerService(Service):
 
         cc_rows = (
             await session.execute(
-                _select_cc(ConnectorCatalogue).where(ConnectorCatalogue.provider == "outlook")
+                _select_cc(ConnectorCatalogue).where(
+                    ConnectorCatalogue.provider.in_(["outlook", "gmail"])
+                )
             )
         ).scalars().all()
         cc_by_id = {str(r.id): r for r in cc_rows}
@@ -420,7 +422,7 @@ class TriggerService(Service):
             mine = [c for c in cands if created_by is not None and c.created_by == created_by]
             chosen = (mine or sorted(cands, key=lambda c: str(c.id)))[0]
             logger.warning(
-                f"sync_email_monitors: connector name '{nm}' matches {len(cands)} Outlook "
+                f"sync_email_monitors: connector name '{nm}' matches {len(cands)} email "
                 f"connectors across scopes; using {chosen.id}"
             )
             return chosen
@@ -429,7 +431,7 @@ class TriggerService(Service):
             def tv(k, default=""):
                 return (template.get(k) or {}).get("value", default)
 
-            # Resolve to a REAL Outlook connector row. Accept a legacy pipe string
+            # Resolve to a REAL Outlook or Gmail connector row. Accept a legacy pipe string
             # "name | provider | emails | uuid" in ``connector`` (trusted only if the id still
             # exists), or the plain connector NAME the canvas saves in ``connector_name``.
             row = None
@@ -441,8 +443,8 @@ class TriggerService(Service):
             if row is None:
                 name_or_id = (tv("connector_name", "") or pipe_raw or "").strip()
                 row = cc_by_id.get(name_or_id) or _resolve_by_name(name_or_id)
-            if row is None or (row.provider or "").lower() != "outlook":
-                return None  # only existing Outlook connectors poll
+            if row is None or (row.provider or "").lower() not in ("outlook", "gmail"):
+                return None  # only Outlook and Gmail connectors poll
             connector_id = str(row.id)
 
             def _int(v, d):
@@ -453,6 +455,7 @@ class TriggerService(Service):
 
             return {
                 "connector_id": connector_id,
+                "provider": row.provider,
                 "account_email": tv("account_email", "") or "",
                 "mail_folder": tv("folder", "inbox") or "inbox",
                 "max_results": _int(tv("max_emails", 10), 10),
@@ -1523,6 +1526,19 @@ class TriggerService(Service):
                 connector_cfg = await _get_storage_connector_config(str(connector_id))
                 if not connector_cfg:
                     logger.warning(f"Email monitor {task_id}: connector {connector_id} not found")
+                    continue
+
+                # Dispatch Gmail connectors to a separate polling path
+                if (connector_cfg.get("provider") or "outlook").lower() == "gmail":
+                    await self._run_gmail_email_poll(
+                        task_id=task_id,
+                        trigger_config_id=trigger_config_id,
+                        agent_id=agent_id,
+                        config=config,
+                        connector_cfg=connector_cfg,
+                        environment=environment,
+                        version=version,
+                    )
                     continue
 
                 # 2. Get linked account + refresh token
@@ -2639,6 +2655,274 @@ class TriggerService(Service):
                     await session.commit()
         except Exception as e:
             logger.warning(f"Failed to persist refreshed Outlook tokens: {e}")
+
+    # ── Gmail Support ─────────────────────────────────────────────────────
+
+    async def _refresh_gmail_token(self, config: dict, acct: dict, connector_id: str, force: bool = False) -> str:
+        """Refresh a Gmail OAuth2 token if expired, returning a valid access token."""
+        access_token = acct.get("access_token", "")
+        expires_at = acct.get("token_expires_at", 0)
+        if not force and access_token and time.time() < (expires_at - 60):
+            return access_token
+
+        refresh_token = acct.get("refresh_token", "")
+        if not refresh_token:
+            raise ValueError("Gmail token expired, no refresh token. Re-link the account.")
+
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": config.get("client_id"),
+                    "client_secret": config.get("client_secret"),
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+                timeout=15,
+            )
+        if resp.status_code != 200:
+            raise ValueError(f"Gmail token refresh failed ({resp.status_code}): {resp.text[:200]}")
+
+        data = resp.json()
+        acct["access_token"] = data["access_token"]
+        # Google does not rotate refresh tokens; keep the existing one.
+        acct["token_expires_at"] = time.time() + data.get("expires_in", 3600)
+        await self._persist_outlook_tokens(config, connector_id)
+        return data["access_token"]
+
+    async def _fetch_gmail_attachments_raw(
+        self, msg_id: str, full_msg: dict, access_token: str, task_id: str
+    ) -> list[dict] | None:
+        """Fetch raw attachment bytes for a Gmail message via the attachments API.
+
+        Returns a list of attachment dicts compatible with ``_ingest_email_to_idp``,
+        or ``None`` on a transient fetch error (caller should retry next poll).
+        An empty list means the message has no file attachments.
+        """
+        import httpx
+
+        GMAIL = "https://gmail.googleapis.com/gmail/v1"
+
+        def _find_att_parts(payload: dict) -> list[dict]:
+            out = []
+            if (payload.get("body") or {}).get("attachmentId"):
+                out.append(payload)
+            for part in payload.get("parts", []):
+                out.extend(_find_att_parts(part))
+            return out
+
+        att_parts = _find_att_parts(full_msg.get("payload", {}))
+        if not att_parts:
+            return []
+
+        out: list[dict] = []
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                for part in att_parts:
+                    att_id = part["body"]["attachmentId"]
+                    filename = part.get("filename") or "attachment"
+                    mime = part.get("mimeType", "application/octet-stream")
+                    size = (part.get("body") or {}).get("size", 0)
+
+                    resp = await client.get(
+                        f"{GMAIL}/users/me/messages/{msg_id}/attachments/{att_id}",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                    )
+                    if resp.status_code != 200:
+                        logger.warning(
+                            f"Gmail monitor {task_id}: attachment fetch HTTP {resp.status_code} "
+                            f"for message {msg_id[:20]}"
+                        )
+                        return None  # transient error → caller retries
+
+                    data_b64url = resp.json().get("data", "")
+                    if not data_b64url:
+                        continue
+                    # Convert base64url to standard base64
+                    data_b64 = data_b64url.replace("-", "+").replace("_", "/")
+                    data_b64 += "=" * (-len(data_b64) % 4)
+
+                    out.append({
+                        "attachment_id": att_id,
+                        "name": filename,
+                        "content_bytes_b64": data_b64,
+                        "content_type": mime,
+                        "size": size,
+                    })
+        except Exception as e:
+            logger.warning(
+                f"Gmail monitor {task_id}: error fetching attachments for {msg_id[:20]}: {e}"
+            )
+            return None
+
+        return out
+
+    def _normalize_gmail_message(self, full_msg: dict) -> dict:
+        """Normalize a Gmail API full-format message to the Graph-API-like dict
+        expected by ``_ingest_email_to_idp``."""
+        headers_list = (full_msg.get("payload") or {}).get("headers", [])
+        headers = {h["name"].lower(): h["value"] for h in headers_list}
+
+        def _parse_addr(raw: str) -> tuple[str, str]:
+            raw = (raw or "").strip()
+            if "<" in raw and ">" in raw:
+                name = raw[: raw.index("<")].strip()
+                email = raw[raw.index("<") + 1 : raw.index(">")].strip()
+                return name, email
+            return "", raw
+
+        from_name, from_email = _parse_addr(headers.get("from", ""))
+        to_raw = headers.get("to", "")
+        to_addrs = [_parse_addr(a.strip())[1] for a in to_raw.split(",") if a.strip()]
+
+        return {
+            "id": full_msg.get("id", ""),
+            "subject": headers.get("subject", ""),
+            "from": {"emailAddress": {"name": from_name, "address": from_email}},
+            "receivedDateTime": headers.get("date", ""),
+            "toRecipients": [{"emailAddress": {"address": a}} for a in to_addrs],
+            "ccRecipients": [],
+        }
+
+    async def _run_gmail_email_poll(
+        self,
+        task_id: str,
+        trigger_config_id,
+        agent_id,
+        config: dict,
+        connector_cfg: dict,
+        environment: str,
+        version: str | None,
+    ) -> None:
+        """Poll a Gmail mailbox once and ingest new attachment emails into the IDP pipeline."""
+        import httpx
+
+        GMAIL = "https://gmail.googleapis.com/gmail/v1"
+        _LABEL_MAP = {
+            "inbox": "INBOX",
+            "sent": "SENT",
+            "sentitems": "SENT",
+            "drafts": "DRAFT",
+            "trash": "TRASH",
+            "spam": "SPAM",
+        }
+
+        accounts = connector_cfg.get("linked_accounts", [])
+        if not accounts:
+            logger.warning(f"Gmail monitor {task_id}: no linked account")
+            return
+
+        account_email = config.get("account_email", "")
+        acct = None
+        if account_email:
+            for a in accounts:
+                if a.get("email", "").lower() == account_email.lower():
+                    acct = a
+                    break
+        if not acct:
+            acct = accounts[0]
+
+        connector_id = config.get("connector_id", "")
+        try:
+            access_token = await self._refresh_gmail_token(connector_cfg, acct, connector_id)
+        except Exception as e:
+            logger.error(f"Gmail monitor {task_id}: token refresh failed: {e}")
+            return
+
+        # Build Gmail search query
+        folder = (config.get("mail_folder") or "inbox").lower()
+        label = _LABEL_MAP.get(folder, "INBOX")
+        q_parts = [f"label:{label}", "has:attachment"]
+        if config.get("filter_sender"):
+            q_parts.append(f"from:{config['filter_sender']}")
+        if config.get("filter_subject"):
+            q_parts.append(f"subject:{config['filter_subject']}")
+        if config.get("unread_only"):
+            q_parts.append("is:unread")
+        q = " ".join(q_parts)
+
+        max_results = config.get("max_results", 10)
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            list_resp = await client.get(
+                f"{GMAIL}/users/me/messages",
+                headers={"Authorization": f"Bearer {access_token}"},
+                params={"q": q, "maxResults": str(max_results)},
+            )
+
+        if list_resp.status_code == 401:
+            try:
+                access_token = await self._refresh_gmail_token(connector_cfg, acct, connector_id, force=True)
+            except Exception as e:
+                logger.error(f"Gmail monitor {task_id}: force token refresh failed: {e}")
+                return
+            async with httpx.AsyncClient(timeout=20) as client:
+                list_resp = await client.get(
+                    f"{GMAIL}/users/me/messages",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    params={"q": q, "maxResults": str(max_results)},
+                )
+
+        if list_resp.status_code != 200:
+            logger.warning(f"Gmail monitor {task_id}: list messages HTTP {list_resp.status_code}")
+            return
+
+        msg_stubs = list_resp.json().get("messages", [])
+        if not msg_stubs:
+            return
+
+        seen = self._seen_files.get(task_id, OrderedDict())
+        new_ids = [m["id"] for m in msg_stubs if m.get("id") and m["id"] not in seen]
+        if not new_ids:
+            return
+
+        logger.info(f"Gmail monitor {task_id}: found {len(new_ids)} new message(s)")
+
+        ingest_mode = config.get("ingest_mode", "")
+        processed_ids: list[str] = []
+
+        for msg_id in new_ids:
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    msg_resp = await client.get(
+                        f"{GMAIL}/users/me/messages/{msg_id}",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        params={"format": "full"},
+                    )
+                if msg_resp.status_code != 200:
+                    logger.warning(
+                        f"Gmail monitor {task_id}: fetch message {msg_id[:20]} "
+                        f"HTTP {msg_resp.status_code}"
+                    )
+                    continue
+
+                full_msg = msg_resp.json()
+                raw_atts = await self._fetch_gmail_attachments_raw(msg_id, full_msg, access_token, task_id)
+                if raw_atts is None:
+                    logger.warning(
+                        f"Gmail monitor {task_id}: attachment fetch failed for "
+                        f"{msg_id[:20]}; will retry next poll"
+                    )
+                    continue
+
+                if ingest_mode == "idp_pipeline":
+                    normalized = self._normalize_gmail_message(full_msg)
+                    ok = await self._ingest_email_to_idp(agent_id, connector_id, normalized, raw_atts)
+                    if ok:
+                        processed_ids.append(msg_id)
+            except Exception:
+                logger.exception(f"Gmail monitor {task_id}: error processing message {msg_id[:20]}")
+
+        for _mid in processed_ids:
+            seen[_mid] = None
+        _MAX_SEEN = 10_000
+        if len(seen) > _MAX_SEEN:
+            for _ in range(len(seen) - _MAX_SEEN):
+                seen.popitem(last=False)
+        self._seen_files[task_id] = seen
+        await self._persist_seen_files(trigger_config_id)
 
     # ── Common Execution ───────────────────────────────────────────────────
 

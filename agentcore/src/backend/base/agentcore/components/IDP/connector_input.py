@@ -22,11 +22,24 @@ from agentcore.io import BoolInput, DropdownInput, IntInput, MessageTextInput, O
 from agentcore.schema.message import Message
 from agentcore.logging import logger
 
-_EMAIL_PROVIDERS = {"outlook"}
+_EMAIL_PROVIDERS = {"outlook", "gmail"}
 _SHAREPOINT_PROVIDERS = {"sharepoint"}
 _ONEDRIVE_PROVIDERS = {"onedrive"}
 _IDP_PROVIDERS = _EMAIL_PROVIDERS | _SHAREPOINT_PROVIDERS | _ONEDRIVE_PROVIDERS
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1"
+
+# Map Outlook-style folder names to Gmail label IDs
+_GMAIL_LABEL_MAP = {
+    "inbox": "INBOX",
+    "sentitems": "SENT",
+    "sent": "SENT",
+    "drafts": "DRAFT",
+    "trash": "TRASH",
+    "spam": "SPAM",
+    "junk": "SPAM",
+    "archive": "INBOX",  # Gmail has no archive label; fall back to INBOX
+}
 
 # Email-only inputs — hidden until the selected connector's provider is an email provider.
 _EMAIL_FIELDS = [
@@ -319,8 +332,8 @@ class IDPConnectorInput(Node):
                 if not options:
                     build_config["connector"]["info"] = (
                         "No connected connectors found. Go to Connectors → Add Connector → "
-                        "Microsoft Outlook (link a mailbox via OAuth) or SharePoint (set site/library), "
-                        "connect it, then refresh this field."
+                        "Microsoft Outlook or Google Gmail (link a mailbox via OAuth), "
+                        "or SharePoint / OneDrive (set site/library), connect it, then refresh this field."
                     )
                 current = build_config["connector"].get("value", "")
                 if options and current not in options and not current:
@@ -678,14 +691,188 @@ class IDPConnectorInput(Node):
         )
 
     # ------------------------------------------------------------------
+    # Gmail single pull (manual / playground preview)
+    # ------------------------------------------------------------------
+
+    def _gmail_token(self, config: dict, acct: dict) -> str:
+        """Return a valid Gmail access token, refreshing via Google when expired."""
+        import time as _time
+        import httpx
+
+        access_token = acct.get("access_token", "")
+        expires_at = acct.get("token_expires_at", 0)
+        if access_token and _time.time() < (expires_at - 60):
+            return access_token
+
+        refresh_token = acct.get("refresh_token", "")
+        if not refresh_token:
+            raise ValueError("Gmail token expired and no refresh token. Re-link the account.")
+        resp = httpx.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": config.get("client_id", ""),
+                "client_secret": config.get("client_secret", ""),
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            raise ValueError(f"Gmail token refresh failed ({resp.status_code}): {resp.text[:200]}")
+        return resp.json()["access_token"]
+
+    def _get_gmail_document(self) -> Message:
+        """Fetch the first attachment from a matching Gmail message."""
+        import base64 as _b64
+        import httpx
+        from agentcore.components.tools.outlook_mail import _get_outlook_config
+
+        connector_id = _parse_connector_id(self.connector)
+        if not connector_id:
+            self.status = "Error: no connector selected"
+            return Message(text="No Gmail connector selected.")
+
+        config = _get_outlook_config(connector_id)
+        if config is None:
+            self.status = "Error: connector not found"
+            return Message(text=f"Gmail connector not found (id={connector_id}).")
+
+        accounts = config.get("linked_accounts", [])
+        if not accounts:
+            self.status = "Error: no linked account"
+            return Message(text="No linked Gmail account. Link one via OAuth on the Connectors page.")
+
+        email_filter = (self.account_email or "").strip().lower()
+        acct = next(
+            (a for a in accounts if a.get("email", "").lower() == email_filter),
+            accounts[0],
+        ) if email_filter else accounts[0]
+
+        try:
+            access_token = self._gmail_token(config, acct)
+        except Exception as e:
+            self.status = f"Error: {e}"
+            return Message(text=str(e))
+
+        # Map folder name → Gmail label
+        folder_raw = (self.folder or "inbox").strip().lower()
+        label_id = _GMAIL_LABEL_MAP.get(folder_raw, folder_raw.upper())
+
+        # Build Gmail search query from filters
+        q_parts: list[str] = []
+        if (self.filter_sender or "").strip():
+            q_parts.append(f"from:{self.filter_sender.strip()}")
+        if (self.filter_subject or "").strip():
+            q_parts.append(f"subject:{self.filter_subject.strip()}")
+        if (self.filter_body or "").strip():
+            q_parts.append(self.filter_body.strip())
+        if getattr(self, "filter_has_attachments", True):
+            q_parts.append("has:attachment")
+        if getattr(self, "unread_only", False):
+            q_parts.append("is:unread")
+
+        max_emails = max(1, int(self.max_emails or 10))
+        list_params: dict = {"labelIds": label_id, "maxResults": max_emails}
+        if q_parts:
+            list_params["q"] = " ".join(q_parts)
+
+        headers = {"Authorization": f"Bearer {access_token}"}
+        try:
+            list_resp = httpx.get(f"{GMAIL_BASE}/users/me/messages", headers=headers, params=list_params, timeout=20)
+        except Exception as e:
+            self.status = f"Network error: {e}"
+            return Message(text=f"Network error fetching Gmail messages: {e}")
+
+        if list_resp.status_code != 200:
+            self.status = f"Gmail API error {list_resp.status_code}"
+            return Message(text=f"Gmail API error {list_resp.status_code}: {list_resp.text[:200]}")
+
+        message_ids = [m["id"] for m in list_resp.json().get("messages", [])]
+        if not message_ids:
+            self.status = "No emails matching the filters found"
+            return Message(text="No Gmail messages matching the filters were found.")
+
+        for msg_id in message_ids:
+            try:
+                msg_resp = httpx.get(
+                    f"{GMAIL_BASE}/users/me/messages/{msg_id}",
+                    headers=headers,
+                    params={"format": "full"},
+                    timeout=20,
+                )
+            except Exception:
+                continue
+            if msg_resp.status_code != 200:
+                continue
+
+            msg = msg_resp.json()
+            payload = msg.get("payload", {})
+            hdrs = payload.get("headers", [])
+            subject = next((h["value"] for h in hdrs if h.get("name", "").lower() == "subject"), "(no subject)")
+            from_addr = next((h["value"] for h in hdrs if h.get("name", "").lower() == "from"), "")
+
+            # Find attachment parts (filename set + attachmentId present)
+            def _find_attachments(p: dict) -> list[dict]:
+                results = []
+                if p.get("filename") and p.get("body", {}).get("attachmentId"):
+                    results.append(p)
+                for part in p.get("parts", []):
+                    results.extend(_find_attachments(part))
+                return results
+
+            att_parts = _find_attachments(payload)
+            for att_part in att_parts:
+                att_id = att_part["body"]["attachmentId"]
+                filename = att_part.get("filename", "attachment")
+                try:
+                    att_resp = httpx.get(
+                        f"{GMAIL_BASE}/users/me/messages/{msg_id}/attachments/{att_id}",
+                        headers=headers,
+                        timeout=30,
+                    )
+                except Exception:
+                    continue
+                if att_resp.status_code != 200:
+                    continue
+
+                data_b64 = att_resp.json().get("data", "")
+                if not data_b64:
+                    continue
+
+                # Gmail uses base64url; pad and decode
+                padded = data_b64 + "=" * (4 - len(data_b64) % 4)
+                content_bytes = _b64.urlsafe_b64decode(padded)
+
+                suffix = os.path.splitext(filename)[1] or ".bin"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="idp_gmail_") as f:
+                    f.write(content_bytes)
+                    tmp_path = f.name
+
+                self.status = f"Fetched attachment '{filename}' from '{subject}' ({from_addr})"
+                logger.info(f"[ConnectorInput] Downloaded Gmail attachment {filename} → {tmp_path}")
+                return Message(
+                    text=tmp_path,
+                    data={
+                        "file_path": tmp_path,
+                        "filename": filename,
+                        "source": "gmail_connector",
+                        "subject": subject,
+                        "from": from_addr,
+                        "message_id": msg_id,
+                    },
+                )
+
+        self.status = "No downloadable attachments found"
+        return Message(text="No downloadable file attachments found in matching Gmail messages.")
+
+    # ------------------------------------------------------------------
     # Main output method (manual / playground single pull)
     # ------------------------------------------------------------------
 
     def get_document(self) -> Message:
         """Fetch a document for preview (manual pull).
 
-        Routes to SharePoint folder reading when a SharePoint connector is selected, otherwise
-        pulls the most recent matching email's first attachment from an Outlook connector.
+        Routes to SharePoint, OneDrive, Gmail, or Outlook based on the selected connector provider.
         """
         import httpx
 
@@ -694,6 +881,8 @@ class IDPConnectorInput(Node):
             return self._get_sharepoint_document()
         if provider in _ONEDRIVE_PROVIDERS:
             return self._get_onedrive_document()
+        if provider == "gmail":
+            return self._get_gmail_document()
 
         try:
             config = self._get_config()

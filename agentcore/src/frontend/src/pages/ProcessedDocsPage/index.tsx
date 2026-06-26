@@ -112,7 +112,7 @@ function listDocToPage(d: ApiProcessedDoc): ProcessedDoc {
     id: d.id,
     name: d.original_filename,
     sourceAgent: d.agent_name ?? d.agent_id.slice(0, 8),
-    dateProcessed: (d.processing_completed_at ?? d.created_at ?? "").slice(0, 10),
+    dateProcessed: (d.processing_completed_at ?? d.created_at ?? "").slice(0, 19).replace("T", " "),
     documentType: d.predicted_type ?? d.file_type ?? "—",
     fileType: (d.file_type ?? "").toLowerCase().replace(/^\./, ""),
     overallConfidence: Math.round((d.overall_confidence ?? 0) * 100),

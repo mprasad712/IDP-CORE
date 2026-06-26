@@ -5,6 +5,7 @@ export * from "./use-post-processed-doc-review";
 export * from "./use-post-processed-doc-approve";
 export * from "./use-upload-and-process";
 export * from "./use-get-document-log";
+export * from "./use-get-document-logs";
 export * from "./use-get-report";
 export * from "./use-get-match-results";
 export * from "./use-trigger-match";
