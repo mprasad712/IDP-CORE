@@ -509,7 +509,10 @@ async def test_process_endpoint(monkeypatch):
 
     def mock_user():
         from types import SimpleNamespace
-        return SimpleNamespace(id=uuid4(), role="super_admin")
+        # role="root" → full access (canonical bypass). This test covers the happy path
+        # (authorized user → 202, then 409 on double-process), not org-scoping; cross-org
+        # denial is covered by the _can_access_document unit tests in test_idp_documents.py.
+        return SimpleNamespace(id=uuid4(), role="root")
 
     async with session_scope() as session:
         agent_id, doc_id = await _setup_document(session, graph=_graph(str(uuid4())), file_bytes=b"%PDF-1.4 test")
@@ -1526,3 +1529,22 @@ async def test_named_config_inferred_when_config_name_set_without_mode():
             if row:
                 await session.delete(row)
             await session.commit()
+
+
+# --- H4: canvas numeric-string rules must infer field_value_numeric ---------------
+import pytest as _pytest_h4
+from agentcore.services.idp import pipeline as _pl_h4
+
+
+@_pytest_h4.mark.parametrize("op,val,expected", [
+    (">=", "1000", "field_value_numeric"),     # JSON string threshold → numeric
+    ("<", "1000.50", "field_value_numeric"),
+    (">", "-5", "field_value_numeric"),
+    ("==", "$1,200.00", "field_value_numeric"), # currency string → numeric
+    ("<=", 1000, "field_value_numeric"),        # real number still numeric
+    ("==", "INV-001", "field_value_text"),      # identifier stays text
+    ("contains", "1000", "field_value_text"),   # text-only operator stays text
+    ("starts_with", "99", "field_value_text"),
+])
+def test_h4_infer_field_cond_type(op, val, expected):
+    assert _pl_h4._infer_field_cond_type(op, val) == expected

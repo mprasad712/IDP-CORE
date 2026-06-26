@@ -126,17 +126,31 @@ def _latest_review_subq():
     return select(inner).where(inner.c.rn == 1).subquery()
 
 
-# NOTE: header/line counts and the field-export queries read by ``document_id`` (all jobs),
-# matching what the Processed Docs detail view (``get_processed_doc``) shows. A reprocessed
-# document can thus count rows from more than one job — this is pre-existing, shared with the
-# detail view, and kept consistent on purpose; the root-cause fix (cleaning old jobs' rows on
-# reprocess) is a deferred pipeline-level change.
+def _latest_job_ids_subq():
+    """Scalar subquery → the latest job id for every document (created_at desc, id desc tiebreak).
+
+    M1: filtering extracted headers/line-items by ``job_id IN (this)`` makes counts, exports and the
+    detail view read ONLY the most recent job's rows, so a reprocessed document no longer
+    double-counts. For a document with a single job this is a no-op (the one job IS the latest).
+    """
+    rn = func.row_number().over(
+        partition_by=IdpProcessingJob.document_id,
+        order_by=(IdpProcessingJob.created_at.desc(), IdpProcessingJob.id.desc()),
+    ).label("rn")
+    inner = select(IdpProcessingJob.id.label("job_id"), rn).subquery()
+    return select(inner.c.job_id).where(inner.c.rn == 1)
+
+
+# M1: header/line counts and the field-export queries read ONLY the latest job's rows (via the
+# job_id filter below), kept consistent with the Processed Docs detail view (``get_processed_doc``),
+# which applies the same latest-job filter. A reprocessed document therefore no longer double-counts.
 def _header_count_subq():
     return (
         select(
             IdpExtractedHeader.document_id.label("document_id"),
             func.count(IdpExtractedHeader.id).label("header_count"),
         )
+        .where(IdpExtractedHeader.job_id.in_(_latest_job_ids_subq()))
         .group_by(IdpExtractedHeader.document_id)
         .subquery()
     )
@@ -149,6 +163,7 @@ def _line_count_subq():
             IdpExtractedLineItem.document_id.label("document_id"),
             func.count(func.distinct(IdpExtractedLineItem.row_index)).label("line_item_count"),
         )
+        .where(IdpExtractedLineItem.job_id.in_(_latest_job_ids_subq()))
         .group_by(IdpExtractedLineItem.document_id)
         .subquery()
     )
@@ -199,7 +214,9 @@ def build_header_export_query(is_root: bool, org_ids: list, filters: dict[str, A
         IdpExtractedHeader.reviewed_value.label("reviewed_value"),
         IdpExtractedHeader.is_reviewed.label("is_reviewed"),
         IdpExtractedHeader.confidence_score.label("confidence_score"),
-    ).select_from(IdpExtractedHeader).join(IdpDocument, IdpExtractedHeader.document_id == IdpDocument.id)
+    ).select_from(IdpExtractedHeader).join(
+        IdpDocument, IdpExtractedHeader.document_id == IdpDocument.id
+    ).where(IdpExtractedHeader.job_id.in_(_latest_job_ids_subq()))  # M1: latest job only
     stmt = _apply_doc_scope_and_filters(stmt, is_root, org_ids, filters, config_id=config_id)
     return stmt.order_by(IdpDocument.created_at.desc(), IdpDocument.id, IdpExtractedHeader.field_name.asc())
 
@@ -222,7 +239,7 @@ def build_line_export_query(is_root: bool, org_ids: list, filters: dict[str, Any
         IdpExtractedLineItem.confidence_score.label("confidence_score"),
     ).select_from(IdpExtractedLineItem).join(
         IdpDocument, IdpExtractedLineItem.document_id == IdpDocument.id
-    )
+    ).where(IdpExtractedLineItem.job_id.in_(_latest_job_ids_subq()))  # M1: latest job only
     stmt = _apply_doc_scope_and_filters(stmt, is_root, org_ids, filters, config_id=config_id)
     return stmt.order_by(
         IdpDocument.created_at.desc(),

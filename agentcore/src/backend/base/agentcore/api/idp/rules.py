@@ -6,8 +6,23 @@ from sqlmodel import select
 
 from agentcore.api.utils import CurrentActiveUser, DbSession
 from agentcore.services.database.models.idp.config import IdpAgentRule, IdpAgent
+from agentcore.services.database.models.agent.model import Agent
+from agentcore.services.idp.scope import resolve_org_scope
 
 router = APIRouter(tags=["IDP Rules"])
+
+
+async def _can_access_idp_agent(session, current_user, idp_agent_id: UUID) -> bool:
+    """H3: a non-root user may only touch rules on an IDP agent whose base Agent.org_id is in scope."""
+    is_root, org_ids = await resolve_org_scope(session, current_user)
+    if is_root:
+        return True
+    org_id = (await session.exec(
+        select(Agent.org_id)
+        .join(IdpAgent, IdpAgent.agent_id == Agent.id)
+        .where(IdpAgent.id == idp_agent_id, IdpAgent.deleted_at.is_(None))
+    )).first()
+    return bool(org_id and org_id in org_ids)
 
 # ──────────────────────────────────────────────────────────────────────
 # Schemas
@@ -102,6 +117,8 @@ async def create_agent_rule(
     agent = (await session.exec(select(IdpAgent).where(IdpAgent.id == idp_agent_id, IdpAgent.deleted_at.is_(None)))).first()
     if not agent:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="IDP Agent not found")
+    if not await _can_access_idp_agent(session, current_user, idp_agent_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="IDP Agent not found")
 
     validate_rule_data(payload.condition_type, payload.combinator, payload.action)
 
@@ -136,6 +153,8 @@ async def list_agent_rules(
     agent = (await session.exec(select(IdpAgent).where(IdpAgent.id == idp_agent_id, IdpAgent.deleted_at.is_(None)))).first()
     if not agent:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="IDP Agent not found")
+    if not await _can_access_idp_agent(session, current_user, idp_agent_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="IDP Agent not found")
 
     stmt = select(IdpAgentRule).where(IdpAgentRule.idp_agent_id == idp_agent_id).order_by(
         IdpAgentRule.rule_group.asc(),
@@ -156,6 +175,8 @@ async def get_rule(
     rule = await session.get(IdpAgentRule, rule_id)
     if not rule:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule condition not found")
+    if not await _can_access_idp_agent(session, current_user, rule.idp_agent_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule condition not found")
     return rule
 
 
@@ -170,6 +191,8 @@ async def update_rule(
     """Update properties of a specific rule condition."""
     rule = await session.get(IdpAgentRule, rule_id)
     if not rule:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule condition not found")
+    if not await _can_access_idp_agent(session, current_user, rule.idp_agent_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule condition not found")
 
     update_data = payload.model_dump(exclude_unset=True)
@@ -200,6 +223,8 @@ async def delete_rule(
     """Delete a specific rule condition."""
     rule = await session.get(IdpAgentRule, rule_id)
     if not rule:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule condition not found")
+    if not await _can_access_idp_agent(session, current_user, rule.idp_agent_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule condition not found")
 
     await session.delete(rule)

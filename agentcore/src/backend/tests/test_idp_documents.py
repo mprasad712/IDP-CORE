@@ -223,3 +223,68 @@ async def test_document_upload_flow(setup_test_data):
 
     # Clean overrides
     app.dependency_overrides.clear()
+
+
+# --- H1/H2: org-scope access helpers (upload + process/reprocess) --------------------
+from types import SimpleNamespace as _SNS_h12
+from uuid import uuid4 as _uuid_h12
+import pytest as _pytest_h12
+import agentcore.api.idp.documents as _docs_mod
+
+
+@_pytest_h12.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+class _Res_h12:
+    def __init__(self, val): self._val = val
+    def first(self): return self._val
+
+
+class _Sess_h12:
+    """Fake session whose .exec(...).first() returns a fixed org_id (the doc/agent's org)."""
+    def __init__(self, org_id): self._org_id = org_id
+    async def exec(self, *a, **k): return _Res_h12(self._org_id)
+
+
+@_pytest_h12.mark.anyio
+async def test_h2_can_access_document_root_bypass(monkeypatch):
+    async def _scope(s, u): return True, []
+    monkeypatch.setattr(_docs_mod, "resolve_org_scope", _scope)
+    doc = _SNS_h12(agent_id=_uuid_h12())
+    assert await _docs_mod._can_access_document(_Sess_h12(None), _SNS_h12(id=_uuid_h12()), doc) is True
+
+
+@_pytest_h12.mark.anyio
+async def test_h2_can_access_document_same_org_allowed(monkeypatch):
+    org = _uuid_h12()
+    async def _scope(s, u): return False, [org]
+    monkeypatch.setattr(_docs_mod, "resolve_org_scope", _scope)
+    doc = _SNS_h12(agent_id=_uuid_h12())
+    assert await _docs_mod._can_access_document(_Sess_h12(org), _SNS_h12(id=_uuid_h12()), doc) is True
+
+
+@_pytest_h12.mark.anyio
+async def test_h2_can_access_document_cross_org_denied(monkeypatch):
+    async def _scope(s, u): return False, [_uuid_h12()]
+    monkeypatch.setattr(_docs_mod, "resolve_org_scope", _scope)
+    doc = _SNS_h12(agent_id=_uuid_h12())
+    assert await _docs_mod._can_access_document(_Sess_h12(_uuid_h12()), _SNS_h12(id=_uuid_h12()), doc) is False
+
+
+@_pytest_h12.mark.anyio
+async def test_h1_can_access_idp_agent_cross_org_denied(monkeypatch):
+    async def _scope(s, u): return False, [_uuid_h12()]
+    monkeypatch.setattr(_docs_mod, "resolve_org_scope", _scope)
+    agent = _SNS_h12(agent_id=_uuid_h12())
+    assert await _docs_mod._can_access_idp_agent(_Sess_h12(_uuid_h12()), _SNS_h12(id=_uuid_h12()), agent) is False
+
+
+@_pytest_h12.mark.anyio
+async def test_h1_can_access_idp_agent_same_org_allowed(monkeypatch):
+    org = _uuid_h12()
+    async def _scope(s, u): return False, [org]
+    monkeypatch.setattr(_docs_mod, "resolve_org_scope", _scope)
+    agent = _SNS_h12(agent_id=_uuid_h12())
+    assert await _docs_mod._can_access_idp_agent(_Sess_h12(org), _SNS_h12(id=_uuid_h12()), agent) is True

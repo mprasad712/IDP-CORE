@@ -52,7 +52,7 @@ from agentcore.services.idp.pre_processing import (
     detect_and_correct_skew,
 )
 from agentcore.services.idp.restruct import build_merged_text
-from agentcore.services.idp.rules_engine import evaluate_rules
+from agentcore.services.idp.rules_engine import _to_number, evaluate_rules
 from agentcore.services.idp.idp_tracing import create_idp_trace, end_idp_trace, start_span, end_span
 
 
@@ -206,6 +206,29 @@ async def _save_artifact(storage, agent_id: str, rel_path: str, data: bytes) -> 
         logger.warning(f"[pipeline] could not store artifact {rel_path}: {e}")
 
 
+_NUMERIC_OPS = {">", "<", ">=", "<=", "==", "!="}
+
+
+def _infer_field_cond_type(mapped_op: str, val) -> str:
+    """Choose the condition type for a canvas FIELD rule.
+
+    Canvas thresholds arrive as JSON-decoded values where a number is frequently a *string*
+    (e.g. ``"1000"``). A rule like ``total >= 1000`` is numeric only when the operator is a
+    numeric comparator AND the threshold parses as a number (rules_engine._to_number tolerates
+    ints/floats/negatives/currency/thousands/percent). Otherwise it stays text — and operators
+    that only make sense on text (contains/starts_with/ends_with) always stay text. Without this,
+    a numeric-string threshold defaulted to ``field_value_text``, where ``>=`` is not a valid
+    operator, so the rule silently never matched.
+    """
+    if mapped_op in _NUMERIC_OPS:
+        try:
+            _to_number(val)
+            return "field_value_numeric"
+        except (ValueError, TypeError):
+            return "field_value_text"
+    return "field_value_text"
+
+
 async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, overall_conf: float, cfg, flow: "FlowLog", match_result: str | None = None) -> str:
     """Decide auto_approved vs pending_review.
 
@@ -242,8 +265,7 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
             elif field_name in ("signature", "checkbox", "qr", "barcode"):
                 cond_type = "visual_element"
             else:
-                if isinstance(val, (int, float)):
-                    cond_type = "field_value_numeric"
+                cond_type = _infer_field_cond_type(mapped_op, val)
             
             # Map rules_operator logic:
             # - If AND: all rules belong to group 1 (AND logic).

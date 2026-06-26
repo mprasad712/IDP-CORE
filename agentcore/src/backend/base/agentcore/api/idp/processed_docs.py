@@ -120,9 +120,11 @@ class HumanFieldsUpdateRequest(BaseModel):
     headers: list[FieldUpdateItem] | None = None
     line_items: list[FieldUpdateItem] | None = None
     draft: bool = False  # when True, mark the doc as a saved draft (edits persisted, not finalized)
+    expected_updated_at: datetime | None = None  # M4: optional optimistic-lock precondition
 
 class DocumentReviewRequest(BaseModel):
     notes: str | None = None
+    expected_updated_at: datetime | None = None  # M4: optional optimistic-lock precondition
 
 # ──────────────────────────────────────────────────────────────────────
 # Helpers
@@ -158,6 +160,30 @@ async def _can_access_document(session: DbSession, current_user: CurrentActiveUs
     if doc_org_id and doc_org_id in org_ids:
         return True
     return False
+
+
+def _check_doc_version(doc, expected) -> None:
+    """M4: optional optimistic lock. If the caller passes ``expected_updated_at`` and it no longer
+    matches the doc's current ``updated_at``, another writer changed it first → 409 (refresh & retry).
+    Callers that omit the field keep the legacy last-writer-wins behavior (backward compatible)."""
+    if expected is not None and doc.updated_at != expected:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document was modified by another user. Refresh and retry.",
+        )
+
+
+async def _latest_job_id(session, document_id):
+    """M1: the most recent job id for a document (created_at desc, id tiebreak), or None.
+
+    Detail/review read extracted rows filtered by this so a reprocessed document shows only the
+    latest job's rows (no double-up). Mirrors the reports.py ``_latest_job_ids_subq`` ordering."""
+    return (await session.exec(
+        select(IdpProcessingJob.id)
+        .where(IdpProcessingJob.document_id == document_id)
+        .order_by(IdpProcessingJob.created_at.desc(), IdpProcessingJob.id.desc())
+        .limit(1)
+    )).first()
 
 # ──────────────────────────────────────────────────────────────────────
 # Endpoints
@@ -251,25 +277,33 @@ async def get_processed_doc(
     if not await _can_access_document(session, current_user, doc):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    # Load headers and line items
-    stmt_headers = select(IdpExtractedHeader).where(IdpExtractedHeader.document_id == id)
-    headers = (await session.exec(stmt_headers)).all()
-
-    stmt_lines = select(IdpExtractedLineItem).where(IdpExtractedLineItem.document_id == id).order_by(
-        IdpExtractedLineItem.row_index.asc(),
-        IdpExtractedLineItem.column_name.asc()
-    )
-    line_items = (await session.exec(stmt_lines)).all()
-
-    # Load the most recent job's error message (for failed documents)
+    # Load the most recent job first (M1: its error message AND its id scope the extracted rows
+    # so a reprocessed document shows only the latest job's headers/line-items, not every job's).
     last_job = (
         await session.exec(
             select(IdpProcessingJob)
             .where(IdpProcessingJob.document_id == id)
-            .order_by(IdpProcessingJob.created_at.desc())
+            .order_by(IdpProcessingJob.created_at.desc(), IdpProcessingJob.id.desc())
             .limit(1)
         )
     ).first()
+    latest_job_id = last_job.id if last_job else None
+
+    # Load headers and line items for the latest job only
+    stmt_headers = select(IdpExtractedHeader).where(
+        IdpExtractedHeader.document_id == id,
+        IdpExtractedHeader.job_id == latest_job_id,
+    )
+    headers = (await session.exec(stmt_headers)).all()
+
+    stmt_lines = select(IdpExtractedLineItem).where(
+        IdpExtractedLineItem.document_id == id,
+        IdpExtractedLineItem.job_id == latest_job_id,
+    ).order_by(
+        IdpExtractedLineItem.row_index.asc(),
+        IdpExtractedLineItem.column_name.asc()
+    )
+    line_items = (await session.exec(stmt_lines)).all()
 
     detail = ProcessedDocDetailRead.model_validate(doc)
     detail.headers = headers
@@ -386,22 +420,21 @@ async def export_processed_doc(
     if not await _can_access_document(session, current_user, doc):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    # Same row sources as get_processed_doc (the detail view) → the export equals what's on screen.
-    # By design we read ALL rows for this document_id (not filtered to the latest job) so the file
-    # matches exactly what the reviewer saw and approved. A reprocessed doc can therefore carry rows
-    # from more than one job — that pre-existing behavior is shared with the detail view; the proper
-    # fix (cleaning old jobs' rows on reprocess) is a pipeline-level change tracked as deferred.
+    # Same row source as get_processed_doc (the detail view): both read ONLY the latest job's rows
+    # (M1) so the exported single-doc file matches exactly what's on screen, and a reprocessed doc
+    # doesn't carry stale rows from older jobs.
+    latest_job_id = await _latest_job_id(session, id)
     headers = (
         await session.exec(
             select(IdpExtractedHeader)
-            .where(IdpExtractedHeader.document_id == id)
+            .where(IdpExtractedHeader.document_id == id, IdpExtractedHeader.job_id == latest_job_id)
             .order_by(IdpExtractedHeader.field_name.asc())
         )
     ).all()
     line_items = (
         await session.exec(
             select(IdpExtractedLineItem)
-            .where(IdpExtractedLineItem.document_id == id)
+            .where(IdpExtractedLineItem.document_id == id, IdpExtractedLineItem.job_id == latest_job_id)
             .order_by(IdpExtractedLineItem.row_index.asc(), IdpExtractedLineItem.column_name.asc())
         )
     ).all()
@@ -442,6 +475,7 @@ async def update_extracted_fields(
 
     if not await _can_access_document(session, current_user, doc):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to edit this document.")
+    _check_doc_version(doc, payload.expected_updated_at)  # M4
 
     # Update headers
     if payload.headers:
@@ -499,11 +533,17 @@ async def review_processed_doc(
 
     if not await _can_access_document(session, current_user, doc):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to review this document.")
+    _check_doc_version(doc, payload.expected_updated_at)  # M4
 
-    # Determine if any human corrections were made
-    stmt_headers = select(IdpExtractedHeader).where(IdpExtractedHeader.document_id == id)
+    # Determine if any human corrections were made (M1: latest job only, consistent with the detail view)
+    latest_job_id = await _latest_job_id(session, id)
+    stmt_headers = select(IdpExtractedHeader).where(
+        IdpExtractedHeader.document_id == id, IdpExtractedHeader.job_id == latest_job_id
+    )
     headers = (await session.exec(stmt_headers)).all()
-    stmt_lines = select(IdpExtractedLineItem).where(IdpExtractedLineItem.document_id == id)
+    stmt_lines = select(IdpExtractedLineItem).where(
+        IdpExtractedLineItem.document_id == id, IdpExtractedLineItem.job_id == latest_job_id
+    )
     line_items = (await session.exec(stmt_lines)).all()
 
     corrections_made = False
@@ -556,6 +596,18 @@ async def approve_processed_doc(
 
     if not await _can_access_document(session, current_user, doc):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to approve this document.")
+
+    # M3: record the approval as a HITL review session (reviewer + timestamps), mirroring POST /review,
+    # so a direct approve has the same audit trail as a reviewed submission.
+    review_session = IdpReviewSession(
+        document_id=id,
+        reviewed_by=current_user.id,
+        review_started_at=doc.processing_completed_at or doc.updated_at or datetime.now(timezone.utc),
+        review_completed_at=datetime.now(timezone.utc),
+        final_status="approved",
+        notes=None,
+    )
+    session.add(review_session)
 
     # Mark as approved by transitioning status
     # Approving also finalizes the doc, so clear any leftover draft marker (same as POST /review).

@@ -31,6 +31,31 @@ ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".xlsx",
 def health():
     return {"status": "ok", "service": "IDP Documents API"}
 
+
+async def _can_access_idp_agent(session, current_user, idp_agent) -> bool:
+    """A non-root user may only act on an IDP agent whose base Agent.org_id is in their org scope."""
+    is_root, org_ids = await resolve_org_scope(session, current_user)
+    if is_root:
+        return True
+    org_id = (await session.exec(
+        select(Agent.org_id).where(Agent.id == idp_agent.agent_id)
+    )).first()
+    return bool(org_id and org_id in org_ids)
+
+
+async def _can_access_document(session, current_user, doc) -> bool:
+    """A non-root user may only act on a document whose agent's base Agent.org_id is in their org scope."""
+    is_root, org_ids = await resolve_org_scope(session, current_user)
+    if is_root:
+        return True
+    org_id = (await session.exec(
+        select(Agent.org_id)
+        .join(IdpAgent, IdpAgent.agent_id == Agent.id)
+        .where(IdpAgent.id == doc.agent_id)
+    )).first()
+    return bool(org_id and org_id in org_ids)
+
+
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
 @router.post("/upload/", status_code=status.HTTP_201_CREATED)
 async def upload_documents(
@@ -79,6 +104,13 @@ async def upload_documents(
         )
         session.add(idp_agent)
         await session.flush()
+
+    # H1: org-scope guard — a non-root user must not upload into an agent outside their org.
+    if not await _can_access_idp_agent(session, current_user, idp_agent):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Active IDP Agent with ID/agent_id '{agent_id}' not found.",
+        )
 
     # 2. Get file upload settings
     try:
@@ -183,10 +215,13 @@ class ProcessBulkRequest(BaseModel):
 _PROCESSABLE_STATUSES = {"queued", "extracted", "pending_review", "auto_approved", "reviewed", "failed"}
 
 
-async def _enqueue_one(session, document_id: UUID):
+async def _enqueue_one(session, document_id: UUID, current_user):
     """Enqueue a single document; returns (job_id, None) or (None, error_detail)."""
     doc = (await session.exec(select(IdpDocument).where(IdpDocument.id == document_id))).first()
     if doc is None:
+        return None, "document not found"
+    # H2: org-scope guard — non-disclosing (same message as not-found) for cross-org docs.
+    if not await _can_access_document(session, current_user, doc):
         return None, "document not found"
     if doc.status == "processing":
         return None, "document is already processing"
@@ -215,7 +250,10 @@ async def process_document_endpoint(
     doc = (await session.exec(select(IdpDocument).where(IdpDocument.id == document_id))).first()
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
-    job_id, error = await _enqueue_one(session, document_id)
+    # H2: org-scope guard — cross-org doc is indistinguishable from not-found.
+    if not await _can_access_document(session, current_user, doc):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+    job_id, error = await _enqueue_one(session, document_id, current_user)
     if error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error)
     return {"job_id": job_id, "document_id": document_id, "status": "queued"}
@@ -229,7 +267,7 @@ async def process_documents_bulk(
     jobs = []
     skipped = []
     for document_id in body.document_ids:
-        job_id, error = await _enqueue_one(session, document_id)
+        job_id, error = await _enqueue_one(session, document_id, current_user)
         if error:
             skipped.append({"document_id": str(document_id), "reason": error})
         else:

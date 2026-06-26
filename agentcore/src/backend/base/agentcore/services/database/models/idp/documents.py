@@ -23,6 +23,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
@@ -74,13 +75,22 @@ class IdpDocument(SQLModel, table=True):  # type: ignore[call-arg]
     updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
 
     __table_args__ = (
-        CheckConstraint("source IN ('upload','mail_connector','sharepoint','other')", name="ck_idp_documents_source"),
+        CheckConstraint("source IN ('upload','mail_connector','sharepoint','onedrive','other')", name="ck_idp_documents_source"),
         CheckConstraint(
             "status IN ('queued','processing','extracted','pending_review','auto_approved','reviewed','failed','split','skipped')",
             name="ck_idp_documents_status",
         ),
         CheckConstraint("overall_confidence IS NULL OR (overall_confidence >= 0 AND overall_confidence <= 1)", name="ck_idp_documents_conf"),
         Index("ix_idp_documents_agent_status_created", "agent_id", "status", "created_at"),
+        # G3: declared here too (not just in the migration) so alembic's model-vs-DB drift check
+        # sees the partial-unique dedup index and stays clean on boot.
+        Index(
+            "uq_idp_documents_agent_dedup_key",
+            "agent_id",
+            text("(source_metadata->>'dedup_key')"),
+            unique=True,
+            postgresql_where=text("source_metadata ? 'dedup_key' AND source_metadata->>'dedup_key' <> ''"),
+        ),
     )
 
     @property

@@ -262,3 +262,47 @@ def test_rules_numeric_compare_with_currency():
     assert _compare_values("$129.80", "0", ">", "numeric") is True
     assert _compare_values("19.80", "19.80", "==", "numeric") is True
     assert _compare_values("$5.00", "10", ">", "numeric") is False
+
+
+# --- H3: rules org-scope access helper ------------------------------------------------
+from types import SimpleNamespace as _SNS_h3
+from uuid import uuid4 as _uuid_h3
+import pytest as _pytest_h3
+import agentcore.api.idp.rules as _rules_mod
+
+
+@_pytest_h3.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+class _Res_h3:
+    def __init__(self, val): self._val = val
+    def first(self): return self._val
+
+
+class _Sess_h3:
+    def __init__(self, org_id): self._org_id = org_id
+    async def exec(self, *a, **k): return _Res_h3(self._org_id)
+
+
+@_pytest_h3.mark.anyio
+async def test_h3_rules_access_root_bypass(monkeypatch):
+    async def _scope(s, u): return True, []
+    monkeypatch.setattr(_rules_mod, "resolve_org_scope", _scope)
+    assert await _rules_mod._can_access_idp_agent(_Sess_h3(None), _SNS_h3(id=_uuid_h3()), _uuid_h3()) is True
+
+
+@_pytest_h3.mark.anyio
+async def test_h3_rules_access_same_org_allowed(monkeypatch):
+    org = _uuid_h3()
+    async def _scope(s, u): return False, [org]
+    monkeypatch.setattr(_rules_mod, "resolve_org_scope", _scope)
+    assert await _rules_mod._can_access_idp_agent(_Sess_h3(org), _SNS_h3(id=_uuid_h3()), _uuid_h3()) is True
+
+
+@_pytest_h3.mark.anyio
+async def test_h3_rules_access_cross_org_denied(monkeypatch):
+    async def _scope(s, u): return False, [_uuid_h3()]
+    monkeypatch.setattr(_rules_mod, "resolve_org_scope", _scope)
+    assert await _rules_mod._can_access_idp_agent(_Sess_h3(_uuid_h3()), _SNS_h3(id=_uuid_h3()), _uuid_h3()) is False

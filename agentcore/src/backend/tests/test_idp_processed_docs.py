@@ -414,6 +414,16 @@ async def test_approve_clears_draft(setup_test_data):
     assert detail["status"] == "reviewed"
     assert detail["review_draft"] is False  # approve cleared the draft marker
 
+    # M3: a direct approve must record exactly one review session (reviewer + status) for the audit trail.
+    from agentcore.services.database.models.idp.config import IdpReviewSession as _IRS_m3
+    async with session_scope() as _s_m3:
+        _rsessions = (await _s_m3.exec(
+            select(_IRS_m3).where(_IRS_m3.document_id == doc.id)
+        )).all()
+    assert len(_rsessions) == 1
+    assert _rsessions[0].final_status == "approved"
+    assert _rsessions[0].reviewed_by == user.id
+
 
 @pytest.mark.anyio
 async def test_draft_ignored_on_finalized_doc(setup_test_data):
@@ -513,3 +523,63 @@ async def test_export_cross_org_forbidden(setup_test_data):
     mock_user = SimpleNamespace(id=uuid4(), role="idp_configurator")
     r = client.get(f"/api/v1/idp/processed-docs/{doc.id}/export", params={"format": "csv"})
     assert r.status_code == 404
+
+
+# --- M4: optional optimistic-lock precondition (_check_doc_version) ------------------
+def test_m4_check_doc_version():
+    from agentcore.api.idp.processed_docs import _check_doc_version
+    from types import SimpleNamespace
+    from datetime import datetime as _dt, timezone as _tz
+    from fastapi import HTTPException
+    import pytest as _pt
+    now = _dt(2026, 1, 1, tzinfo=_tz.utc)
+    doc = SimpleNamespace(updated_at=now)
+    _check_doc_version(doc, None)   # omitted → legacy behavior, no error
+    _check_doc_version(doc, now)    # matching → no error
+    with _pt.raises(HTTPException) as e:
+        _check_doc_version(doc, _dt(2025, 1, 1, tzinfo=_tz.utc))  # stale → 409
+    assert e.value.status_code == 409
+
+
+# --- M1: reprocessed doc (2 jobs) shows ONLY the latest job's rows -------------------
+@pytest.mark.anyio
+async def test_m1_detail_uses_latest_job_only(setup_test_data):
+    from datetime import timedelta
+    from agentcore.api.idp.processed_docs import get_processed_doc
+    data = setup_test_data
+    doc = data["doc"]
+
+    # setup_test_data made job#1 (2 headers + 1 line). Add a strictly-newer job#2 with 3 headers.
+    async with session_scope() as session:
+        old_job = await session.get(IdpProcessingJob, data["job"].id)
+        new_job = IdpProcessingJob(
+            id=uuid4(), document_id=doc.id, agent_id=data["idp_agent"].id, status="completed",
+            created_at=old_job.created_at + timedelta(hours=1),  # deterministically newer
+        )
+        session.add(new_job)
+        await session.flush()
+        for fn in ("alpha", "beta", "gamma"):
+            session.add(IdpExtractedHeader(
+                id=uuid4(), document_id=doc.id, job_id=new_job.id,
+                field_name=fn, extracted_value="x", confidence_score=0.9, is_reviewed=False,
+            ))
+        await session.commit()
+        new_job_id = new_job.id
+
+    # Detail must return ONLY job#2's 3 headers (not job#1's 2 + job#2's 3 = 5).
+    root = SimpleNamespace(id=uuid4(), role="root")
+    async with session_scope() as session:
+        detail = await get_processed_doc(session=session, id=doc.id, current_user=root)
+    assert len(detail.headers) == 3, [h.field_name for h in detail.headers]
+    assert {h.field_name for h in detail.headers} == {"alpha", "beta", "gamma"}
+
+    # Cleanup job#2 + its headers BEFORE the fixture deletes the doc (FK safety).
+    async with session_scope() as session:
+        for h in (await session.exec(
+            select(IdpExtractedHeader).where(IdpExtractedHeader.job_id == new_job_id)
+        )).all():
+            await session.delete(h)
+        nj = await session.get(IdpProcessingJob, new_job_id)
+        if nj:
+            await session.delete(nj)
+        await session.commit()

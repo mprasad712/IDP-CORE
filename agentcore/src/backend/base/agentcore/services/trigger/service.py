@@ -2342,6 +2342,7 @@ class TriggerService(Service):
                         await session.execute(
                             _select(IdpDocument.id)
                             .where(IdpDocument.source_metadata["dedup_key"].astext == dedup_key)
+                            .where(IdpDocument.agent_id == idp_agent.id)  # G1: agent-scope so 2 agents on one source each ingest
                             .limit(1)
                         )
                     ).first()
@@ -2410,7 +2411,23 @@ class TriggerService(Service):
                         await enqueue_document(session, doc.id)
                         logger.info(f"[sharepoint-ingest] queued IdpDocument {doc.id} ('{name}')")
                     except Exception as e:
-                        logger.warning(f"[sharepoint-ingest] enqueue failed for {doc.id}: {e}")
+                        # G2: a committed doc with no runnable job + a consumed dedup_key would NEVER process.
+                        # Roll back (delete job rows, the doc, then its file) so the next poll re-ingests cleanly.
+                        logger.warning(f"[sharepoint-ingest] enqueue failed for {doc.id}: {e}; rolling back so the file retries")
+                        try:
+                            await session.execute(_sql_delete(IdpProcessingJob).where(IdpProcessingJob.document_id == doc.id))
+                            await session.delete(doc)
+                            await session.commit()
+                            if saved:
+                                try:
+                                    await storage.delete_file(agent_id=agent_scope, file_name=storage_filename)
+                                except Exception:
+                                    logger.warning(f"[sharepoint-ingest] could not clean up file {storage_filename} after enqueue failure")
+                        except Exception:
+                            try:
+                                await session.rollback()
+                            except Exception:
+                                pass
 
     async def _refresh_onedrive_token(self, config: dict, acct: dict, connector_id: str, force: bool = False) -> str:
         """Refresh a OneDrive OAuth token if expired (via /common authority), returning a valid token."""
@@ -2535,6 +2552,7 @@ class TriggerService(Service):
                     await session.execute(
                         _select(IdpDocument.id)
                         .where(IdpDocument.source_metadata["dedup_key"].astext == dedup_key)
+                        .where(IdpDocument.agent_id == idp_agent.id)  # G1: agent-scope so 2 agents on one source each ingest
                         .limit(1)
                     )
                 ).first()
@@ -2570,8 +2588,9 @@ class TriggerService(Service):
                         mime_type=None,
                         file_size_bytes=len(data),
                         checksum=hashlib.sha256(data).hexdigest(),
-                        # IdpDocument.source CHECK allows upload|mail_connector|sharepoint|other.
-                        source="other",
+                        # G4: store the true source so report provenance shows "OneDrive", not "other".
+                        # (ck_idp_documents_source now allows 'onedrive' — see migration idp_g4_onedrive_source.)
+                        source="onedrive",
                         connector_id=conn_uuid,
                         source_metadata={
                             "provider": "onedrive",
@@ -2604,7 +2623,23 @@ class TriggerService(Service):
                     await enqueue_document(session, doc.id)
                     logger.info(f"[onedrive-ingest] queued IdpDocument {doc.id} ('{name}')")
                 except Exception as e:
-                    logger.warning(f"[onedrive-ingest] enqueue failed for {doc.id}: {e}")
+                    # G2: a committed doc with no runnable job + a consumed dedup_key would NEVER process.
+                    # Roll back (delete job rows, the doc, then its file) so the next poll re-ingests cleanly.
+                    logger.warning(f"[onedrive-ingest] enqueue failed for {doc.id}: {e}; rolling back so the file retries")
+                    try:
+                        await session.execute(_sql_delete(IdpProcessingJob).where(IdpProcessingJob.document_id == doc.id))
+                        await session.delete(doc)
+                        await session.commit()
+                        if saved:
+                            try:
+                                await storage.delete_file(agent_id=agent_scope, file_name=storage_filename)
+                            except Exception:
+                                logger.warning(f"[onedrive-ingest] could not clean up file {storage_filename} after enqueue failure")
+                    except Exception:
+                        try:
+                            await session.rollback()
+                        except Exception:
+                            pass
 
     async def _refresh_outlook_token(self, config: dict, acct: dict, connector_id: str, force: bool = False) -> str:
         """Refresh an Outlook OAuth token if expired, returning a valid access token."""
