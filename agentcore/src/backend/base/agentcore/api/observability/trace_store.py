@@ -266,10 +266,17 @@ def _fetch_scoped_traces(
 
     def _attach_client_idx(trace_obj: Any, idx: int) -> Any:
         try:
-            setattr(trace_obj, "_agentcore_client_idx", idx)
+            object.__setattr__(trace_obj, "_agentcore_client_idx", idx)
         except Exception:
-            if isinstance(trace_obj, dict):
+            try:
+                setattr(trace_obj, "_agentcore_client_idx", idx)
+            except Exception:
+                pass
+        if isinstance(trace_obj, dict):
+            try:
                 trace_obj["_agentcore_client_idx"] = idx
+            except Exception:
+                pass
         return trace_obj
 
     combined: list[Any] = []

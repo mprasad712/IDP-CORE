@@ -113,3 +113,112 @@ async def test_trace_lifecycle_with_mock_client():
             model="gpt-4o",
         )
         mock_client.flush.assert_called_once()
+
+
+def test_traces_to_list_items_console_url():
+    from agentcore.api.observability.trace_store import EnrichedTrace
+    from agentcore.api.observability.aggregations import traces_to_list_items
+
+    class MockLangfuseClient:
+        def __init__(self, host, project_id):
+            self._langfuse_host = host
+            self._langfuse_project_id = project_id
+
+    clients = [
+        MockLangfuseClient("http://localhost:3001", "project-a"),
+        MockLangfuseClient("http://localhost:3002/", "project-b"),
+    ]
+
+    traces = [
+        EnrichedTrace(
+            id="trace-1",
+            name="Trace One",
+            session_id=None,
+            user_id=None,
+            timestamp=None,
+            _client_idx=0,
+        ),
+        EnrichedTrace(
+            id="trace-2",
+            name="Trace Two",
+            session_id=None,
+            user_id=None,
+            timestamp=None,
+            _client_idx=1,
+        ),
+    ]
+
+    items = traces_to_list_items(traces, clients=clients)
+    assert len(items) == 2
+    # Sort order in traces_to_list_items is by timestamp desc (both None here, so order preserved or arbitrary, let's search by ID)
+    item1 = next(item for item in items if item.id == "trace-1")
+    item2 = next(item for item in items if item.id == "trace-2")
+
+    assert item1.langfuse_console_url == "http://localhost:3001/project/project-a/traces/trace-1"
+    assert item2.langfuse_console_url == "http://localhost:3002/project/project-b/traces/trace-2"
+
+
+def test_trace_store_immutable_pydantic_model_idx():
+    from agentcore.api.observability.trace_store import TraceStore
+    from langfuse.api.resources.commons.types.trace import Trace
+    from datetime import datetime
+
+    # Create immutable Trace objects
+    trace1 = Trace(
+        id="trace-abc",
+        projectId="project-1",
+        name="Trace 1",
+        timestamp=datetime.now(),
+        tags=[],
+        public=True,
+        environment="test",
+        user_id="user-1",
+    )
+    trace2 = Trace(
+        id="trace-xyz",
+        projectId="project-2",
+        name="Trace 2",
+        timestamp=datetime.now(),
+        tags=[],
+        public=True,
+        environment="test",
+        user_id="user-1",
+    )
+
+    class MockLangfuseClient:
+        def __init__(self, host, project_id, trace_data):
+            self._langfuse_host = host
+            self._langfuse_project_id = project_id
+            self._trace_cache_namespace = f"client-{project_id}"
+            self.trace_data = trace_data
+
+        def fetch_traces(self, **kwargs):
+            class Response:
+                def __init__(self, data):
+                    self.data = data
+            return Response(self.trace_data)
+
+    client1 = MockLangfuseClient("http://localhost:3001", "project-1", [trace1])
+    client2 = MockLangfuseClient("http://localhost:3002", "project-2", [trace2])
+
+    clients = [client1, client2]
+    
+    # Invalidate cache to ensure it fetches fresh
+    TraceStore.invalidate()
+    
+    enriched, _ = TraceStore.get_traces(
+        clients=clients,
+        allowed_user_ids={"user-1"},
+        scope_key="test-scope",
+        from_timestamp=None,
+        to_timestamp=None,
+        fetch_all=True,
+    )
+    
+    assert len(enriched) == 2
+    item1 = next(item for item in enriched if item.id == "trace-abc")
+    item2 = next(item for item in enriched if item.id == "trace-xyz")
+    
+    assert item1._client_idx == 0
+    assert item2._client_idx == 1
+
