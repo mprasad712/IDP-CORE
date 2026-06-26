@@ -734,3 +734,23 @@ def test_get_document_returns_large_attachment():
     with open(out.data["file_path"], "rb") as f:
         assert f.read() == b"BIGDATA"
     os.remove(out.data["file_path"])
+
+
+def test_g2_connector_ingest_rollback_imports_present():
+    """G2 regression guard: the email/SharePoint/OneDrive ingest functions must import the names
+    their enqueue-failure rollback uses (`_sql_delete`, `IdpProcessingJob`). Without them the
+    rollback raises NameError and the document is left stranded with no job (the bug G2 fixes)."""
+    import ast
+    import inspect
+    from agentcore.services.trigger import service as _svc
+
+    tree = ast.parse(inspect.getsource(_svc))
+    for fn in ("_ingest_email_to_idp", "_ingest_sharepoint_files_to_idp", "_ingest_onedrive_files_to_idp"):
+        node = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == fn)
+        names = set()
+        for n in ast.walk(node):
+            if isinstance(n, (ast.ImportFrom, ast.Import)):
+                for a in n.names:
+                    names.add(a.asname or a.name)
+        assert "_sql_delete" in names, f"{fn}: missing `_sql_delete` import (G2 rollback NameError)"
+        assert "IdpProcessingJob" in names, f"{fn}: missing `IdpProcessingJob` import (G2 rollback NameError)"

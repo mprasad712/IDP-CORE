@@ -2229,14 +2229,14 @@ class TriggerService(Service):
         import hashlib
         from uuid import UUID as _UUID, uuid4 as _uuid4
         from urllib.parse import urlparse
-        from sqlalchemy import select as _select
+        from sqlalchemy import delete as _sql_delete, select as _select
 
         import httpx
 
         from agentcore.services.deps import get_db_service, get_storage_service
         from agentcore.services.database.models.agent.model import Agent
         from agentcore.services.database.models.idp.config import IdpAgent
-        from agentcore.services.database.models.idp.documents import IdpDocument
+        from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
         from agentcore.services.idp.pipeline import enqueue_document
         from agentcore.api.idp.documents import ALLOWED_EXTENSIONS
 
@@ -2477,14 +2477,14 @@ class TriggerService(Service):
         import hashlib
         from uuid import UUID as _UUID, uuid4 as _uuid4
         from urllib.parse import quote
-        from sqlalchemy import select as _select
+        from sqlalchemy import delete as _sql_delete, select as _select
 
         import httpx
 
         from agentcore.services.deps import get_db_service, get_storage_service
         from agentcore.services.database.models.agent.model import Agent
         from agentcore.services.database.models.idp.config import IdpAgent
-        from agentcore.services.database.models.idp.documents import IdpDocument
+        from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
         from agentcore.services.idp.pipeline import enqueue_document
         from agentcore.api.idp.documents import ALLOWED_EXTENSIONS
 
