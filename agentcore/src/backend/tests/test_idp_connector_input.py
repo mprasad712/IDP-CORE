@@ -655,7 +655,8 @@ async def test_walk_message_pages_stops_when_page_all_seen():
 
 @pytest.mark.anyio
 async def test_walk_message_pages_rejects_non_graph_nextlink():
-    """A non-Graph @odata.nextLink (SSRF) is not followed."""
+    """A non-Graph @odata.nextLink (SSRF) is not followed AND is treated as incomplete (ok=False),
+    so the caller won't mark the page-1 messages seen and skip the unreached pages forever."""
     from unittest.mock import MagicMock, patch
     from agentcore.services.trigger.service import TriggerService
 
@@ -664,9 +665,29 @@ async def test_walk_message_pages_rejects_non_graph_nextlink():
     svc = TriggerService()
     with patch("httpx.AsyncClient", MagicMock(return_value=client)):
         out, ok = await svc._walk_message_pages("tok", first, {}, "t")
-    assert ok is True
-    assert [m["id"] for m in out] == ["m1"]
-    assert client.get.await_count == 0
+    assert ok is False                       # incomplete → caller must not mark seen
+    assert [m["id"] for m in out] == ["m1"]  # page-1 still returned
+    assert client.get.await_count == 0       # the metadata-host nextLink was NOT fetched
+
+
+@pytest.mark.anyio
+async def test_walk_message_pages_incomplete_on_cap():
+    """Hitting _MAX_MESSAGE_PAGES with pages still remaining is INCOMPLETE → ok=False, so the caller
+    won't mark this batch seen and let a later poll's all-seen early-stop hide the overflow pages."""
+    from unittest.mock import MagicMock, patch
+    from agentcore.services.trigger.service import TriggerService
+
+    nl = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skiptoken=NEXT"
+    first = {"value": [{"id": "m1"}], "@odata.nextLink": nl}
+    page2 = {"value": [{"id": "m2"}], "@odata.nextLink": nl}  # still more pages after the cap
+    client = _graph_client([_graph_resp(200, page2)])
+    svc = TriggerService()
+    with patch("agentcore.services.trigger.service._MAX_MESSAGE_PAGES", 2), \
+         patch("httpx.AsyncClient", MagicMock(return_value=client)):
+        out, ok = await svc._walk_message_pages("tok", first, {}, "t")
+    assert ok is False                          # cap hit with pages remaining → incomplete
+    assert [m["id"] for m in out] == ["m1", "m2"]
+    assert client.get.await_count == 1          # fetched page 2, then stopped at the cap
 
 
 @pytest.mark.anyio

@@ -1890,7 +1890,14 @@ class TriggerService(Service):
         next_url = body.get("@odata.nextLink")
         pages = 1
         ok = True
-        while next_url and pages < _MAX_MESSAGE_PAGES and _is_graph_url(next_url):
+        while next_url and pages < _MAX_MESSAGE_PAGES:
+            if not _is_graph_url(next_url):
+                # A non-Graph nextLink is forged/anomalous (SSRF guard). Treat as INCOMPLETE: set
+                # ok=False so the caller does NOT mark these emails seen (otherwise the next poll's
+                # early-stop would skip the unreached pages forever); the next poll re-walks.
+                logger.warning(f"Email monitor {task_id}: refusing non-Graph message nextLink; stopping (incomplete)")
+                ok = False
+                break
             if not any(m.get("id") and m["id"] not in seen for m in (body.get("value") or [])):
                 break  # latest page had no new mail → don't page further into old territory
             try:
@@ -1911,10 +1918,14 @@ class TriggerService(Service):
             next_url = body.get("@odata.nextLink")
             pages += 1
         if next_url and pages >= _MAX_MESSAGE_PAGES:
+            # Cap hit with pages still remaining → INCOMPLETE. Set ok=False so the caller does NOT
+            # mark this batch seen (which would let the next poll's all-seen early-stop hide the
+            # overflow pages); the next poll re-walks and the dedup prevents duplicate docs.
             logger.warning(
                 f"Email monitor {task_id}: hit the {_MAX_MESSAGE_PAGES}-page message cap with more "
-                f"remaining — extreme burst; overflow waits for a later poll"
+                f"remaining — extreme burst; treating as incomplete (re-walk next poll)"
             )
+            ok = False
         if pages > 1:
             logger.info(f"Email monitor {task_id}: walked {pages} message pages ({len(messages)} messages)")
         return messages, ok
@@ -2118,10 +2129,15 @@ class TriggerService(Service):
                 # id-less attachments between retries): same-named attachments with different content
                 # get distinct keys, byte-identical ones correctly dedupe to one.
                 dedup_key = f"{message_id}:{att.get('attachment_id') or hashlib.sha256(data).hexdigest()}"
+                # Scope the existence check to THIS agent so two agents monitoring the same mailbox
+                # each ingest their own copy (a global lookup let the 2nd agent skip the doc). Keeping
+                # the key format unchanged means existing docs are still recognised (no re-ingest), and
+                # a same-agent re-poll still dedupes on (agent_id, key).
                 exists = (
                     await session.execute(
                         _select(IdpDocument.id)
                         .where(IdpDocument.source_metadata["dedup_key"].astext == dedup_key)
+                        .where(IdpDocument.agent_id == idp_agent.id)
                         .limit(1)
                     )
                 ).first()
