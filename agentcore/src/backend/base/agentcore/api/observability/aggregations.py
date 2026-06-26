@@ -554,22 +554,44 @@ def aggregate_projects(
 # Trace list items (for traces endpoint)
 # ---------------------------------------------------------------------------
 
-def traces_to_list_items(traces: list[EnrichedTrace]) -> list[TraceListItem]:
+def _build_langfuse_console_url(client: Any, trace_id: str | None = None) -> str | None:
+    """Construct a Langfuse console deep-link URL from client binding metadata."""
+    host = getattr(client, "_langfuse_host", None)
+    project_id = getattr(client, "_langfuse_project_id", None)
+    if not host or not project_id:
+        return None
+    base = host.rstrip("/")
+    if trace_id:
+        return f"{base}/project/{project_id}/traces/{trace_id}"
+    return f"{base}/project/{project_id}"
+
+
+def traces_to_list_items(
+    traces: list[EnrichedTrace],
+    clients: list[Any] | None = None,
+) -> list[TraceListItem]:
     """Convert enriched traces to TraceListItem list (sorted by timestamp desc)."""
-    items = [
-        TraceListItem(
-            id=t.id,
-            name=t.name,
-            session_id=t.session_id,
-            timestamp=t.timestamp,
-            total_tokens=t.total_tokens,
-            total_cost=t.total_cost,
-            latency_ms=t.latency_ms,
-            models_used=t.models,
-            observation_count=t.observation_count,
-            level=t.level,
+    items = []
+    for t in traces:
+        console_url = None
+        if clients and t._client_idx is not None and 0 <= t._client_idx < len(clients):
+            console_url = _build_langfuse_console_url(clients[t._client_idx], t.id)
+
+        items.append(
+            TraceListItem(
+                id=t.id,
+                name=t.name,
+                session_id=t.session_id,
+                timestamp=t.timestamp,
+                total_tokens=t.total_tokens,
+                total_cost=t.total_cost,
+                latency_ms=t.latency_ms,
+                models_used=t.models,
+                observation_count=t.observation_count,
+                level=t.level,
+                langfuse_console_url=console_url,
+            )
         )
-        for t in traces
-    ]
     items.sort(key=lambda t: t.timestamp or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     return items
+

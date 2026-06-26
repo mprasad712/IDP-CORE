@@ -625,16 +625,32 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         session.add(doc)
         session.add(job)
         await session.commit()
+        # Email provenance for connector-ingested docs (which email this attachment came from) — so
+        # the per-document flow log shows the sender / subject / attachment, not just the filename.
+        _sm = doc.source_metadata if isinstance(doc.source_metadata, dict) else {}
+        _email_io: dict = {}
+        _prov = ""
+        if doc.source == "mail_connector":
+            _email_io = {
+                "email_from": _sm.get("from"),
+                "email_subject": _sm.get("subject"),
+                "attachment_name": _sm.get("attachment_name") or doc.original_filename,
+            }
+            _prov = (
+                f" — from email sent by {_sm.get('from') or '?'}"
+                f" (subject: '{_sm.get('subject') or ''}', attachment: '{_email_io['attachment_name']}')"
+            )
         flow.step(
             "load", "ok",
             f"input received: '{doc.original_filename}' ({doc.file_size_bytes} bytes, .{doc.file_type}, "
-            f"source={doc.source}) — document marked processing",
+            f"source={doc.source}){_prov} — document marked processing",
             document_id=str(document_id),
             io={"input": {
                 "filename": doc.original_filename,
                 "size_bytes": doc.file_size_bytes,
                 "file_type": doc.file_type,
                 "source": doc.source,
+                **_email_io,
             }},
         )
 
