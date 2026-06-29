@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from agentcore.api import outlook_connector as oc
 from agentcore.api.outlook_connector import (
@@ -337,6 +338,52 @@ async def test_read_mail_odata_path_builds_filter_and_returns_new_fields(monkeyp
     assert result["messages"][0]["isRead"] is False
 
 
+# ── Hardening fixes (#1 null-safe formatter, #2 limit bounds, #3 importance case, #4 fallback $top)
+
+@pytest.mark.parametrize("bad", [0, -1, 51, 1000])
+def test_limit_out_of_bounds_rejected(bad):
+    # #2: limit must be 1..50; nonsense values are refused cleanly (422) not sent to Graph as $top.
+    with pytest.raises(ValidationError):
+        ReadMailRequest(account_email="a@b.com", limit=bad)
+
+
+def test_limit_bounds_accept_edges():
+    assert ReadMailRequest(account_email="a@b.com", limit=1).limit == 1
+    assert ReadMailRequest(account_email="a@b.com", limit=50).limit == 50
+
+
+def test_max_results_alias_is_also_bounded():
+    # The alias must enforce the same bounds as limit.
+    with pytest.raises(ValidationError):
+        ReadMailRequest(account_email="a@b.com", max_results=0)
+    with pytest.raises(ValidationError):
+        ReadMailRequest(account_email="a@b.com", max_results=999)
+
+
+def test_build_odata_importance_uppercase_all_is_skipped():
+    # #3: "ALL"/"All" (any case) means "no filter", just like lowercase "all".
+    assert _build_read_odata_filters(ReadMailRequest(account_email="a@b.com", filter_importance="ALL")) == []
+    assert _build_read_odata_filters(ReadMailRequest(account_email="a@b.com", filter_importance="All")) == []
+
+
+def test_build_odata_importance_is_normalized_lowercase():
+    # #3: Graph's importance enum is lowercase; normalize before interpolating + strip whitespace.
+    assert "importance eq 'high'" in " ".join(
+        _build_read_odata_filters(ReadMailRequest(account_email="a@b.com", filter_importance="High")))
+    assert "importance eq 'high'" in " ".join(
+        _build_read_odata_filters(ReadMailRequest(account_email="a@b.com", filter_importance=" high ")))
+
+
+def test_match_importance_case_insensitive_and_uppercase_all():
+    # #3: matcher honours the same normalization.
+    assert _read_message_matches(_msg(importance="normal"),
+                                 ReadMailRequest(account_email="a@b.com", filter_importance="ALL")) is True
+    assert _read_message_matches(_msg(importance="high"),
+                                 ReadMailRequest(account_email="a@b.com", filter_importance="HIGH")) is True
+    assert _read_message_matches(_msg(importance="normal"),
+                                 ReadMailRequest(account_email="a@b.com", filter_importance="High")) is False
+
+
 @pytest.mark.anyio
 async def test_read_mail_fallback_filters_client_side(monkeypatch):
     # OData $filter rejected (400) → refetch without $filter → client-side matcher drops the non-match.
@@ -356,3 +403,72 @@ async def test_read_mail_fallback_filters_client_side(monkeypatch):
     # Only the high-importance message survives the client-side filter.
     assert result["count"] == 1
     assert result["messages"][0]["importance"] == "high"
+
+
+@pytest.mark.anyio
+async def test_read_mail_formatter_is_null_safe(monkeypatch):
+    # #1: Graph can return explicit null for from/body/recipients (e.g. some drafts/system msgs).
+    # The response formatter must not crash; it should emit sensible defaults.
+    null_msg = {
+        "id": "x", "subject": None, "from": None, "body": None,
+        "toRecipients": None, "ccRecipients": None,
+        "receivedDateTime": None, "bodyPreview": None,
+    }
+    factory = _FakeClientFactory([_FakeResp(200, {"value": [null_msg]})])
+    _patch_connector(monkeypatch, factory)
+
+    req = ReadMailRequest(account_email="a@b.com", limit=5)
+    result = await oc.read_mail(uuid4(), req, SimpleNamespace(id=uuid4()), None)
+
+    assert result["count"] == 1
+    m = result["messages"][0]
+    assert m["from"] == {}
+    assert m["body"] == ""
+    assert m["toRecipients"] == []
+    assert m["ccRecipients"] == []
+    assert m["importance"] == "normal"
+    assert m["isRead"] is False
+
+
+@pytest.mark.anyio
+async def test_read_mail_fallback_top_matches_monitor_fixed_50(monkeypatch):
+    # #4: the fallback fetch width must be a fixed 50 (mirrors the monitor), not min(limit*5,50),
+    # so a small limit doesn't under-fetch candidates before client-side filtering.
+    factory = _FakeClientFactory([_FakeResp(400, {}), _FakeResp(200, {"value": []})])
+    _patch_connector(monkeypatch, factory)
+
+    req = ReadMailRequest(account_email="a@b.com", filter_subject="x", limit=2)
+    await oc.read_mail(uuid4(), req, SimpleNamespace(id=uuid4()), None)
+
+    assert factory.calls[1]["params"]["$top"] == "50"
+
+
+@pytest.mark.anyio
+async def test_read_mail_importance_normalized_through_route(monkeypatch):
+    # End-to-end: uppercase/padded importance flows through read_mail to the OData $filter normalized.
+    factory = _FakeClientFactory([_FakeResp(200, {"value": [_graph_msg(importance="high")]})])
+    _patch_connector(monkeypatch, factory)
+    await oc.read_mail(uuid4(), ReadMailRequest(account_email="a@b.com", filter_importance="HIGH"),
+                       SimpleNamespace(id=uuid4()), None)
+    assert "importance eq 'high'" in factory.calls[0]["params"]["$filter"]
+
+    # " ALL " (any case, padded) → no importance clause at all (no $filter built).
+    factory2 = _FakeClientFactory([_FakeResp(200, {"value": [_graph_msg()]})])
+    _patch_connector(monkeypatch, factory2)
+    await oc.read_mail(uuid4(), ReadMailRequest(account_email="a@b.com", filter_importance=" ALL "),
+                       SimpleNamespace(id=uuid4()), None)
+    assert "$filter" not in factory2.calls[0]["params"]
+
+
+@pytest.mark.anyio
+async def test_read_mail_formatter_handles_null_recipient_element(monkeypatch):
+    # A null ELEMENT inside the recipients array (not just a null array) must not crash the formatter.
+    msg = _graph_msg()
+    msg["toRecipients"] = [None, {"emailAddress": {"address": "real@example.com"}}]
+    factory = _FakeClientFactory([_FakeResp(200, {"value": [msg]})])
+    _patch_connector(monkeypatch, factory)
+    result = await oc.read_mail(uuid4(), ReadMailRequest(account_email="a@b.com", limit=5),
+                                SimpleNamespace(id=uuid4()), None)
+    tos = result["messages"][0]["toRecipients"]
+    assert tos[0] == {}                                  # null element → empty dict, no crash
+    assert tos[1] == {"address": "real@example.com"}

@@ -75,7 +75,7 @@ class ReadMailRequest(BaseModel):
     account_email: str
     # `max_results` is accepted as an alias for `limit` so the same payload works against both the
     # /read preview and the email-monitor config (which names this field max_emails/max_results).
-    limit: int = Field(default=10, validation_alias=AliasChoices("limit", "max_results"))
+    limit: int = Field(default=10, ge=1, le=50, validation_alias=AliasChoices("limit", "max_results"))
     folder: str = "inbox"
     # All filters mirror the email monitor (services/trigger/service.py) so the preview behaves
     # identically to the live ingest path. importance "all"/None = no filter; has_attachments is a
@@ -137,11 +137,13 @@ def _mail_recipient_addrs(recipients) -> list[str]:
 
 
 def _build_read_odata_filters(req: "ReadMailRequest") -> list[str]:
-    """Build the OData $filter clauses for /read, mirroring the email monitor exactly.
+    """Build the OData $filter clauses for /read, mirroring the email monitor's clause set + order.
 
-    Uses RAW filter values (the monitor does the same; Graph compares case-insensitively), so the
-    existing sender/subject behaviour is unchanged.  importance "all"/None and has_attachments=False
-    contribute no clause (toggle semantics).
+    sender/subject/body/to/cc use raw values (the monitor does the same; Graph compares
+    case-insensitively), so the existing sender/subject behaviour is unchanged.  importance is
+    normalized (strip + lowercase) — a slight, deliberate divergence from the monitor so any-case
+    "ALL" means "no filter" and the value matches Graph's lowercase enum.  importance "all"/None and
+    has_attachments=False contribute no clause (toggle semantics).
     """
     # Clause order matches the email monitor exactly (services/trigger/service.py:1581-1596).
     filters: list[str] = []
@@ -157,8 +159,9 @@ def _build_read_odata_filters(req: "ReadMailRequest") -> list[str]:
         filters.append(f"toRecipients/any(r:r/emailAddress/address eq '{_odata_escape(req.filter_to)}')")
     if req.filter_cc:
         filters.append(f"ccRecipients/any(c:c/emailAddress/address eq '{_odata_escape(req.filter_cc)}')")
-    if req.filter_importance and req.filter_importance != "all":
-        filters.append(f"importance eq '{_odata_escape(req.filter_importance)}'")
+    importance = (req.filter_importance or "").strip().lower()
+    if importance and importance != "all":
+        filters.append(f"importance eq '{_odata_escape(importance)}'")
     if req.filter_has_attachments:
         filters.append("hasAttachments eq true")
     return filters
@@ -190,7 +193,8 @@ def _read_message_matches(msg: dict, req: "ReadMailRequest") -> bool:
         return False
     if req.filter_cc and req.filter_cc.lower() not in ccs:
         return False
-    if req.filter_importance and req.filter_importance != "all" and imp != req.filter_importance.lower():
+    want_importance = (req.filter_importance or "").strip().lower()
+    if want_importance and want_importance != "all" and imp != want_importance:
         return False
     return True
 
@@ -632,7 +636,7 @@ async def read_mail(
             f"read_mail: OData $filter failed ({resp.status_code}), falling back to client-side"
         )
         fallback_params = {k: v for k, v in params.items() if k != "$filter"}
-        fallback_params["$top"] = str(min(req.limit * 5, 50))
+        fallback_params["$top"] = "50"  # fixed 50, mirrors the email monitor's fallback width
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(url, headers=headers, params=fallback_params)
         client_side_filter = True
@@ -649,25 +653,28 @@ async def read_mail(
     if client_side_filter:
         messages_raw = [msg for msg in messages_raw if _read_message_matches(msg, req)][:req.limit]
 
-    # Format messages
+    # Format messages. Graph can return explicit null for from/body/recipients on some messages
+    # (e.g. certain drafts/system mail), so guard every nested access with `or {}` / `or []`.
     messages = []
     for msg in messages_raw:
+        from_obj = msg.get("from") or {}
+        body_obj = msg.get("body") or {}
         messages.append({
             "id": msg.get("id"),
             "subject": msg.get("subject"),
-            "from": msg.get("from", {}).get("emailAddress", {}),
+            "from": from_obj.get("emailAddress", {}),
             "receivedDateTime": msg.get("receivedDateTime"),
             "bodyPreview": msg.get("bodyPreview"),
-            "body": msg.get("body", {}).get("content", ""),
-            "bodyContentType": msg.get("body", {}).get("contentType", "text"),
+            "body": body_obj.get("content", ""),
+            "bodyContentType": body_obj.get("contentType", "text"),
             "hasAttachments": msg.get("hasAttachments", False),
-            "importance": msg.get("importance", "normal"),
+            "importance": msg.get("importance") or "normal",
             "isRead": msg.get("isRead", False),
             "toRecipients": [
-                r.get("emailAddress", {}) for r in msg.get("toRecipients", [])
+                (r or {}).get("emailAddress", {}) for r in (msg.get("toRecipients") or [])
             ],
             "ccRecipients": [
-                r.get("emailAddress", {}) for r in msg.get("ccRecipients", [])
+                (r or {}).get("emailAddress", {}) for r in (msg.get("ccRecipients") or [])
             ],
         })
 
