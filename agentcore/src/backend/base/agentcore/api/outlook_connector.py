@@ -16,7 +16,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, Field
 
 from agentcore.services.cache.redis_client import get_redis_client
 from agentcore.services.deps import get_settings_service
@@ -73,10 +73,23 @@ class OAuthStartResponse(BaseModel):
 
 class ReadMailRequest(BaseModel):
     account_email: str
-    limit: int = 10
+    # `max_results` is accepted as an alias for `limit` so the same payload works against both the
+    # /read preview and the email-monitor config (which names this field max_emails/max_results).
+    limit: int = Field(default=10, validation_alias=AliasChoices("limit", "max_results"))
     folder: str = "inbox"
+    # All filters mirror the email monitor (services/trigger/service.py) so the preview behaves
+    # identically to the live ingest path. importance "all"/None = no filter; has_attachments is a
+    # toggle (True = only emails WITH attachments; False/absent = no filter).
     filter_sender: str | None = None
     filter_subject: str | None = None
+    filter_body: str | None = None
+    filter_to: str | None = None
+    filter_cc: str | None = None
+    filter_importance: str | None = None
+    filter_has_attachments: bool = False
+    unread_only: bool = False
+
+    model_config = {"populate_by_name": True}
 
 
 class ReplyMailRequest(BaseModel):
@@ -111,6 +124,75 @@ async def _load_connector(
 def _odata_escape(value: str) -> str:
     """Escape single quotes for OData $filter values."""
     return value.replace("'", "''")
+
+
+def _mail_recipient_addrs(recipients) -> list[str]:
+    """Flatten a Graph recipients array → list of email addresses (mirrors the monitor helper)."""
+    out = []
+    for r in recipients or []:
+        a = ((r or {}).get("emailAddress") or {}).get("address", "")
+        if a:
+            out.append(a)
+    return out
+
+
+def _build_read_odata_filters(req: "ReadMailRequest") -> list[str]:
+    """Build the OData $filter clauses for /read, mirroring the email monitor exactly.
+
+    Uses RAW filter values (the monitor does the same; Graph compares case-insensitively), so the
+    existing sender/subject behaviour is unchanged.  importance "all"/None and has_attachments=False
+    contribute no clause (toggle semantics).
+    """
+    # Clause order matches the email monitor exactly (services/trigger/service.py:1581-1596).
+    filters: list[str] = []
+    if req.unread_only:
+        filters.append("isRead eq false")
+    if req.filter_sender:
+        filters.append(f"from/emailAddress/address eq '{_odata_escape(req.filter_sender)}'")
+    if req.filter_subject:
+        filters.append(f"contains(subject, '{_odata_escape(req.filter_subject)}')")
+    if req.filter_body:
+        filters.append(f"contains(body/content, '{_odata_escape(req.filter_body)}')")
+    if req.filter_to:
+        filters.append(f"toRecipients/any(r:r/emailAddress/address eq '{_odata_escape(req.filter_to)}')")
+    if req.filter_cc:
+        filters.append(f"ccRecipients/any(c:c/emailAddress/address eq '{_odata_escape(req.filter_cc)}')")
+    if req.filter_importance and req.filter_importance != "all":
+        filters.append(f"importance eq '{_odata_escape(req.filter_importance)}'")
+    if req.filter_has_attachments:
+        filters.append("hasAttachments eq true")
+    return filters
+
+
+def _read_message_matches(msg: dict, req: "ReadMailRequest") -> bool:
+    """Client-side equivalent of the OData filters (used on the Graph $filter fallback path).
+
+    Mirrors the email monitor: sender/to/cc are case-insensitive exact-address matches; subject/body
+    are case-insensitive substring matches; body falls back to bodyPreview when full body absent.
+    """
+    frm = (((msg.get("from") or {}).get("emailAddress")) or {}).get("address", "").lower()
+    subj = (msg.get("subject") or "").lower()
+    body_text = ((msg.get("body") or {}).get("content") or msg.get("bodyPreview") or "").lower()
+    tos = [a.lower() for a in _mail_recipient_addrs(msg.get("toRecipients"))]
+    ccs = [a.lower() for a in _mail_recipient_addrs(msg.get("ccRecipients"))]
+    imp = (msg.get("importance") or "").lower()
+    if req.filter_has_attachments and not msg.get("hasAttachments"):
+        return False
+    if req.unread_only and msg.get("isRead"):
+        return False
+    if req.filter_sender and req.filter_sender.lower() != frm:
+        return False
+    if req.filter_subject and req.filter_subject.lower() not in subj:
+        return False
+    if req.filter_body and req.filter_body.lower() not in body_text:
+        return False
+    if req.filter_to and req.filter_to.lower() not in tos:
+        return False
+    if req.filter_cc and req.filter_cc.lower() not in ccs:
+        return False
+    if req.filter_importance and req.filter_importance != "all" and imp != req.filter_importance.lower():
+        return False
+    return True
 
 
 def _validate_path_segment(value: str, label: str) -> str:
@@ -519,15 +601,11 @@ async def read_mail(
     url = f"{GRAPH_BASE}/me/mailFolders/{safe_folder}/messages"
     params: dict[str, str] = {
         "$top": str(req.limit),
-        "$select": "id,subject,from,receivedDateTime,bodyPreview,hasAttachments,body,toRecipients,ccRecipients",
+        "$select": "id,subject,from,receivedDateTime,bodyPreview,hasAttachments,body,toRecipients,ccRecipients,importance,isRead",
         "$orderby": "receivedDateTime desc",
     }
 
-    filters = []
-    if req.filter_sender:
-        filters.append(f"from/emailAddress/address eq '{_odata_escape(req.filter_sender)}'")
-    if req.filter_subject:
-        filters.append(f"contains(subject, '{_odata_escape(req.filter_subject)}')")
+    filters = _build_read_odata_filters(req)
     if filters:
         params["$filter"] = " and ".join(filters)
 
@@ -567,18 +645,9 @@ async def read_mail(
 
     messages_raw = resp.json().get("value", [])
 
-    # Apply client-side filters if OData was not supported
+    # Apply client-side filters if OData was not supported (mirrors the email monitor fallback)
     if client_side_filter:
-        filtered = []
-        for msg in messages_raw:
-            msg_sender = msg.get("from", {}).get("emailAddress", {}).get("address", "").lower()
-            msg_subject = (msg.get("subject") or "").lower()
-            if req.filter_sender and req.filter_sender.lower() != msg_sender:
-                continue
-            if req.filter_subject and req.filter_subject.lower() not in msg_subject:
-                continue
-            filtered.append(msg)
-        messages_raw = filtered[:req.limit]
+        messages_raw = [msg for msg in messages_raw if _read_message_matches(msg, req)][:req.limit]
 
     # Format messages
     messages = []
@@ -592,6 +661,8 @@ async def read_mail(
             "body": msg.get("body", {}).get("content", ""),
             "bodyContentType": msg.get("body", {}).get("contentType", "text"),
             "hasAttachments": msg.get("hasAttachments", False),
+            "importance": msg.get("importance", "normal"),
+            "isRead": msg.get("isRead", False),
             "toRecipients": [
                 r.get("emailAddress", {}) for r in msg.get("toRecipients", [])
             ],
