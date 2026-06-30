@@ -61,26 +61,20 @@ def test_detect_rotation_angle():
     assert detect_rotation_angle(img_vert) in (90, 270)
 
 
-def test_detect_rotation_angle_ocr_disambiguates_flip(monkeypatch):
-    """When OCR is available, the 0-vs-180 flip is resolved by whichever orientation reads better.
-    Here we simulate OCR that scores the 180-rotated page highest -> the page was upside-down."""
+def test_detect_rotation_angle_delegates_to_orientation_model(monkeypatch):
+    """detect_rotation_angle delegates to the doc-orientation classifier (predict_orientation) and
+    returns whatever orientation it reports — e.g. an upside-down page resolves to 180.
+
+    (The earlier OCR rotate-and-score flip heuristic + its `_ocr_text_score` helper were replaced by
+    the ONNX PP-LCNet_x1_0_doc_ori model with an OpenCV fallback, so this verifies the current
+    delegation rather than the removed helper the old test monkeypatched.)"""
     from agentcore.services.idp import pre_processing
 
-    img_horiz = create_rotated_text_image(is_vertical=False)   # coarse -> candidates {0, 180}
-    real_rotate = pre_processing.rotate_image
-    angle_by_id = {id(img_horiz): 0}   # the unrotated (angle 0) image
-
-    def rotate_track(image, angle):
-        out = real_rotate(image, angle)
-        angle_by_id[id(out)] = angle
-        return out
-
-    def fake_score(image):
-        return 9.0 if angle_by_id.get(id(image)) == 180 else 1.0   # 180 reads best
-
-    monkeypatch.setattr(pre_processing, "rotate_image", rotate_track)
-    monkeypatch.setattr(pre_processing, "_ocr_text_score", fake_score)
-    assert pre_processing.detect_rotation_angle(img_horiz) == 180
+    img = create_rotated_text_image(is_vertical=False)
+    monkeypatch.setattr(pre_processing, "predict_orientation", lambda image: 180)
+    assert pre_processing.detect_rotation_angle(img) == 180
+    monkeypatch.setattr(pre_processing, "predict_orientation", lambda image: 0)
+    assert pre_processing.detect_rotation_angle(img) == 0
 
 def test_rotate_image():
     img = np.ones((100, 200, 3), dtype=np.uint8) * 255
