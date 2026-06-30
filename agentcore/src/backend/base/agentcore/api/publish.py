@@ -1981,10 +1981,17 @@ async def uat_deploy_action(
         # FINAL live state — publish/republish/activate (live) → run; unpublish/deactivate → stop.
         # Same helper the control-panel toggle uses; guarded so a trigger error can't block the update.
         try:
-            from agentcore.api.triggers import set_deployment_triggers_active
+            from agentcore.api.triggers import (
+                deactivate_other_deployment_monitors,
+                set_deployment_triggers_active,
+            )
             _eff = record.status.value if hasattr(record.status, "value") else str(record.status)
             _live = bool(record.is_active and record.is_enabled and _eff == "PUBLISHED")
             await set_deployment_triggers_active(session, record.id, _live)
+            if _live:
+                # Single live monitor per agent+env: stop any superseded sibling versions' monitors
+                # (republish/activate deactivates the siblings' rows but didn't stop their polling).
+                await deactivate_other_deployment_monitors(session, record.agent_id, "uat", record.id)
             await session.commit()
         except Exception as _mon_err:
             logger.warning(f"Monitor lifecycle sync failed after UAT update {record.id}: {_mon_err}")
@@ -2136,10 +2143,17 @@ async def prod_deploy_action(
         # ── Symmetric monitor lifecycle (same as UAT): register/unregister this deployment's triggers
         # to match its FINAL live state — republish/activate (live) → run; unpublish/deactivate → stop.
         try:
-            from agentcore.api.triggers import set_deployment_triggers_active
+            from agentcore.api.triggers import (
+                deactivate_other_deployment_monitors,
+                set_deployment_triggers_active,
+            )
             _eff = record.status.value if hasattr(record.status, "value") else str(record.status)
             _live = bool(record.is_active and record.is_enabled and _eff == "PUBLISHED")
             await set_deployment_triggers_active(session, record.id, _live)
+            if _live:
+                # Single live monitor per agent+env: stop any superseded sibling versions' monitors
+                # (republish/activate deactivates the siblings' rows but didn't stop their polling).
+                await deactivate_other_deployment_monitors(session, record.agent_id, "prod", record.id)
             await session.commit()
         except Exception as _mon_err:
             logger.warning(f"Monitor lifecycle sync failed after PROD update {record.id}: {_mon_err}")

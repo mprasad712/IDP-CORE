@@ -13,7 +13,11 @@ from uuid import uuid4
 import pytest
 
 from agentcore.api import triggers as trig
-from agentcore.api.triggers import _normalize_schedule_config, set_deployment_triggers_active
+from agentcore.api.triggers import (
+    _normalize_schedule_config,
+    deactivate_other_deployment_monitors,
+    set_deployment_triggers_active,
+)
 from agentcore.services.database.models.trigger_config.model import TriggerTypeEnum
 
 
@@ -126,6 +130,20 @@ async def test_activate_all_triggers_for_deployment(capture_register):
     assert all(r.is_active is True for r in rows)
     assert {id(r) for r in reg} == {id(r) for r in rows}       # every row registered
     assert unreg == []
+
+
+@pytest.mark.anyio
+async def test_deactivate_other_deployment_monitors_stops_siblings(capture_register):
+    # Single live monitor per agent+env: when one version becomes live, the OTHER deployments'
+    # monitors (siblings) must be stopped — not left polling.
+    reg, unreg = capture_register
+    siblings = [_row(active=True), _row(active=True, ttype=TriggerTypeEnum.SCHEDULE)]
+    session = _FakeSession(siblings)
+    n = await deactivate_other_deployment_monitors(session, uuid4(), "uat", uuid4())
+    assert n == 2
+    assert all(r.is_active is False for r in siblings)         # siblings turned off
+    assert {u[0] for u in unreg} == {r.id for r in siblings}   # each sibling monitor unregistered
+    assert reg == []                                           # nothing re-registered
 
 
 @pytest.mark.anyio

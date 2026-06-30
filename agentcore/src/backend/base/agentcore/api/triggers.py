@@ -423,3 +423,43 @@ async def set_deployment_triggers_active(session, deployment_id, active: bool) -
                 f"trigger {getattr(t, 'id', None)}: {e}"
             )
     return n
+
+
+async def deactivate_other_deployment_monitors(session, agent_id, environment, keep_deployment_id) -> int:
+    """Stop the monitors of all OTHER deployments of this agent IN THIS ENVIRONMENT.
+
+    Single live monitor per (agent, environment): when one version becomes the live one (e.g. a
+    republish via the publish status-action), superseded sibling versions are flagged inactive but
+    their background monitors would keep polling. This unregisters + deactivates every active trigger
+    whose deployment_id != keep_deployment_id for the same agent+env, so only the live version polls.
+    is_active flips ride the caller's transaction (no commit here). Per-trigger guarded. Returns count.
+    """
+    from sqlalchemy import select as _select
+
+    from agentcore.services.database.models.trigger_config.model import TriggerConfigTable
+
+    rows = (
+        await session.execute(
+            _select(TriggerConfigTable).where(
+                TriggerConfigTable.agent_id == agent_id,
+                TriggerConfigTable.environment == environment,
+                TriggerConfigTable.deployment_id != keep_deployment_id,
+                TriggerConfigTable.is_active == True,  # noqa: E712
+            )
+        )
+    ).scalars().all()
+
+    n = 0
+    for t in rows:
+        try:
+            if t.is_active:
+                t.is_active = False
+                session.add(t)
+            await _unregister_trigger(t.id, t.trigger_type)
+            n += 1
+        except Exception as e:
+            logger.warning(
+                f"deactivate_other_deployment_monitors(agent={agent_id}, env={environment}) "
+                f"trigger {getattr(t, 'id', None)}: {e}"
+            )
+    return n
