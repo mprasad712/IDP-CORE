@@ -125,6 +125,41 @@ async def _deactivate_other_active_prod_versions(session, agent_id, keep_id) -> 
     return len(rows)
 
 
+async def _sync_prod_monitors_for_deployment(
+    session, agent_id, deployment_id, version, snapshot, created_by, source_uat_deployment_id=None
+) -> None:
+    """Make the live PROD deployment OWN its background monitors (orphan-gap fix).
+
+    On promote / developer-approval a PROD deployment is created but — unlike a direct PROD publish —
+    its folder/email/SharePoint/OneDrive monitors were never synced, so the agent's monitor stayed
+    orphaned on the (now moved-to-prod, inactive) source UAT version and control-panel PROD Start/Stop
+    could not reach it. This stops the source UAT version's monitors, then (re)syncs the PROD monitors
+    for THIS deployment. Each step is guarded so a monitor error never breaks the publish/approve.
+    """
+    from agentcore.services.deps import get_trigger_service
+
+    trigger_svc = get_trigger_service()
+    if source_uat_deployment_id:
+        try:
+            await trigger_svc.deactivate_triggers_for_deployment(session, source_uat_deployment_id)
+        except Exception as e:
+            logger.warning(f"Failed to stop source-UAT monitors for {source_uat_deployment_id}: {e}")
+    for name, fn in (
+        ("folder", trigger_svc.sync_folder_monitors_for_agent),
+        ("email", trigger_svc.sync_email_monitors_for_agent),
+        ("sharepoint", trigger_svc.sync_sharepoint_idp_monitors_for_agent),
+        ("onedrive", trigger_svc.sync_onedrive_idp_monitors_for_agent),
+    ):
+        try:
+            await fn(
+                session=session, agent_id=agent_id, environment="prod",
+                version=version, deployment_id=deployment_id,
+                flow_data=snapshot, created_by=created_by,
+            )
+        except Exception as e:
+            logger.warning(f"{name}-monitor PROD sync failed for deployment {deployment_id}: {e}")
+
+
 async def _validate_resources_for_prod(snapshot: dict, session) -> None:
     """Block PROD publish if any model or MCP server is not registered for PROD."""
     nodes = snapshot.get("nodes", [])
@@ -1886,13 +1921,7 @@ async def uat_deploy_action(
                 if new_is_active is None:
                     new_is_active = False
                 changes.append("status → UNPUBLISHED")
-                # Stop this deployment's background triggers (folder/email monitors). Fully guarded
-                # so a trigger error can never block the unpublish.
-                try:
-                    from agentcore.services.deps import get_trigger_service
-                    await get_trigger_service().deactivate_triggers_for_deployment(session, record.id)
-                except Exception as _trig_err:
-                    logger.warning(f"Trigger deactivation failed for unpublished deployment {record.id}: {_trig_err}")
+                # (monitor lifecycle is handled symmetrically after commit — see _set_deployment...)
 
             elif new_status == "PUBLISHED":
                 if current_status_val != "UNPUBLISHED":
@@ -1947,6 +1976,18 @@ async def uat_deploy_action(
         session.add(record)
         await session.commit()
         await session.refresh(record)
+
+        # ── Symmetric monitor lifecycle: register/unregister this deployment's triggers to match its
+        # FINAL live state — publish/republish/activate (live) → run; unpublish/deactivate → stop.
+        # Same helper the control-panel toggle uses; guarded so a trigger error can't block the update.
+        try:
+            from agentcore.api.triggers import set_deployment_triggers_active
+            _eff = record.status.value if hasattr(record.status, "value") else str(record.status)
+            _live = bool(record.is_active and record.is_enabled and _eff == "PUBLISHED")
+            await set_deployment_triggers_active(session, record.id, _live)
+            await session.commit()
+        except Exception as _mon_err:
+            logger.warning(f"Monitor lifecycle sync failed after UAT update {record.id}: {_mon_err}")
 
         # ─── Sync agent registry after any UAT change ──
         try:
@@ -2045,13 +2086,7 @@ async def prod_deploy_action(
                 if new_is_active is None:
                     new_is_active = False
                 changes.append("status → UNPUBLISHED")
-                # Stop this deployment's background triggers (folder/email monitors), mirroring the
-                # UAT unpublish path. Fully guarded so a trigger error can never block the unpublish.
-                try:
-                    from agentcore.services.deps import get_trigger_service
-                    await get_trigger_service().deactivate_triggers_for_deployment(session, record.id)
-                except Exception as _trig_err:
-                    logger.warning(f"Trigger deactivation failed for unpublished PROD deployment {record.id}: {_trig_err}")
+                # (monitor lifecycle is handled symmetrically after commit — see set_deployment...)
 
             elif new_status == "PUBLISHED":
                 if current_status_val != "UNPUBLISHED":
@@ -2097,6 +2132,17 @@ async def prod_deploy_action(
         session.add(record)
         await session.commit()
         await session.refresh(record)
+
+        # ── Symmetric monitor lifecycle (same as UAT): register/unregister this deployment's triggers
+        # to match its FINAL live state — republish/activate (live) → run; unpublish/deactivate → stop.
+        try:
+            from agentcore.api.triggers import set_deployment_triggers_active
+            _eff = record.status.value if hasattr(record.status, "value") else str(record.status)
+            _live = bool(record.is_active and record.is_enabled and _eff == "PUBLISHED")
+            await set_deployment_triggers_active(session, record.id, _live)
+            await session.commit()
+        except Exception as _mon_err:
+            logger.warning(f"Monitor lifecycle sync failed after PROD update {record.id}: {_mon_err}")
 
         # ─── Sync agent registry after any PROD change ──
         try:

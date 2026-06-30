@@ -1941,6 +1941,20 @@ async def approve_agent(
     await _deactivate_other_active_prod_versions(session, deployment.agent_id, deployment.id)
     await session.commit()
 
+    # Orphan-gap fix: the live PROD deployment owns its monitors — stop the promoted source-UAT
+    # version's monitors and sync this deployment's PROD monitors, so control-panel PROD Start/Stop
+    # controls fetching. Guarded so a monitor error can't break the approval.
+    try:
+        from agentcore.api.publish import _sync_prod_monitors_for_deployment
+        await _sync_prod_monitors_for_deployment(
+            session=session, agent_id=deployment.agent_id, deployment_id=deployment.id,
+            version=f"v{deployment.version_number}", snapshot=(deployment.agent_snapshot or {}),
+            created_by=deployment.deployed_by, source_uat_deployment_id=deployment.promoted_from_uat_id,
+        )
+        await session.commit()
+    except Exception as mon_err:
+        logger.warning(f"PROD monitor migration failed for approval {deployment.id}: {mon_err}")
+
     # ─── HTTP notify (only if guardrail promotion succeeded) ──
     guardrails_ready = all(g.ready for g in guardrail_promotions) if guardrail_promotions else True
     rag_ready = not pinecone_migration_failed and not neo4j_migration_failed

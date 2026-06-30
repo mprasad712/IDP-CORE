@@ -1535,6 +1535,19 @@ async def promote_uat_to_prod(
             from agentcore.api.publish import _deactivate_other_active_prod_versions
             await _deactivate_other_active_prod_versions(session, uat_dep.agent_id, new_record.id)
             await session.commit()
+            # Orphan-gap fix: the live PROD deployment owns its monitors — stop the promoted UAT
+            # version's monitors and sync this deployment's PROD monitors, so control-panel PROD
+            # Start/Stop controls fetching. Guarded so a monitor error can't break the promote.
+            try:
+                from agentcore.api.publish import _sync_prod_monitors_for_deployment
+                await _sync_prod_monitors_for_deployment(
+                    session=session, agent_id=uat_dep.agent_id, deployment_id=new_record.id,
+                    version=f"v{next_version}", snapshot=(new_record.agent_snapshot or {}),
+                    created_by=current_user.id, source_uat_deployment_id=uat_dep.id,
+                )
+                await session.commit()
+            except Exception as mon_err:
+                logger.warning(f"PROD monitor migration failed for promote {new_record.id}: {mon_err}")
             try:
                 await sync_agent_registry(
                     session=session,
