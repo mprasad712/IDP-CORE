@@ -45,6 +45,7 @@ const ApprovalPreviewPage    = lazy(() => import("./pages/ApprovalPreviewPage"))
 const TimeoutSettings        = lazy(() => import("./pages/TimeoutSettings"));
 const HelpSupportPage        = lazy(() => import("./pages/SettingsPage/pages/HelpSupportPage"));
 const PackagesPage           = lazy(() => import("./pages/SettingsPage/pages/PackagesPage"));
+const ReleaseManagementPage  = lazy(() => import("./pages/ReleaseManagementPage"));
 const AgentOrchestrator      = lazy(() => import("./pages/OrchestratorChat"));
 const SharePointCallback     = lazy(() => import("./pages/SharePointCallback"));
 const AdminPage              = lazy(() => import("./pages/AdminPage"));
@@ -224,6 +225,14 @@ const router = createBrowserRouter(
                     element={
                       <ProtectedPermissionRoute permission="view_packages_page">
                         <Suspense fallback={<PageLoader />}><PackagesPage /></Suspense>
+                      </ProtectedPermissionRoute>
+                    }
+                  />
+                  <Route
+                    path="release-management"
+                    element={
+                      <ProtectedPermissionRoute permission="view_release_management_page">
+                        <Suspense fallback={<PageLoader />}><ReleaseManagementPage /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />

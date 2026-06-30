@@ -539,7 +539,7 @@ const SideBarFoldersButtonsComponent = ({
               )}
 
               {/* ─ Platform ─ */}
-              {(can("view_control_panel") || can("view_connector_page") || can("view_packages_page")) && (
+              {(can("view_control_panel") || can("view_connector_page") || can("view_packages_page") || can("view_release_management_page")) && (
                 <SectionLabel label="Platform" />
               )}
 
@@ -566,6 +566,15 @@ const SideBarFoldersButtonsComponent = ({
                   <SidebarMenuButton size="md" isActive={pathname.startsWith("/packages")} onClick={() => _navigate("/packages")} className={navBtn}>
                     <ForwardedIconComponent name="Package" className="h-4 w-4 flex-shrink-0" />
                     {t("Packages")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+
+              {can("view_release_management_page") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/release-management")} onClick={() => _navigate("/release-management")} className={navBtn}>
+                    <ForwardedIconComponent name="Rocket" className="h-4 w-4 flex-shrink-0" />
+                    {t("Release Management")}
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               )}
