@@ -62,6 +62,17 @@ def _recipient_addrs(recipients) -> list[str]:
     return out
 
 
+def _email_dedup_key(environment, message_id: str, att_token: str) -> str:
+    """Build the per-attachment dedup key, scoped by environment.
+
+    Prefixing with the environment means the SAME email yields a DIFFERENT key per environment, so a
+    UAT version and a PROD version each ingest the same mailbox independently; a re-poll within the
+    same environment yields the SAME key and is skipped. (The unique index on (agent_id, dedup_key)
+    then allows the per-env copies to coexist.)
+    """
+    return f"{(environment or '').strip().lower()}:{message_id}:{att_token}"
+
+
 # Backstop on how many Graph @odata.nextLink pages we follow for one email's attachments. Set far
 # above any real email (Outlook caps a message ~150 MB, so a few hundred attachments at most); the
 # cap exists only to bound a pathological/looping nextLink. If it IS hit, the fetch is treated as
@@ -912,13 +923,21 @@ class TriggerService(Service):
                 _select(TriggerConfigTable).where(TriggerConfigTable.deployment_id == deployment_id)
             )
         ).scalars().all()
+        from agentcore.services.database.models.trigger_config.model import TriggerTypeEnum
+
         n = 0
         for t in rows:
             try:
                 if t.is_active:
                     t.is_active = False
                     session.add(t)
-                await self.unregister(t.id)
+                # Schedule jobs live in the scheduler service, not this service's _monitors, so route
+                # them to remove_schedule; folder/email monitors go through unregister (task.cancel).
+                if t.trigger_type == TriggerTypeEnum.SCHEDULE:
+                    from agentcore.services.deps import get_scheduler_service
+                    await get_scheduler_service().remove_schedule(t.id)
+                else:
+                    await self.unregister(t.id)
                 n += 1
             except Exception as e:
                 logger.warning(f"deactivate_triggers_for_deployment {t.id}: {e}")
@@ -1701,7 +1720,7 @@ class TriggerService(Service):
                                     f"{str(msg.get('id', ''))[:24]}; will retry next poll"
                                 )
                             else:
-                                ok = await self._ingest_email_to_idp(agent_id, connector_id, msg, raw_atts)
+                                ok = await self._ingest_email_to_idp(agent_id, connector_id, msg, raw_atts, environment)
                         except Exception:
                             logger.exception(
                                 f"Email monitor {task_id}: IDP ingest failed for message "
@@ -2032,7 +2051,7 @@ class TriggerService(Service):
             logger.warning(f"Email monitor {task_id}: raw attachments error for {message_id[:20]}...: {e}")
             return None  # fetch failed → caller retries (do not mark seen)
 
-    async def _ingest_email_to_idp(self, base_agent_id, connector_id: str, email_msg: dict, raw_attachments: list[dict]) -> bool:
+    async def _ingest_email_to_idp(self, base_agent_id, connector_id: str, email_msg: dict, raw_attachments: list[dict], environment: str = "") -> bool:
         """Create one IdpDocument per file attachment and enqueue the existing IDP pipeline.
 
         Mirrors ``api/idp/documents.py::upload_documents`` (agent resolve/auto-create → storage
@@ -2066,6 +2085,7 @@ class TriggerService(Service):
             "subject": email_msg.get("subject", ""),
             "message_id": message_id,
             "received": email_msg.get("receivedDateTime", ""),
+            "environment": (environment or "").strip().lower(),
         }
         conn_uuid = None
         if connector_id:
@@ -2128,7 +2148,8 @@ class TriggerService(Service):
                 # across polls and order-independent (a positional index breaks if Graph reorders
                 # id-less attachments between retries): same-named attachments with different content
                 # get distinct keys, byte-identical ones correctly dedupe to one.
-                dedup_key = f"{message_id}:{att.get('attachment_id') or hashlib.sha256(data).hexdigest()}"
+                att_token = att.get('attachment_id') or hashlib.sha256(data).hexdigest()
+                dedup_key = _email_dedup_key(environment, message_id, att_token)
                 # Scope the existence check to THIS agent so two agents monitoring the same mailbox
                 # each ingest their own copy (a global lookup let the 2nd agent skip the doc). Keeping
                 # the key format unchanged means existing docs are still recognised (no re-ingest), and
@@ -2960,7 +2981,7 @@ class TriggerService(Service):
 
                 if ingest_mode == "idp_pipeline":
                     normalized = self._normalize_gmail_message(full_msg)
-                    ok = await self._ingest_email_to_idp(agent_id, connector_id, normalized, raw_atts)
+                    ok = await self._ingest_email_to_idp(agent_id, connector_id, normalized, raw_atts, environment)
                     if ok:
                         processed_ids.append(msg_id)
             except Exception:

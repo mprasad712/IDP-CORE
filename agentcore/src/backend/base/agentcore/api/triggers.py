@@ -163,11 +163,15 @@ async def create_trigger(
     current_user: CurrentActiveUser,
 ) -> TriggerConfigRead:
     """Create a new trigger configuration for an agent."""
+    trigger_config = request.trigger_config
+    if request.trigger_type == TriggerTypeEnum.SCHEDULE:
+        # Honour the cron the user entered (the UI sends {"cron": ...}); store canonical fields.
+        trigger_config = _normalize_schedule_config(trigger_config)
     data = TriggerConfigCreate(
         agent_id=agent_id,
         deployment_id=request.deployment_id,
         trigger_type=request.trigger_type,
-        trigger_config=request.trigger_config,
+        trigger_config=trigger_config,
         environment=request.environment,
         version=request.version,
         created_by=current_user.id,
@@ -192,7 +196,16 @@ async def update_trigger(
     current_user: CurrentActiveUser,
 ) -> TriggerConfigRead:
     """Update a trigger configuration."""
-    data = TriggerConfigUpdate(**request.model_dump(exclude_unset=True))
+    payload = request.model_dump(exclude_unset=True)
+    if payload.get("trigger_config") is not None:
+        # Canonicalize cron ONLY for schedule triggers — _normalize_schedule_config drops a stray
+        # "cron" key, so never run it on a folder/email monitor config (which could legitimately
+        # carry one). Resolve the effective type from the payload, else the existing record.
+        existing = await get_trigger_config_by_id(session, trigger_id)
+        eff_type = payload.get("trigger_type") or (existing.trigger_type if existing else None)
+        if eff_type == TriggerTypeEnum.SCHEDULE:
+            payload["trigger_config"] = _normalize_schedule_config(payload["trigger_config"])
+    data = TriggerConfigUpdate(**payload)
     record = await update_trigger_config(session, trigger_id, data)
     if not record:
         raise HTTPException(status_code=404, detail="Trigger not found")
@@ -319,6 +332,7 @@ async def _register_trigger(record) -> None:
 
     if trigger_type == TriggerTypeEnum.SCHEDULE:
         scheduler = get_scheduler_service()
+        config = _normalize_schedule_config(config)  # honour {"cron": ...} alias defensively
         schedule_type = config.get("schedule_type", "interval")
         cron_expression = config.get("cron_expression", "0 * * * *")
         interval_minutes = config.get("interval_minutes", 60)
@@ -351,3 +365,61 @@ async def _unregister_trigger(trigger_id: UUID, trigger_type: TriggerTypeEnum) -
     else:
         trigger_service = get_trigger_service()
         await trigger_service.unregister(trigger_id)
+
+
+def _normalize_schedule_config(cfg: dict | None) -> dict:
+    """Canonicalize a SCHEDULE trigger_config so every reader sees cron_expression + schedule_type.
+
+    The control-panel Scheduler UI sends ``{"cron": "..."}`` but the scheduler service reads
+    ``cron_expression`` and defaults ``schedule_type`` to ``"interval"`` (60 min) — so a user's cron
+    was silently ignored.  Promote the ``cron`` alias to the canonical fields at creation time so
+    both the create-time registration AND the on-restart scheduler load honour the entered cron.
+    Interval schedules (no cron) are left untouched.
+    """
+    out = dict(cfg or {})
+    cron = out.get("cron_expression") or out.get("cron")
+    if cron:
+        out["cron_expression"] = cron
+        out.setdefault("schedule_type", "cron")
+    out.pop("cron", None)
+    return out
+
+
+async def set_deployment_triggers_active(session, deployment_id, active: bool) -> int:
+    """(De)activate AND (un)register every trigger of a deployment, of all types.
+
+    Used by the Agent Control Panel so an agent's background monitors/schedules follow its live
+    state: Start/Enable (live = active AND enabled) registers them; Stop/Disable unregisters them and
+    persists ``is_active=False`` so they do NOT respawn on the next backend restart.  Coarse by
+    design — every trigger of the deployment follows the agent state.  The ``is_active`` flips are
+    flushed into the CALLER's transaction (not committed here) so they're atomic with the toggle.
+    A per-trigger failure is logged and skipped so one bad trigger can't abort the rest.
+    Returns the number of triggers successfully processed.
+    """
+    from sqlalchemy import select as _select
+
+    from agentcore.services.database.models.trigger_config.model import TriggerConfigTable
+
+    rows = (
+        await session.execute(
+            _select(TriggerConfigTable).where(TriggerConfigTable.deployment_id == deployment_id)
+        )
+    ).scalars().all()
+
+    n = 0
+    for t in rows:
+        try:
+            if t.is_active != active:
+                t.is_active = active
+                session.add(t)
+            if active:
+                await _register_trigger(t)
+            else:
+                await _unregister_trigger(t.id, t.trigger_type)
+            n += 1
+        except Exception as e:
+            logger.warning(
+                f"set_deployment_triggers_active(dep={deployment_id}, active={active}) "
+                f"trigger {getattr(t, 'id', None)}: {e}"
+            )
+    return n

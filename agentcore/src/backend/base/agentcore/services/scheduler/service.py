@@ -183,12 +183,16 @@ class SchedulerService(Service):
     async def _register_from_config(self, trigger_record) -> None:
         """Register a schedule from a TriggerConfigTable record."""
         config = trigger_record.trigger_config or {}
+        # Honour the UI's {"cron": ...} alias too, so legacy rows (or any config not canonicalized at
+        # write time) still schedule on the entered cron instead of silently defaulting to hourly.
+        cron_expression = config.get("cron_expression") or config.get("cron")
+        schedule_type = config.get("schedule_type") or ("cron" if cron_expression else "interval")
         await self.add_schedule(
             trigger_config_id=trigger_record.id,
             agent_id=trigger_record.agent_id,
-            schedule_type=config.get("schedule_type", "interval"),
+            schedule_type=schedule_type,
             interval_minutes=config.get("interval_minutes", 60),
-            cron_expression=config.get("cron_expression", "0 * * * *"),
+            cron_expression=cron_expression or "0 * * * *",
             environment=trigger_record.environment,
             version=trigger_record.version,
         )

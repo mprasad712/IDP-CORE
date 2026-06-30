@@ -8,7 +8,8 @@ Architecture:
     - agent_deployment_prod table: INSERT-based versioning for PROD (approval flow for developers)
     - Each deployment creates a new row with a version number (v1, v2, v3...)
     - is_active flag controls which versions are serving traffic
-    - Shadow deployment: multiple versions can be is_active=True simultaneously
+    - Single-active: publishing/activating/promoting a version deactivates the prior active
+      version(s) for that agent, in BOTH UAT and PROD (a new version supersedes the old)
     - Rollback: toggle is_active flags without creating new rows
 
 Endpoints:
@@ -100,6 +101,28 @@ async def _resolve_super_admin_user_id(
     )
     rows = (await session.exec(stmt)).all()
     return rows[0].id if rows else None
+
+
+async def _deactivate_other_active_prod_versions(session, agent_id, keep_id) -> int:
+    """Single-active PROD: deactivate every OTHER active PROD version for this agent.
+
+    Called at each site where a PROD version becomes the active/published one (admin publish,
+    republish, promote, developer-approval) so a new PROD deployment supersedes the previous one —
+    mirroring the existing UAT publish behaviour (a new version disables the prior). The is_active
+    flips are flushed into the CALLER's transaction (no commit here). Returns how many were turned
+    off. (Background monitors are superseded separately by sync_email_monitors_for_agent on publish.)
+    """
+    rows = (await session.exec(
+        select(AgentDeploymentProd).where(
+            AgentDeploymentProd.agent_id == agent_id,
+            AgentDeploymentProd.id != keep_id,
+            AgentDeploymentProd.is_active == True,  # noqa: E712
+        )
+    )).all()
+    for rec in rows:
+        rec.is_active = False
+        session.add(rec)
+    return len(rows)
 
 
 async def _validate_resources_for_prod(snapshot: dict, session) -> None:
@@ -2022,6 +2045,13 @@ async def prod_deploy_action(
                 if new_is_active is None:
                     new_is_active = False
                 changes.append("status → UNPUBLISHED")
+                # Stop this deployment's background triggers (folder/email monitors), mirroring the
+                # UAT unpublish path. Fully guarded so a trigger error can never block the unpublish.
+                try:
+                    from agentcore.services.deps import get_trigger_service
+                    await get_trigger_service().deactivate_triggers_for_deployment(session, record.id)
+                except Exception as _trig_err:
+                    logger.warning(f"Trigger deactivation failed for unpublished PROD deployment {record.id}: {_trig_err}")
 
             elif new_status == "PUBLISHED":
                 if current_status_val != "UNPUBLISHED":
@@ -2030,7 +2060,8 @@ async def prod_deploy_action(
                         detail=f"Cannot set status to PUBLISHED from '{current_status_val}'. "
                                f"Only UNPUBLISHED records can be republished.",
                     )
-                # Shadow deployment: keep other active versions running.
+                # Single-active PROD: republishing this version supersedes the other active ones.
+                await _deactivate_other_active_prod_versions(session, record.agent_id, record.id)
 
                 record.status = DeploymentPRODStatusEnum.PUBLISHED
                 if new_is_active is None:
@@ -2612,8 +2643,8 @@ async def publish_agent(
                 agent.lifecycle_status = LifecycleStatusEnum.PUBLISHED
                 session.add(agent)
 
-                # Shadow deployment: keep previous versions active so
-                # multiple versions can run side-by-side.
+                # Single-active PROD: a new version supersedes the previous ones (mirrors UAT).
+                await _deactivate_other_active_prod_versions(session, agent_id, new_record.id)
 
                 await session.commit()
                 await session.refresh(new_record)

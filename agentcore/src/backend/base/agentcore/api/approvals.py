@@ -1748,9 +1748,6 @@ async def approve_agent(
         agent.lifecycle_status = LifecycleStatusEnum.PUBLISHED
         session.add(agent)
 
-    # Shadow deployment: keep previous versions active so
-    # multiple versions can run side-by-side.
-
     if req.requested_by and req.requested_by != current_user.id:
         await upsert_approval_notification(
             session,
@@ -1936,6 +1933,14 @@ async def approve_agent(
                 f"Please retry the approval or contact support."
             ),
         )
+
+    # Single-active PROD: now that migration has SUCCEEDED (the failure path raised above), supersede
+    # the prior active PROD versions. Doing it here — not before the migration — means a migration
+    # failure leaves the previous version still serving instead of leaving nothing active.
+    from agentcore.api.publish import _deactivate_other_active_prod_versions
+    await _deactivate_other_active_prod_versions(session, deployment.agent_id, deployment.id)
+    await session.commit()
+
     # ─── HTTP notify (only if guardrail promotion succeeded) ──
     guardrails_ready = all(g.ready for g in guardrail_promotions) if guardrail_promotions else True
     rag_ready = not pinecone_migration_failed and not neo4j_migration_failed

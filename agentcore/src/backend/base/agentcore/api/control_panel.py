@@ -913,6 +913,30 @@ async def toggle_agent_field(
             else:
                 remove_manifest_entry(deployment_id=str(dep.id))
 
+        # ── Start/stop the agent's background monitors+schedules with its live state ──
+        # An agent fetches email / polls folders only while it is LIVE (active AND enabled). So
+        # Stop or Disable unregisters its triggers and persists is_active=False (they won't respawn
+        # on the next backend restart); Start while enabled (or Enable while active) re-registers
+        # them. Guarded + committed separately so a trigger-sync failure can never fail the toggle.
+        if body.field in (ToggleField.IS_ACTIVE, ToggleField.IS_ENABLED):
+            try:
+                from agentcore.api.triggers import set_deployment_triggers_active
+
+                live = bool(dep.is_active and dep.is_enabled)
+                n = await set_deployment_triggers_active(session, dep.id, live)
+                await session.commit()
+                if n:
+                    logger.info(
+                        f"Control-panel toggle: {'registered' if live else 'unregistered'} "
+                        f"{n} trigger(s) for deployment {dep.id} (live={live})"
+                    )
+            except Exception as trig_err:
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
+                logger.warning(f"Control-panel toggle: trigger sync failed for {dep.id}: {trig_err}")
+
         return ToggleResponse(
             deploy_id=dep.id,
             field=body.field.value,
@@ -1505,6 +1529,12 @@ async def promote_uat_to_prod(
                 await session.commit()
 
         if is_admin:
+            # Single-active PROD: now that migration has SUCCEEDED above (the failure path raises
+            # earlier), supersede the prior active PROD versions — so a migration failure leaves the
+            # previous version still serving instead of leaving nothing active.
+            from agentcore.api.publish import _deactivate_other_active_prod_versions
+            await _deactivate_other_active_prod_versions(session, uat_dep.agent_id, new_record.id)
+            await session.commit()
             try:
                 await sync_agent_registry(
                     session=session,
