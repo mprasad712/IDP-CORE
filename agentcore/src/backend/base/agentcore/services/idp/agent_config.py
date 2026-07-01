@@ -52,6 +52,8 @@ MODE_NAMED = "named_config"
 class ResolvedPipelineConfig:
     model_id: str | None
     extraction_mode: str  # MODE_DYNAMIC | MODE_NAMED
+    # NOTE: classify_model_id is defaulted below (in the defaults block) so it can't precede
+    # the remaining non-default fields — see ``classify_model_id: str | None = None``.
     prompt: str | None
     config_name: str | None
     field_config_id: UUID | None
@@ -61,6 +63,8 @@ class ResolvedPipelineConfig:
     first_n_pages: int
     page_range_start: int
     page_range_end: int
+    # Classifier may target its own model (SLM/local); else shares the extraction model_id.
+    classify_model_id: str | None = None
     # detector
     allowed_extensions: set[str] = field(default_factory=set)
     skip_unmatched: bool = True
@@ -153,6 +157,27 @@ def _llm_node_model_uuid(node: dict | None) -> str | None:
         return None
 
 
+def _direct_model_uuid(node: dict | None) -> str | None:
+    """UUID chosen directly on an IDP node via the IDPModelDropdown (template key ``model_id``).
+
+    The dropdown stores the app-standard ``"display | model_name | uuid"`` string, so the UUID is
+    the LAST ``|``-segment. A bare UUID (direct entry) is also accepted. Returns the canonical UUID
+    string, or None if empty / not a valid UUID (so the caller keeps resolving)."""
+    raw = _field(node, "model_id")
+    if not raw or not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    try:
+        return str(UUID(raw))  # bare UUID
+    except (ValueError, TypeError):
+        pass
+    candidate = raw.rsplit("|", 1)[-1].strip()
+    try:
+        return str(UUID(candidate))
+    except (ValueError, TypeError):
+        return None
+
+
 def _resolve_model_id_from_graph(data: dict | None) -> str | None:
     """Resolve the model registry UUID for the extraction run.
 
@@ -164,6 +189,12 @@ def _resolve_model_id_from_graph(data: dict | None) -> str | None:
       2. else the first LLM node that carries a valid model uuid (handles the common single-model
          case where only one of the duplicate nodes was filled).
     """
+    # 0. Model chosen directly on the extractor node via the IDPModelDropdown (highest priority;
+    #    empty -> fall through to the connected "Large Language Model" node logic below).
+    direct = _direct_model_uuid(_find_node(data, _N_EXTRACTOR))
+    if direct:
+        return direct
+
     llm_nodes = _find_nodes(data, _N_MODEL)
     if not llm_nodes:
         return None
@@ -380,6 +411,8 @@ async def resolve_pipeline_config(
     # ── Differentiator toggles: a canvas node's PRESENCE enables the feature; idp_agent.extra
     # is a fallback/override (so API/test config and on-the-fly toggling still work). ──
     classifier_node = _find_node(data, _N_CLASSIFIER)
+    # A Document Classifier node may target its own model (SLM/local); else share extraction's.
+    classify_model_id = _direct_model_uuid(classifier_node) or model_id
     detection_node = _find_node(data, _N_DETECTION)
     math_node = _find_node(data, _N_MATH)
     confidence_router_node = _find_node(data, _N_CONFIDENCE_ROUTER)
@@ -428,6 +461,7 @@ async def resolve_pipeline_config(
 
     return ResolvedPipelineConfig(
         model_id=model_id,
+        classify_model_id=classify_model_id,
         extraction_mode=mode,
         prompt=prompt,
         config_name=config_name,

@@ -28,7 +28,9 @@ API_KEY_REQUIRED_PROVIDERS = {
     "openai",
     "azure",
     "azure_openai",
-    "openai_compatible",
+    # "openai_compatible" intentionally omitted: self-hosted / local OpenAI-compatible
+    # endpoints (Ollama, vLLM, LM Studio, TGI) may run keyless. Loosening only — the provider
+    # applies its own `api_key or "not-needed"` fallback at call time.
     "groq",
     "anthropic",
     "google",
@@ -208,7 +210,10 @@ async def update_model(
     plain_key = update_fields.pop("api_key", None)
     incoming_provider_config = update_fields.pop("provider_config", None)
 
-    if (row.provider or "").strip().lower() in API_KEY_REQUIRED_PROVIDERS:
+    # Validate against the TARGET provider (a keyless openai_compatible model must not be
+    # switched to a frontier provider without supplying a key).
+    target_provider = (update_fields.get("provider") or row.provider or "").strip().lower()
+    if target_provider in API_KEY_REQUIRED_PROVIDERS:
         existing_enc = (row.provider_config or {}).get("api_key_encrypted")
         has_key = bool(plain_key) or bool(row.api_key_secret_ref) or bool(existing_enc)
         if not has_key:

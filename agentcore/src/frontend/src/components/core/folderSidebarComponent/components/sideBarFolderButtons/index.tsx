@@ -538,6 +538,15 @@ const SideBarFoldersButtonsComponent = ({
                 </SidebarMenuItem>
               )}
 
+              {can("view_models") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/local-models")} onClick={() => _navigate("/local-models")} className={navBtn}>
+                    <ForwardedIconComponent name="Server" className="h-4 w-4 flex-shrink-0" />
+                    {t("Local & Self-Hosted Models")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+
               {/* ─ Platform ─ */}
               {(can("view_control_panel") || can("view_connector_page") || can("view_packages_page") || can("view_release_management_page")) && (
                 <SectionLabel label="Platform" />

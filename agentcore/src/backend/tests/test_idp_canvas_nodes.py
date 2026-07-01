@@ -135,6 +135,76 @@ async def test_resolve_pipeline_config_from_canvas_nodes():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 1b. On-node model_id selection (IDPModelDropdown) — highest priority, backward compat
+# ─────────────────────────────────────────────────────────────────────────────
+
+_UUID_A = "11111111-1111-1111-1111-111111111111"  # chosen directly on the IDP node
+_UUID_B = "22222222-2222-2222-2222-222222222222"  # legacy "Large Language Model" node
+_UUID_C = "33333333-3333-3333-3333-333333333333"  # classifier's own model
+
+
+def _agent_with_nodes(nodes):
+    class MockBaseAgent:
+        def __init__(self):
+            self.id = uuid4()
+            self.data = {"nodes": nodes}
+    base = MockBaseAgent()
+    idp = IdpAgent(
+        agent_id=base.id,
+        extraction_mode="dynamic_prompting",
+        default_rule_action="pending_review",
+        extra={},
+    )
+    return base, idp
+
+
+def _llm_node(uuid):
+    return {"data": {"node": {"display_name": "Large Language Model",
+                              "template": {"registry_model": {"value": f"x | x | {uuid}"}}}}}
+
+
+def _extractor(model_id_value=None):
+    tmpl = {"extraction_mode": {"value": "dynamic_prompt"}, "prompt": {"value": "Extract."}}
+    if model_id_value is not None:
+        tmpl["model_id"] = {"value": model_id_value}
+    return {"data": {"node": {"display_name": "AI Field Extractor", "template": tmpl}}}
+
+
+@pytest.mark.anyio
+async def test_extractor_model_id_wins_over_llm_node():
+    # Dropdown stores the app-standard "display · badges (provider) | model_name | uuid" string.
+    label = f"Local Llama · SLM (openai_compatible) | llama3.1 | {_UUID_A}"
+    base, idp = _agent_with_nodes([_llm_node(_UUID_B), _extractor(label)])
+    cfg = await resolve_pipeline_config(None, idp, base)
+    assert cfg.model_id == _UUID_A
+
+
+@pytest.mark.anyio
+async def test_extractor_model_id_accepts_bare_uuid():
+    base, idp = _agent_with_nodes([_llm_node(_UUID_B), _extractor(_UUID_A)])
+    cfg = await resolve_pipeline_config(None, idp, base)
+    assert cfg.model_id == _UUID_A
+
+
+@pytest.mark.anyio
+async def test_no_model_id_falls_back_to_llm_node_and_shares_classify():
+    base, idp = _agent_with_nodes([_llm_node(_UUID_B), _extractor(None)])
+    cfg = await resolve_pipeline_config(None, idp, base)
+    assert cfg.model_id == _UUID_B            # backward compatible: legacy path still resolves
+    assert cfg.classify_model_id == _UUID_B   # classifier shares the extraction model by default
+
+
+@pytest.mark.anyio
+async def test_classifier_node_can_target_its_own_model():
+    classifier = {"data": {"node": {"display_name": "Document Classifier",
+                                    "template": {"model_id": {"value": _UUID_C}}}}}
+    base, idp = _agent_with_nodes([_llm_node(_UUID_B), _extractor(None), classifier])
+    cfg = await resolve_pipeline_config(None, idp, base)
+    assert cfg.model_id == _UUID_B            # extraction uses the LLM node
+    assert cfg.classify_model_id == _UUID_C   # classification uses its own model
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 2. Text splitting with Overlap tests
 # ─────────────────────────────────────────────────────────────────────────────
 

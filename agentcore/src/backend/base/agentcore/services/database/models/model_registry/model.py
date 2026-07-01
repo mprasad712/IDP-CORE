@@ -220,7 +220,20 @@ class ModelRegistryRead(BaseModel):
     @classmethod
     def from_orm_model(cls, row: ModelRegistry) -> "ModelRegistryRead":
         obj = cls.model_validate(row)
-        object.__setattr__(obj, "_has_api_key", bool(row.api_key_secret_ref))
+        pc = row.provider_config or {}
+        # Never expose secret material or storage hints in API responses; strip them
+        # from a COPY so the ORM row / DB is untouched. Mirrors the model-service
+        # sanitizer (services/model-service/app/models/registry.py). Any other keys
+        # (e.g. the nested "self_hosted" marker, "custom_headers") are preserved.
+        if pc:
+            sanitized = {
+                k: v for k, v in pc.items()
+                if k not in ("api_key_encrypted", "api_key_source")
+            }
+            object.__setattr__(obj, "provider_config", sanitized or None)
+        # A locally-encrypted key (local mode, no Key Vault) also counts as "has a key".
+        has_local_key = bool(pc.get("api_key_encrypted"))
+        object.__setattr__(obj, "_has_api_key", bool(row.api_key_secret_ref) or has_local_key)
         return obj
 
 

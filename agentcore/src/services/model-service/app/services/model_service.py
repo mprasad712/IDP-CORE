@@ -99,7 +99,11 @@ async def _resolve_registry_config(request: ChatCompletionRequest) -> ChatComple
     # Build merged provider_config from registry data
     provider_config = dict(config.get("provider_config", {}))
     api_key = config.get("api_key", "")
-    if not api_key:
+    provider = (config.get("provider") or "").strip().lower()
+    # Self-hosted / local OpenAI-compatible endpoints (Ollama, vLLM, LM Studio, TGI) may run
+    # keyless — the provider applies its own `api_key or "not-needed"` fallback. All other
+    # providers still require a stored key.
+    if not api_key and provider != "openai_compatible":
         logger.error(
             "API key missing for registry model %s (provider=%s, model=%s). "
             "Re-save the model in the Model Registry.",
@@ -109,7 +113,7 @@ async def _resolve_registry_config(request: ChatCompletionRequest) -> ChatComple
             f"API key not found for registry model {registry_model_id}. "
             "Open the Model Registry, find this model, enter the API key, and save."
         )
-    provider_config["api_key"] = api_key
+    provider_config["api_key"] = api_key or ""
     if config.get("base_url"):
         provider_config["base_url"] = config["base_url"]
         # Azure needs azure_endpoint too

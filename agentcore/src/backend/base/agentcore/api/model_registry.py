@@ -113,7 +113,10 @@ def _normalize_visibility_scope(value: str | None) -> str:
 
 
 async def _validate_model_connection_before_create(body: ModelRegistryCreate) -> None:
-    if not str(body.api_key or "").strip():
+    # Self-hosted / local OpenAI-compatible endpoints (Ollama, vLLM, LM Studio, TGI) may
+    # run keyless — don't force an API key for them. Frontier providers still require one.
+    key_optional = (body.provider or "").strip().lower() == "openai_compatible"
+    if not key_optional and not str(body.api_key or "").strip():
         raise HTTPException(status_code=400, detail="API key is required to create a model")
 
     payload = TestConnectionRequest(

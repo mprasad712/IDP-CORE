@@ -57,6 +57,10 @@ interface EditModelModalProps {
   onOpenChange: (open: boolean) => void;
   model?: ModelType | null;
   modelType?: ModelTypeFilter;
+  /** Local & Self-Hosted Models flow: pins provider to openai_compatible, makes the API key
+   *  optional, and captures the self_hosted (SLM / local LLM) metadata. Default false keeps the
+   *  Model Catalogue behaviour byte-for-byte unchanged. */
+  selfHostedMode?: boolean;
 }
 
 export default function EditModelModal({
@@ -64,6 +68,7 @@ export default function EditModelModal({
   onOpenChange,
   model,
   modelType = "llm",
+  selfHostedMode = false,
 }: EditModelModalProps) {
   const { t } = useTranslation();
   const { role } = useContext(AuthContext);
@@ -108,6 +113,12 @@ export default function EditModelModal({
   const [customHeaders, setCustomHeaders] = useState("");
   const [showInOrchestrator, setShowInOrchestrator] = useState(true);
   const [showInAgent, setShowInAgent] = useState(true);
+
+  // Self-hosted (local LLM / SLM) metadata — only used/shown when selfHostedMode is true.
+  const [selfHostedKind, setSelfHostedKind] = useState<"slm" | "local_llm">("slm");
+  const [fineTuned, setFineTuned] = useState(false);
+  const [baseModelName, setBaseModelName] = useState("");
+  const [selfHostedNotes, setSelfHostedNotes] = useState("");
 
   // Default params (LLM)
   const [temperature, setTemperature] = useState<number | "">("");
@@ -180,6 +191,12 @@ export default function EditModelModal({
       setShowInOrchestrator(si.includes("orchestrator"));
       setShowInAgent(si.includes("agent"));
 
+      const sh = (pc as any).self_hosted ?? {};
+      setSelfHostedKind(sh.kind === "local_llm" ? "local_llm" : "slm");
+      setFineTuned(!!sh.fine_tuned);
+      setBaseModelName(sh.base_model ?? "");
+      setSelfHostedNotes(sh.notes ?? "");
+
       const dp = model.default_params ?? {};
       setTemperature(dp.temperature ?? "");
       setMaxTokens(dp.max_tokens ?? "");
@@ -187,7 +204,11 @@ export default function EditModelModal({
     } else {
       // Reset for create
       setDisplayName("");
-      setProvider("openai");
+      setProvider(selfHostedMode ? "openai_compatible" : "openai");
+      setSelfHostedKind("slm");
+      setFineTuned(false);
+      setBaseModelName("");
+      setSelfHostedNotes("");
       setModelName("");
       setDescription("");
       setApiKey("");
@@ -211,7 +232,7 @@ export default function EditModelModal({
     }
     setTestResult(null);
     setTestPayloadKey(null);
-  }, [model, open]);
+  }, [model, open, selfHostedMode]);
 
   useEffect(() => {
     if (!open) return;
@@ -309,6 +330,15 @@ export default function EditModelModal({
       } catch {
         /* ignore parse errors */
       }
+    }
+    if (selfHostedMode && provider === "openai_compatible") {
+      config.self_hosted = {
+        is_self_hosted: true,
+        kind: selfHostedKind,
+        fine_tuned: fineTuned,
+        base_model: baseModelName || null,
+        notes: selfHostedNotes || null,
+      };
     }
     return Object.keys(config).length ? config : undefined;
   };
@@ -596,7 +626,9 @@ export default function EditModelModal({
     updateMutation.isPending ||
     promoteMutation.isPending ||
     visibilityMutation.isPending;
-  const canTest = !!modelName && !!apiKey;
+  // Self-hosted / local OpenAI-compatible endpoints may be keyless; they still need a base URL.
+  const apiKeyOptional = provider === "openai_compatible";
+  const canTest = !!modelName && (apiKeyOptional ? !!baseUrl : !!apiKey);
 
   if (!open) return null;
 
@@ -644,21 +676,30 @@ export default function EditModelModal({
                   onChange={(e) => setDisplayName(e.target.value)}
                 />
               </div>
-              <div>
-                <Label>{t("Provider")} *</Label>
-                <select
-                  required
-                  value={provider}
-                  onChange={(e) => setProvider(e.target.value)}
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                >
-                  {PROVIDERS.map((p) => (
-                    <option key={p.value} value={p.value}>
-                      {p.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {selfHostedMode ? (
+                <div>
+                  <Label>{t("Provider")}</Label>
+                  <div className="flex h-10 w-full items-center rounded-md border border-input bg-muted px-3 py-2 text-sm text-muted-foreground">
+                    {t("Self-Hosted (OpenAI-compatible)")}
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <Label>{t("Provider")} *</Label>
+                  <select
+                    required
+                    value={provider}
+                    onChange={(e) => setProvider(e.target.value)}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  >
+                    {PROVIDERS.map((p) => (
+                      <option key={p.value} value={p.value}>
+                        {p.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
 
             <div>
@@ -689,11 +730,17 @@ export default function EditModelModal({
                 />
               </div>
               <div>
-                <Label>{t("API Key")} {!isEditMode && "*"}</Label>
+                <Label>{t("API Key")} {!isEditMode && !apiKeyOptional && "*"}</Label>
                 <Input
                   type="password"
-                  required={!isEditMode}
-                  placeholder={isEditMode ? t("(unchanged)") : t("sk-...")}
+                  required={!isEditMode && !apiKeyOptional}
+                  placeholder={
+                    isEditMode
+                      ? t("(unchanged)")
+                      : apiKeyOptional
+                        ? t("Optional for local / self-hosted")
+                        : t("sk-...")
+                  }
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
                 />
@@ -785,6 +832,54 @@ export default function EditModelModal({
                   value={customHeaders}
                   onChange={(e) => setCustomHeaders(e.target.value)}
                 />
+              </div>
+            )}
+
+            {/* Self-hosted (local LLM / SLM) metadata */}
+            {selfHostedMode && provider === "openai_compatible" && (
+              <div className="space-y-4">
+                <div>
+                  <Label>{t("Model Kind")}</Label>
+                  <select
+                    value={selfHostedKind}
+                    onChange={(e) =>
+                      setSelfHostedKind(e.target.value as "slm" | "local_llm")
+                    }
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  >
+                    <option value="slm">{t("SLM (Small Language Model)")}</option>
+                    <option value="local_llm">{t("Local LLM")}</option>
+                  </select>
+                </div>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={fineTuned}
+                    onChange={(e) => setFineTuned(e.target.checked)}
+                  />
+                  {t("This is a fine-tuned model")}
+                </label>
+                {fineTuned && (
+                  <div className="space-y-4">
+                    <div>
+                      <Label>{t("Base Model")}</Label>
+                      <Input
+                        placeholder={t("e.g., llama-3.1-8b")}
+                        value={baseModelName}
+                        onChange={(e) => setBaseModelName(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <Label>{t("Fine-tune Notes")}</Label>
+                      <Textarea
+                        rows={2}
+                        placeholder={t("Dataset, version, or other notes")}
+                        value={selfHostedNotes}
+                        onChange={(e) => setSelfHostedNotes(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </fieldset>

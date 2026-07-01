@@ -115,6 +115,27 @@ function dropdownField(name: string, display_name: string, options: string[], va
   };
 }
 
+// Registry-backed model picker (rendered by IDPModelDropdown via the `idp_model_fetch` flag).
+// Stores "display | model_name | uuid"; the backend resolves the UUID (agent_config.py).
+function modelField(name: string, display_name: string, info = "") {
+  return {
+    _input_type: "StrInput",
+    idp_model_fetch: true,
+    advanced: false,
+    display_name,
+    dynamic: false,
+    info,
+    list: false,
+    name,
+    placeholder: "Select a model...",
+    required: false,
+    show: true,
+    title_case: false,
+    type: "str",
+    value: "",
+  };
+}
+
 function promptField(name: string, display_name: string, value = "", info = "") {
   return {
     _input_type: "MessageTextInput",
@@ -694,7 +715,7 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 0,
       base_classes: ["Data"],
-      field_order: ["document", "llm", "config_name", "config_names", "model_name"],
+      field_order: ["model_id", "document", "llm", "config_name", "config_names", "model_name"],
       template: {
         document: {
           _input_type: "HandleInput",
@@ -759,6 +780,7 @@ export const IDP_NODES: IDPData = {
           type: "str",
           value: [],
         },
+        model_id: modelField("model_id", "Model", "Pick a registered model (frontier LLM, local LLM, or SLM). Overrides any connected Language Model node."),
         model_name: strField("model_name", "LLM Model", "gpt-4o", "Model to use when no model node is connected.", false, true),
       },
       outputs: [output("extracted_data", "Extracted Data", ["Data"])],
@@ -923,7 +945,7 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 0,
       base_classes: ["Message"],
-      field_order: ["document", "llm", "document_types", "confidence_threshold", "model_name"],
+      field_order: ["model_id", "document", "llm", "document_types", "confidence_threshold", "model_name"],
       template: {
         document: {
           _input_type: "MessageInput",
@@ -979,6 +1001,7 @@ export const IDP_NODES: IDPData = {
           "Predictions below this threshold are marked as 'unknown'.",
           true,
         ),
+        model_id: modelField("model_id", "Model", "Pick a registered model (frontier LLM, local LLM, or SLM). Overrides any connected Language Model node."),
         model_name: strField(
           "model_name",
           "LLM Model",

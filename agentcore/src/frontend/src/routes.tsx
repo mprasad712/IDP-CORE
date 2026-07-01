@@ -37,6 +37,7 @@ const AgentBuilderPage       = lazy(() => import("./pages/AgentBuilderPage"));
 const ViewPage               = lazy(() => import("./pages/ViewPage"));
 const DashboardAdmin         = lazy(() => import("./pages/DashboardPage"));
 const ModelCatalogue         = lazy(() => import("./pages/ModelCatalogue"));
+const LocalModels            = lazy(() => import("./pages/LocalModels"));
 const AgentCatalogueView     = lazy(() => import("./pages/AgentCatalogue"));
 const WorkflowsView          = lazy(() => import("./pages/WorkflowPage"));
 const ConnectorsCatalogueView = lazy(() => import("./pages/ConnectorsCatalogue"));
@@ -185,6 +186,14 @@ const router = createBrowserRouter(
                     element={
                       <ProtectedPermissionRoute permission="view_models">
                         <Suspense fallback={<PageLoader />}><ModelCatalogue /></Suspense>
+                      </ProtectedPermissionRoute>
+                    }
+                  />
+                  <Route
+                    path="local-models"
+                    element={
+                      <ProtectedPermissionRoute permission="view_models">
+                        <Suspense fallback={<PageLoader />}><LocalModels /></Suspense>
                       </ProtectedPermissionRoute>
                     }
                   />

@@ -183,10 +183,12 @@ class ModelRegistryRead(BaseModel):
         pconf = row.provider_config or {}
         has_key = bool(row.api_key_secret_ref) or bool(pconf.get("api_key_encrypted"))
         object.__setattr__(obj, "_has_api_key", has_key)
-        # Never expose the locally-encrypted key blob in API responses.
-        if obj.provider_config and "api_key_encrypted" in obj.provider_config:
+        # Never expose secret material or storage hints in API responses.
+        if obj.provider_config:
             obj.provider_config = {
-                k: v for k, v in obj.provider_config.items() if k != "api_key_encrypted"
+                k: v
+                for k, v in obj.provider_config.items()
+                if k not in ("api_key_encrypted", "api_key_source")
             }
         return obj
 

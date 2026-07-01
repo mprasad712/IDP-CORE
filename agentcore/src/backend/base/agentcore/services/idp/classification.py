@@ -70,7 +70,8 @@ async def classify_and_persist(
         raise ValueError(f"Base agent {idp_agent.agent_id} not found")
 
     cfg = await resolve_pipeline_config(session, idp_agent, base_agent)
-    model_id = cfg.model_id
+    # A Document Classifier node may target its own model (SLM/local); else share extraction's.
+    model_id = cfg.classify_model_id or cfg.model_id
     if not model_id:
         raise ValueError("No model configured in agent graph for document classification")
 
