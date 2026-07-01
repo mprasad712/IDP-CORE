@@ -296,50 +296,88 @@ async def sync_model_costs(session: AsyncSession) -> None:
     from sqlmodel import select
     from agentcore.services.database.models.model_registry.model import ModelRegistry
 
-    langfuse_db_url = os.getenv("LANGFUSE_DB_URL", "").strip()
-    if not langfuse_db_url:
-        logger.warning("LANGFUSE_DB_URL is not set, skipping model cost sync")
-        return
+    rows = []
+
+    # 1. Try to query Clickhouse first (used by newer Langfuse versions for observations)
+    clickhouse_url = os.getenv("CLICKHOUSE_URL", "http://localhost:8123").strip()
+    clickhouse_user = os.getenv("CLICKHOUSE_USER", "").strip()
+    clickhouse_password = os.getenv("CLICKHOUSE_PASSWORD", "").strip()
+
+    if not clickhouse_url.startswith("http"):
+        clickhouse_url = f"http://{clickhouse_url}"
 
     try:
-        # Query total generation costs from Langfuse observations table
-        # We use sync create_engine since LANGFUSE_DB_URL is typically a standard postgresql url (e.g. using psycopg2)
-        engine = create_engine(langfuse_db_url, future=True)
-        query = """
+        import httpx
+        # Clickhouse query to get total cost grouped by model and registry_model_id
+        ch_query = """
             SELECT 
-                COALESCE(
-                    metadata->>'registry_model_id', 
-                    metadata->'invocation_params'->>'registry_model_id'
-                ) AS registry_model_id,
-                model AS model_name,
-                SUM(COALESCE(calculated_total_cost, total_cost, 0)) AS total_cost
+                metadata['registry_model_id'] AS registry_model_id,
+                provided_model_name AS model_name,
+                SUM(total_cost) AS total_cost
             FROM observations
-            WHERE type = 'GENERATION'
-            GROUP BY registry_model_id, model
+            WHERE type = 'GENERATION' AND provided_model_name IS NOT NULL
+            GROUP BY registry_model_id, model_name
+            FORMAT JSON
         """
-        with engine.connect() as conn:
-            result = conn.execute(text(query))
-            rows = result.fetchall()
-        engine.dispose()
+        auth = None
+        if clickhouse_user and clickhouse_password:
+            auth = (clickhouse_user, clickhouse_password)
+
+        resp = httpx.post(clickhouse_url, auth=auth, data=ch_query, timeout=10.0)
+        if resp.status_code == 200:
+            data = resp.json().get("data", [])
+            for item in data:
+                rows.append((
+                    item.get("registry_model_id") or "",
+                    item.get("model_name") or "",
+                    float(item.get("total_cost") or 0.0)
+                ))
+            logger.info("Successfully fetched %d rows from Clickhouse observations", len(rows))
     except Exception as e:
-        logger.error("Failed to query Langfuse database for model costs: %s", e)
-        return
+        logger.debug("Failed to query Clickhouse for model costs: %s", e)
+
+    # 2. Fall back to Postgres if Clickhouse query returned no data or failed
+    if not rows:
+        langfuse_db_url = os.getenv("LANGFUSE_DB_URL", "").strip()
+        if langfuse_db_url:
+            try:
+                engine = create_engine(langfuse_db_url, future=True)
+                pg_query = """
+                    SELECT 
+                        COALESCE(
+                            metadata->>'registry_model_id', 
+                            metadata->'invocation_params'->>'registry_model_id'
+                        ) AS registry_model_id,
+                        model AS model_name,
+                        SUM(COALESCE(calculated_total_cost, total_cost, 0)) AS total_cost
+                    FROM observations
+                    WHERE type = 'GENERATION'
+                    GROUP BY registry_model_id, model
+                """
+                with engine.connect() as conn:
+                    result = conn.execute(text(pg_query))
+                    for r in result.fetchall():
+                        rows.append((
+                            r[0] or "",
+                            r[1] or "",
+                            float(r[2] or 0.0)
+                        ))
+                engine.dispose()
+                logger.info("Successfully fetched %d rows from Postgres observations fallback", len(rows))
+            except Exception as e:
+                logger.error("Failed to query Langfuse Postgres database for model costs: %s", e)
 
     # Aggregate costs
     costs_by_id = {}
     costs_by_name = {}
-    for row in rows:
-        reg_id = row.registry_model_id
-        model_name = row.model_name
-        cost = float(row.total_cost or 0)
-        
-        if reg_id:
+    for r_id, model_name, total_cost in rows:
+        if r_id:
             try:
-                costs_by_id[UUID(reg_id)] = cost
+                costs_by_id[UUID(r_id)] = total_cost
             except ValueError:
                 pass
         if model_name:
-            costs_by_name[model_name] = costs_by_name.get(model_name, 0.0) + cost
+            costs_by_name[model_name] = costs_by_name.get(model_name, 0.0) + total_cost
 
     # Update local model registry database
     try:
@@ -356,14 +394,15 @@ async def sync_model_costs(session: AsyncSession) -> None:
             # Fall back to model_name match
             elif model.model_name in costs_by_name:
                 cost = costs_by_name[model.model_name]
-            
+
             if model.current_cost != cost:
                 model.current_cost = cost
                 session.add(model)
                 updated_count += 1
-                
+
         if updated_count > 0:
             await session.commit()
-            logger.info("Successfully synced cost for %d models from Langfuse", updated_count)
+            logger.info("Successfully synced cost for %d models", updated_count)
     except Exception as e:
         logger.error("Failed to update model registry costs in database: %s", e)
+
