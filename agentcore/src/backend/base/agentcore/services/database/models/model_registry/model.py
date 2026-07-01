@@ -94,6 +94,8 @@ class ModelRegistry(SQLModel, table=True):
     show_in: list[str] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
 
     is_active: bool = Field(default=True)
+    cost_limit: float | None = Field(default=None, nullable=True)
+    current_cost: float = Field(default=0.0, nullable=False)
     created_by: str | None = Field(default=None, nullable=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -124,6 +126,7 @@ class ModelRegistryCreate(BaseModel):
     default_params: dict | None = None
     show_in: list[str] | None = None
     is_active: bool = True
+    cost_limit: float | None = None
     created_by: str | None = None
     created_by_id: UUID | None = None
     approval_status: str = ModelApprovalStatus.APPROVED.value
@@ -157,6 +160,8 @@ class ModelRegistryUpdate(BaseModel):
     default_params: dict | None = None
     show_in: list[str] | None = None
     is_active: bool | None = None
+    cost_limit: float | None = None
+    current_cost: float | None = None
     approval_status: str | None = None
     requested_by: UUID | None = None
     request_to: UUID | None = None
@@ -202,6 +207,8 @@ class ModelRegistryRead(BaseModel):
     default_params: dict | None = None
     show_in: list[str] | None = None
     is_active: bool
+    cost_limit: float | None = None
+    current_cost: float = 0.0
     created_by: str | None = None
     created_by_email: str | None = None
     created_at: datetime

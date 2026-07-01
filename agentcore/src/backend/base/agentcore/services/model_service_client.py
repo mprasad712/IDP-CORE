@@ -608,6 +608,30 @@ class MicroserviceChatModel(BaseChatModel):
     def _llm_type(self) -> str:
         return "microservice-chat"
 
+    def invoke(
+        self,
+        input: Any,
+        config: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        config = config or {}
+        config.setdefault("metadata", {})
+        if self.registry_model_id:
+            config["metadata"]["registry_model_id"] = self.registry_model_id
+        return super().invoke(input, config, **kwargs)
+
+    async def ainvoke(
+        self,
+        input: Any,
+        config: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        config = config or {}
+        config.setdefault("metadata", {})
+        if self.registry_model_id:
+            config["metadata"]["registry_model_id"] = self.registry_model_id
+        return await super().ainvoke(input, config, **kwargs)
+
     @property
     def _identifying_params(self) -> dict[str, Any]:
         return {
@@ -731,7 +755,14 @@ class MicroserviceChatModel(BaseChatModel):
                 headers=_headers(self.service_api_key),
                 json=payload,
             )
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                try:
+                    detail = e.response.json().get("detail", str(e))
+                except Exception:
+                    detail = e.response.text or str(e)
+                raise ValueError(detail) from e
 
         return self._parse_response(resp.json())
 
@@ -752,7 +783,14 @@ class MicroserviceChatModel(BaseChatModel):
                 headers=_headers(self.service_api_key),
                 json=payload,
             )
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                try:
+                    detail = e.response.json().get("detail", str(e))
+                except Exception:
+                    detail = e.response.text or str(e)
+                raise ValueError(detail) from e
 
         return self._parse_response(resp.json())
 
@@ -780,7 +818,14 @@ class MicroserviceChatModel(BaseChatModel):
                 headers=_headers(self.service_api_key),
                 json=payload,
             ) as resp:
-                resp.raise_for_status()
+                try:
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    try:
+                        detail = e.response.json().get("detail", str(e))
+                    except Exception:
+                        detail = e.response.text or str(e)
+                    raise ValueError(detail) from e
                 for line in resp.iter_lines():
                     if not line.startswith("data: "):
                         continue
@@ -883,7 +928,14 @@ class MicroserviceChatModel(BaseChatModel):
                 headers=_headers(self.service_api_key),
                 json=payload,
             ) as resp:
-                resp.raise_for_status()
+                try:
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    try:
+                        detail = e.response.json().get("detail", str(e))
+                    except Exception:
+                        detail = e.response.text or str(e)
+                    raise ValueError(detail) from e
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
                         continue
@@ -1015,7 +1067,14 @@ class MicroserviceEmbeddings(LCEmbeddings):
                 headers=_headers(self.service_api_key),
                 json=payload,
             )
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                try:
+                    detail = e.response.json().get("detail", str(e))
+                except Exception:
+                    detail = e.response.text or str(e)
+                raise ValueError(detail) from e
         data = resp.json()
         return [item["embedding"] for item in data.get("data", [])]
 

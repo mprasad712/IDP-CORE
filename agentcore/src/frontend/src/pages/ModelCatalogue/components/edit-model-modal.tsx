@@ -87,6 +87,7 @@ export default function EditModelModal({
   const [provider, setProvider] = useState("openai");
   const [modelName, setModelName] = useState("");
   const [description, setDescription] = useState("");
+  const [costLimit, setCostLimit] = useState<number | "">("");
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [environmentSelection, setEnvironmentSelection] = useState<"uat" | "prod" | "both">("uat");
@@ -184,6 +185,7 @@ export default function EditModelModal({
       setTemperature(dp.temperature ?? "");
       setMaxTokens(dp.max_tokens ?? "");
       setDimensions(dp.dimensions ?? "");
+      setCostLimit(model.cost_limit ?? "");
     } else {
       // Reset for create
       setDisplayName("");
@@ -208,6 +210,7 @@ export default function EditModelModal({
       setTemperature("");
       setMaxTokens("");
       setDimensions("");
+      setCostLimit("");
     }
     setTestResult(null);
     setTestPayloadKey(null);
@@ -399,6 +402,7 @@ export default function EditModelModal({
           default_params: buildDefaultParams() ?? null,
           show_in: buildShowIn(),
           is_active: isActive,
+          cost_limit: costLimit !== "" ? Number(costLimit) : null,
         };
         if (apiKey) payload.api_key = apiKey;
 
@@ -413,7 +417,8 @@ export default function EditModelModal({
           !isSameValue(payload.base_url, model.base_url ?? null) ||
           !isSameValue(payload.provider_config ?? null, originalProviderConfig) ||
           !isSameValue(payload.default_params ?? null, originalDefaultParams) ||
-          !isSameValue(payload.is_active, model.is_active);
+          !isSameValue(payload.is_active, model.is_active) ||
+          !isSameValue(payload.cost_limit ?? null, model.cost_limit ?? null);
 
         const normalizedOriginal = Array.from(new Set(effectiveOriginalEnvs)).sort();
         const normalizedDesired = Array.from(new Set(desiredEnvs)).sort();
@@ -540,6 +545,7 @@ export default function EditModelModal({
           default_params: buildDefaultParams() ?? null,
           show_in: buildShowIn(),
           is_active: isActive,
+          cost_limit: costLimit !== "" ? Number(costLimit) : null,
         };
 
         await createMutation.mutateAsync(payload);
@@ -668,6 +674,21 @@ export default function EditModelModal({
                 placeholder={t("Brief description of this model configuration")}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
+              />
+            </div>
+
+            <div>
+              <Label>{t("Cost Limit ($)")}</Label>
+              <Input
+                type="number"
+                step="any"
+                min="0"
+                placeholder={t("e.g., 10.00 (leave blank for unlimited)")}
+                value={costLimit}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setCostLimit(val === "" ? "" : Number(val));
+                }}
               />
             </div>
           </fieldset>

@@ -66,6 +66,8 @@ async def create_model(
         capabilities=data.capabilities,
         default_params=data.default_params,
         is_active=data.is_active,
+        cost_limit=data.cost_limit,
+        current_cost=0.0,
         created_by=data.created_by,
     )
 
@@ -280,3 +282,88 @@ async def _fetch_config_from_model_service(model_id: UUID) -> dict | None:
     except Exception as e:
         logger.debug("Model-service config fetch failed for %s: %s", model_id, e)
         return None
+
+
+async def sync_model_costs(session: AsyncSession) -> None:
+    """Sync model costs from the Langfuse database to the local model registry.
+
+    Queries the 'observations' table in Langfuse to find the sum of cost
+    for each model, matching by registry_model_id in metadata (or fallback model name).
+    """
+    import os
+    from uuid import UUID
+    from sqlalchemy import create_engine, text
+    from sqlmodel import select
+    from agentcore.services.database.models.model_registry.model import ModelRegistry
+
+    langfuse_db_url = os.getenv("LANGFUSE_DB_URL", "").strip()
+    if not langfuse_db_url:
+        logger.warning("LANGFUSE_DB_URL is not set, skipping model cost sync")
+        return
+
+    try:
+        # Query total generation costs from Langfuse observations table
+        # We use sync create_engine since LANGFUSE_DB_URL is typically a standard postgresql url (e.g. using psycopg2)
+        engine = create_engine(langfuse_db_url, future=True)
+        query = """
+            SELECT 
+                COALESCE(
+                    metadata->>'registry_model_id', 
+                    metadata->'invocation_params'->>'registry_model_id'
+                ) AS registry_model_id,
+                model AS model_name,
+                SUM(COALESCE(calculated_total_cost, total_cost, 0)) AS total_cost
+            FROM observations
+            WHERE type = 'GENERATION'
+            GROUP BY registry_model_id, model
+        """
+        with engine.connect() as conn:
+            result = conn.execute(text(query))
+            rows = result.fetchall()
+        engine.dispose()
+    except Exception as e:
+        logger.error("Failed to query Langfuse database for model costs: %s", e)
+        return
+
+    # Aggregate costs
+    costs_by_id = {}
+    costs_by_name = {}
+    for row in rows:
+        reg_id = row.registry_model_id
+        model_name = row.model_name
+        cost = float(row.total_cost or 0)
+        
+        if reg_id:
+            try:
+                costs_by_id[UUID(reg_id)] = cost
+            except ValueError:
+                pass
+        if model_name:
+            costs_by_name[model_name] = costs_by_name.get(model_name, 0.0) + cost
+
+    # Update local model registry database
+    try:
+        stmt = select(ModelRegistry)
+        db_result = await session.execute(stmt)
+        models = db_result.scalars().all()
+
+        updated_count = 0
+        for model in models:
+            cost = 0.0
+            # Try to match by registry_model_id first
+            if model.id in costs_by_id:
+                cost = costs_by_id[model.id]
+            # Fall back to model_name match
+            elif model.model_name in costs_by_name:
+                cost = costs_by_name[model.model_name]
+            
+            if model.current_cost != cost:
+                model.current_cost = cost
+                session.add(model)
+                updated_count += 1
+                
+        if updated_count > 0:
+            await session.commit()
+            logger.info("Successfully synced cost for %d models from Langfuse", updated_count)
+    except Exception as e:
+        logger.error("Failed to update model registry costs in database: %s", e)

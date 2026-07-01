@@ -46,6 +46,8 @@ export interface ModelType {
   default_params?: Record<string, any> | null;
   show_in?: string[] | null;
   is_active: boolean;
+  cost_limit?: number | null;
+  current_cost?: number;
   created_by?: string | null;
   created_by_email?: string | null;
   created_at?: string;
@@ -71,6 +73,7 @@ export interface ModelCreateRequest {
   default_params?: Record<string, any> | null;
   show_in?: string[] | null;
   is_active?: boolean;
+  cost_limit?: number | null;
 }
 
 export interface ModelUpdateRequest {
@@ -92,6 +95,7 @@ export interface ModelUpdateRequest {
   default_params?: Record<string, any> | null;
   show_in?: string[] | null;
   is_active?: boolean;
+  cost_limit?: number | null;
 }
 
 export interface TestConnectionRequest {

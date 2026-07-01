@@ -2487,7 +2487,14 @@ export default function AgentOrchestrator() {
               updateAgentMsg(accumulated);
             }
           } else if (eventType === "error") {
-            updateAgentMsg(data?.text || "An error occurred", true);
+            const errorMsg = data?.text || "An error occurred";
+            updateAgentMsg(errorMsg, true);
+            if (errorMsg.toLowerCase().includes("budget") || errorMsg.toLowerCase().includes("limit")) {
+              useAlertStore.getState().setErrorData?.({
+                title: t("Budget Limit Reached"),
+                list: [errorMsg],
+              });
+            }
             return false;
           } else if (eventType === "end") {
             console.warn("[Orch][end event] reasoning_content length:", (data?.reasoning_content || "").length, "accumulated len:", accumulatedReasoning.length);

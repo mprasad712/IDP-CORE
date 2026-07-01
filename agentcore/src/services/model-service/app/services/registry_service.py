@@ -105,6 +105,8 @@ async def create_model(
         default_params=data.default_params,
         show_in=data.show_in,
         is_active=data.is_active,
+        cost_limit=data.cost_limit,
+        current_cost=0.0,
         created_by=data.created_by,
         # Tenancy / RBAC fields
         org_id=data.org_id,
@@ -316,6 +318,8 @@ async def get_decrypted_config(
         "provider_config": row.provider_config or {},
         "capabilities": row.capabilities or {},
         "default_params": row.default_params or {},
+        "cost_limit": row.cost_limit,
+        "current_cost": row.current_cost,
     }
 
     if key_vault is None:

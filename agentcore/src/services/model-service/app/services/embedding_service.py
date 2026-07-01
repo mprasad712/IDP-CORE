@@ -30,6 +30,15 @@ async def _resolve_registry_config(request: EmbeddingRequest) -> EmbeddingReques
         msg = f"Registry model {registry_model_id} not found"
         raise ValueError(msg)
 
+    # Budget limit enforcement check
+    cost_limit = config.get("cost_limit")
+    current_cost = config.get("current_cost", 0.0)
+    if cost_limit is not None and current_cost >= cost_limit:
+        raise ValueError(
+            f"Model budget reached the limit for model '{config.get('model_name')}'. "
+            f"Limit: ${cost_limit:.4f}, Spent: ${current_cost:.4f}."
+        )
+
     # Build merged provider_config from registry data
     provider_config = dict(config.get("provider_config", {}))
     provider_config["api_key"] = config["api_key"]

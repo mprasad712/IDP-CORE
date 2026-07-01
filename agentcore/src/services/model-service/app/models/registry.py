@@ -61,6 +61,8 @@ class ModelRegistry(SQLModel, table=True):
     show_in: list[str] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
 
     is_active: bool = Field(default=True)
+    cost_limit: float | None = Field(default=None, nullable=True)
+    current_cost: float = Field(default=0.0, nullable=False)
     created_by: str | None = Field(default=None, nullable=True)
 
     # Tenancy / RBAC columns (shared DB — no FK constraints in microservice)
@@ -99,6 +101,7 @@ class ModelRegistryCreate(BaseModel):
     default_params: dict | None = None
     show_in: list[str] | None = None
     is_active: bool = True
+    cost_limit: float | None = None
     created_by: str | None = None
     org_id: UUID | None = None
     dept_id: UUID | None = None
@@ -126,6 +129,8 @@ class ModelRegistryUpdate(BaseModel):
     default_params: dict | None = None
     show_in: list[str] | None = None
     is_active: bool | None = None
+    cost_limit: float | None = None
+    current_cost: float | None = None
     org_id: UUID | None = None
     dept_id: UUID | None = None
     public_dept_ids: list[str] | None = None
@@ -156,6 +161,8 @@ class ModelRegistryRead(BaseModel):
     default_params: dict | None = None
     show_in: list[str] | None = None
     is_active: bool
+    cost_limit: float | None = None
+    current_cost: float = 0.0
     created_by: str | None = None
     org_id: UUID | None = None
     dept_id: UUID | None = None

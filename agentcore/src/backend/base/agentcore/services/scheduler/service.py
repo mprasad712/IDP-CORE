@@ -43,6 +43,18 @@ class SchedulerService(Service):
             self._scheduler.start()
             self._started = True
             logger.info("SchedulerService started")
+            # Register background model cost sync job
+            try:
+                self._scheduler.add_job(
+                    self._sync_model_costs_wrapper,
+                    "interval",
+                    minutes=1,
+                    id="sync_model_costs_job",
+                    replace_existing=True,
+                )
+                logger.info("Registered sync_model_costs_job to run every 1 minute")
+            except Exception as e:
+                logger.error(f"Failed to register model cost sync job: {e}")
         self.set_ready()
 
     async def teardown(self) -> None:
@@ -389,3 +401,15 @@ class SchedulerService(Service):
             prod_deployment=prod_deployment,
             uat_deployment=uat_deployment,
         )
+
+    async def _sync_model_costs_wrapper(self) -> None:
+        """Wrapper for scheduled sync of model costs from Langfuse."""
+        from agentcore.services.deps import get_db_service
+
+        try:
+            db_service = get_db_service()
+            async with db_service.with_session() as session:
+                from agentcore.services.model_registry_service import sync_model_costs
+                await sync_model_costs(session)
+        except Exception as e:
+            logger.error("Error in scheduled model cost sync wrapper: %s", e)
