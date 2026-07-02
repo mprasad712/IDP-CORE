@@ -301,6 +301,7 @@ def start_span(
     step_name: str,
     inputs: dict[str, Any] | None = None,
     observation_type: str = "span",
+    registry_model_id: str | None = None,
 ) -> None:
     """Start a child span for a pipeline step.
 
@@ -317,6 +318,9 @@ def start_span(
             "step": step_name,
             "document_id": str(ctx.document_id),
         }
+        if registry_model_id:
+            span_metadata["registry_model_id"] = registry_model_id
+
         span_context = ctx.client.start_as_current_observation(
             as_type=observation_type,
             name=step_name,
@@ -342,6 +346,7 @@ def end_span(
     usage: dict[str, Any] | None = None,
     model: str | None = None,
     error: str | None = None,
+    registry_model_id: str | None = None,
 ) -> None:
     """End a child span for a pipeline step.
 
@@ -398,6 +403,8 @@ def end_span(
         update_payload.setdefault("metadata", {})
         if isinstance(update_payload.get("metadata"), dict):
             update_payload["metadata"]["latency_ms"] = elapsed_ms
+            if registry_model_id:
+                update_payload["metadata"]["registry_model_id"] = registry_model_id
 
         if error:
             update_payload["level"] = "ERROR"

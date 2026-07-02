@@ -370,10 +370,14 @@ async def sync_model_costs(session: AsyncSession) -> None:
     # Aggregate costs
     costs_by_id = {}
     costs_by_name = {}
+    name_has_tagged_runs = {}
+
     for r_id, model_name, total_cost in rows:
         if r_id:
             try:
                 costs_by_id[UUID(r_id)] = total_cost
+                if model_name:
+                    name_has_tagged_runs[model_name] = True
             except ValueError:
                 pass
         if model_name:
@@ -391,8 +395,8 @@ async def sync_model_costs(session: AsyncSession) -> None:
             # Try to match by registry_model_id first
             if model.id in costs_by_id:
                 cost = costs_by_id[model.id]
-            # Fall back to model_name match
-            elif model.model_name in costs_by_name:
+            # Fall back to model_name match ONLY if there are no registry-specific costs recorded for this name
+            elif model.model_name in costs_by_name and not name_has_tagged_runs.get(model.model_name, False):
                 cost = costs_by_name[model.model_name]
 
             if model.current_cost != cost:

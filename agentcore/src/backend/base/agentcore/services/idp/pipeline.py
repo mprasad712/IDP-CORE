@@ -990,7 +990,7 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                 flow.step("long_doc", "ok", f"{len(sections)} section(s) -> {len(chunk_texts)} chunk(s)")
                 
                 if trace_ctx:
-                    start_span(trace_ctx, "extraction", inputs={"chunk_count": len(chunk_texts), "long_doc": True}, observation_type="generation")
+                    start_span(trace_ctx, "extraction", inputs={"chunk_count": len(chunk_texts), "long_doc": True}, observation_type="generation", registry_model_id=llm.registry_model_id)
 
                 results: list[dict] = []
                 last_err: str | None = None
@@ -999,7 +999,7 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
 
                 for i, ct in enumerate(chunk_texts):
                     if trace_ctx:
-                        start_span(trace_ctx, f"extraction_chunk_{i+1}", inputs={"chunk_index": i}, observation_type="generation")
+                        start_span(trace_ctx, f"extraction_chunk_{i+1}", inputs={"chunk_index": i}, observation_type="generation", registry_model_id=llm.registry_model_id)
                     try:
                         res = await _extract_text(session, cfg, llm, ct)
                         
@@ -1016,7 +1016,7 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                                     models_used.add(model)
                                     
                         if trace_ctx:
-                            end_span(trace_ctx, f"extraction_chunk_{i+1}", outputs=res, usage=usage, model=model)
+                            end_span(trace_ctx, f"extraction_chunk_{i+1}", outputs=res, usage=usage, model=model, registry_model_id=llm.registry_model_id)
 
                         if isinstance(res, dict) and res.get("error"):
                             last_err = str(res.get("error"))
@@ -1024,11 +1024,11 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                         results.append(res)
                     except PipelineError:
                         if trace_ctx:
-                            end_span(trace_ctx, f"extraction_chunk_{i+1}", error="PipelineError")
+                            end_span(trace_ctx, f"extraction_chunk_{i+1}", error="PipelineError", registry_model_id=llm.registry_model_id)
                         raise
                     except Exception as e:
                         if trace_ctx:
-                            end_span(trace_ctx, f"extraction_chunk_{i+1}", error=str(e))
+                            end_span(trace_ctx, f"extraction_chunk_{i+1}", error=str(e), registry_model_id=llm.registry_model_id)
                         last_err = str(e)
                         flow.step("long_doc", "warn", f"chunk {i + 1}/{len(chunk_texts)} failed ({e})")
                 if chunk_texts and not results:
@@ -1044,11 +1044,12 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                         trace_ctx, "extraction",
                         outputs=extracted,
                         usage=aggregated_usage if aggregated_usage["total_tokens"] > 0 else None,
-                        model=primary_model
+                        model=primary_model,
+                        registry_model_id=llm.registry_model_id
                     )
             else:
                 if trace_ctx:
-                    start_span(trace_ctx, "extraction", inputs={"text_length": len(merged_text), "long_doc": False}, observation_type="generation")
+                    start_span(trace_ctx, "extraction", inputs={"text_length": len(merged_text), "long_doc": False}, observation_type="generation", registry_model_id=llm.registry_model_id)
 
                 extracted = await _extract_text(session, cfg, llm, merged_text)
                 
@@ -1060,14 +1061,14 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                         model = usage.get("model")
 
                 if trace_ctx:
-                    end_span(trace_ctx, "extraction", outputs=extracted, usage=usage, model=model)
+                    end_span(trace_ctx, "extraction", outputs=extracted, usage=usage, model=model, registry_model_id=llm.registry_model_id)
         except PipelineError:
             if trace_ctx:
-                end_span(trace_ctx, "extraction", error="PipelineError")
+                end_span(trace_ctx, "extraction", error="PipelineError", registry_model_id=llm.registry_model_id)
             raise
         except Exception as e:
             if trace_ctx:
-                end_span(trace_ctx, "extraction", error=str(e))
+                end_span(trace_ctx, "extraction", error=str(e), registry_model_id=llm.registry_model_id)
             raise PipelineError(f"extraction failed: {e}") from e
 
         # Unify failure semantics across extraction modes: extract_dynamic swallows
@@ -1082,7 +1083,7 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
 
         # HOOK: B31 math reconcile — re-prompt the LLM to fix arithmetic BEFORE saving.
         if trace_ctx:
-            start_span(trace_ctx, "math_reconcile", inputs={"attempts_max": cfg.math_reconcile_max_attempts}, observation_type="generation")
+            start_span(trace_ctx, "math_reconcile", inputs={"attempts_max": cfg.math_reconcile_max_attempts}, observation_type="generation", registry_model_id=llm.registry_model_id)
         extracted = await _hook_math_reconcile(extracted, llm, job, cfg, flow)
         
         reconcile_usage = None
@@ -1097,7 +1098,8 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                 trace_ctx, "math_reconcile",
                 outputs=extracted,
                 usage=reconcile_usage,
-                model=reconcile_model
+                model=reconcile_model,
+                registry_model_id=llm.registry_model_id
             )
 
         # 6. save. NOTE: save_extraction_results commits internally, so extracted rows
