@@ -699,7 +699,14 @@ def get_trace_metrics(
                         if obs_latencies:
                             metrics["latency_ms"] = max(obs_latencies)
                     if not metrics["models"]:
-                        metrics["models"] = list(dict.fromkeys(o.model for o in parsed_obs if o.model))
+                        model_keys = []
+                        for o in parsed_obs:
+                            if o.model:
+                                r_id = o.metadata.get("registry_model_id") if o.metadata else None
+                                key = f"{r_id}|{o.model}" if r_id else o.model
+                                if key not in model_keys:
+                                    model_keys.append(key)
+                        metrics["models"] = model_keys
                     metrics["error_count"] = max(
                         metrics["error_count"],
                         sum(1 for o in parsed_obs if (o.level or "").upper() in {"ERROR", "WARNING"}),
@@ -726,12 +733,51 @@ def _fetch_observations_with_fallback(primary_client: Any, all_clients: list[Any
             _REQUEST_OBSERVATIONS_CACHE[primary_key] = list(obs)
             return obs
     return []
+def _get_registry_mapping() -> dict[str, str]:
+    """Fetch model registry mapping synchronously."""
+    try:
+        import sqlalchemy as sa
+        from agentcore.services.deps import get_settings_service
+        settings = get_settings_service().settings
+        db_url = settings.database_url
+        if not db_url:
+            return {}
+        sync_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
+        engine = sa.create_engine(sync_url)
+        with engine.connect() as conn:
+            query = "SELECT id, display_name, model_name, created_at FROM model_registry"
+            rows = conn.execute(sa.text(query)).fetchall()
+            
+            oldest_by_name = {}
+            for r in rows:
+                r_id, display_name, model_name, created_at = r
+                m_dt = created_at.replace(tzinfo=None) if created_at else datetime.min
+                if model_name not in oldest_by_name:
+                    oldest_by_name[model_name] = (r_id, display_name, m_dt)
+                else:
+                    curr_id, curr_disp, oldest_dt = oldest_by_name[model_name]
+                    if m_dt < oldest_dt:
+                        oldest_by_name[model_name] = (r_id, display_name, m_dt)
+            
+            mapping = {}
+            for r in rows:
+                r_id, display_name, model_name, created_at = r
+                mapping[str(r_id)] = display_name
+                
+            for name, val in oldest_by_name.items():
+                mapping[name] = val[1]
+                
+            return mapping
+    except Exception as e:
+        logger.error(f"Failed to fetch model registry mapping: {e}")
+        return {}
 
 
 def _build_enriched_traces(raw_traces: list[Any], clients: list[Any]) -> list[EnrichedTrace]:
     """Convert raw Langfuse trace objects into enriched traces."""
     enriched: list[EnrichedTrace] = []
     budget: dict[str, int] = {"remaining": min(500, max(100, len(raw_traces) * 2))}
+    mapping = _get_registry_mapping()
 
     for trace in raw_traces:
         trace_id = get_trace_id(trace)
@@ -773,6 +819,16 @@ def _build_enriched_traces(raw_traces: list[Any], clients: list[Any]) -> list[En
         langfuse_ts = parse_datetime(get_attr(trace, "timestamp"))
         final_ts = our_utc_ts or langfuse_ts
 
+        resolved_models = []
+        for model_key in metrics["models"]:
+            if "|" in model_key:
+                r_id, r_name = model_key.split("|", 1)
+                resolved = mapping.get(r_id, mapping.get(r_name, r_name))
+            else:
+                resolved = mapping.get(model_key, model_key)
+            if resolved not in resolved_models:
+                resolved_models.append(resolved)
+
         enriched.append(EnrichedTrace(
             id=trace_id,
             name=get_attr(trace, "name"),
@@ -784,7 +840,7 @@ def _build_enriched_traces(raw_traces: list[Any], clients: list[Any]) -> list[En
             output_tokens=int(metrics["output_tokens"]),
             total_cost=float(metrics["total_cost"]),
             latency_ms=metrics["latency_ms"],
-            models=list(metrics["models"]),
+            models=resolved_models,
             error_count=int(metrics["error_count"]),
             observation_count=int(metrics["observation_count"] or 0),
             level=get_attr(trace, "level"),
