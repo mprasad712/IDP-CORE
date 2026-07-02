@@ -205,6 +205,28 @@ async def test_classifier_node_can_target_its_own_model():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 1c. Input Mode (text/vision) selection on the AI Field Extractor node
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.anyio
+async def test_input_mode_defaults_to_auto_when_absent():
+    base, idp = _agent_with_nodes([_llm_node(_UUID_B), _extractor(None)])
+    cfg = await resolve_pipeline_config(None, idp, base)
+    assert cfg.input_mode == "auto"
+
+
+@pytest.mark.anyio
+async def test_input_mode_read_and_normalized_from_extractor_node():
+    extractor = {"data": {"node": {"display_name": "AI Field Extractor",
+                                   "template": {"extraction_mode": {"value": "dynamic_prompt"},
+                                                "prompt": {"value": "Extract."},
+                                                "input_mode": {"value": "Vision"}}}}}  # mixed-case -> normalized
+    base, idp = _agent_with_nodes([_llm_node(_UUID_B), extractor])
+    cfg = await resolve_pipeline_config(None, idp, base)
+    assert cfg.input_mode == "vision"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 2. Text splitting with Overlap tests
 # ─────────────────────────────────────────────────────────────────────────────
 

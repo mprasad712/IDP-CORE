@@ -1548,3 +1548,162 @@ from agentcore.services.idp import pipeline as _pl_h4
 ])
 def test_h4_infer_field_cond_type(op, val, expected):
     assert _pl_h4._infer_field_cond_type(op, val) == expected
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dynamic vision (multimodal) extraction — pipeline wiring (Task 6)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_VISION_MODEL_UUID = "44444444-4444-4444-4444-444444444444"
+
+
+def _vision_extractor_graph(input_mode: str):
+    return {
+        "nodes": [
+            _node("AI Field Extractor", {
+                "extraction_mode": "dynamic_prompt",
+                "prompt": "Extract the invoice number.",
+                "config_name": "",
+                "input_mode": input_mode,
+                "model_id": _VISION_MODEL_UUID,
+            }),
+        ],
+        "edges": [],
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("input_mode", ["vision", "auto"])
+async def test_pipeline_vision_route_skips_ocr_and_uses_model_confidence(monkeypatch, input_mode):
+    """Scanned doc + vision-capable model + NO OCR node → extracts via images with NO OCR, and
+    persists the vision model's own confidence (not the 0.75 text default). Covered for BOTH an
+    explicit Input Mode=vision AND Auto (canvas-driven: scanned + no OCR node + vision → vision)."""
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpExtractedHeader
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    # vision-capable model + fake LLM builder
+    monkeypatch.setattr(pipeline, "_supports_vision", lambda reg: True)
+
+    async def fake_build_llm(session, model_id):
+        return object()
+    monkeypatch.setattr(pipeline, "_build_llm", fake_build_llm)
+
+    # force SCANNED detection (image-only) so the route is vision and OCR would otherwise run
+    monkeypatch.setattr(
+        pipeline.text_layer, "classify_document",
+        lambda *a, **k: (pipeline.text_layer.SCANNED, {1: pipeline.text_layer.SCANNED}),
+    )
+
+    # OCR MUST NOT be called on the vision route
+    async def boom_ocr(*a, **k):
+        raise AssertionError("run_paddle_ocr must not run on the vision route")
+    monkeypatch.setattr(pipeline, "run_paddle_ocr", boom_ocr)
+
+    # fake render + vision extract (no real vision model / no fitz on a stub doc)
+    calls = {"render": 0}
+
+    def fake_render(file_bytes, file_type, selected=None):
+        calls["render"] += 1
+        return [(b"fake-png-bytes", "image/png")]
+    monkeypatch.setattr(pipeline, "render_document_images", fake_render)
+
+    async def fake_extract_vision(page_images, *, llm_model, prompt=None, field_config_messages=None, ocr_text=None):
+        assert page_images and ocr_text is None  # pure vision -> no OCR text paired
+        return {"headers": {"invoice_number": {"value": "INV-9", "confidence": 0.95}}, "line_items": []}
+    monkeypatch.setattr(pipeline, "extract_vision", fake_extract_vision)
+
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(
+            session, graph=_vision_extractor_graph(input_mode), file_bytes=b"%PDF-fake", file_type="pdf",
+        )
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            headers = (await session.exec(
+                select(IdpExtractedHeader).where(IdpExtractedHeader.document_id == doc_id)
+            )).all()
+        assert calls["render"] == 1                        # rendered page images
+        assert doc.status in ("auto_approved", "pending_review")  # completed, routed (no rules -> pending)
+        inv = next(h for h in headers if h.field_name == "invoice_number")
+        assert inv.extracted_value == "INV-9"
+        assert abs(float(inv.confidence_score) - 0.95) < 1e-6  # model's own confidence, not the 0.75 text default
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_pipeline_vision_on_text_only_model_fails_with_clear_message(monkeypatch):
+    """Input Mode=vision on a model marked text-only → clean job failure mentioning vision (no crash)."""
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    monkeypatch.setattr(pipeline, "_supports_vision", lambda reg: False)   # text-only model
+
+    async def fake_build_llm(session, model_id):
+        return object()
+    monkeypatch.setattr(pipeline, "_build_llm", fake_build_llm)
+    monkeypatch.setattr(
+        pipeline.text_layer, "classify_document",
+        lambda *a, **k: (pipeline.text_layer.DIGITAL, {1: pipeline.text_layer.DIGITAL}),
+    )
+
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(
+            session, graph=_vision_extractor_graph("vision"), file_bytes=_digital_pdf(), file_type="pdf",
+        )
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            job = (await session.exec(
+                select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id)
+            )).first()
+        assert job.status == "failed"
+        assert "vision" in (job.error_message or "").lower()
+        assert doc.status == "failed"
+    finally:
+        await _cleanup(agent_id, doc_id)
+
+
+@pytest.mark.anyio
+async def test_pipeline_auto_scanned_no_ocr_no_vision_fails_clearly(monkeypatch):
+    """Auto mode + scanned doc + NO OCR node + non-vision model → clean job failure telling the
+    user to add an OCR node or a vision model (instead of silently auto-OCRing / failing cryptically)."""
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
+    from agentcore.services.deps import session_scope
+    from sqlmodel import select
+
+    monkeypatch.setattr(pipeline, "_supports_vision", lambda reg: False)   # non-vision model
+
+    async def fake_build_llm(session, model_id):
+        return object()
+    monkeypatch.setattr(pipeline, "_build_llm", fake_build_llm)
+    monkeypatch.setattr(
+        pipeline.text_layer, "classify_document",
+        lambda *a, **k: (pipeline.text_layer.SCANNED, {1: pipeline.text_layer.SCANNED}),
+    )
+    # OCR must never be reached — the route decision fails first (no OCR node, non-vision model)
+    async def boom_ocr(*a, **k):
+        raise AssertionError("run_paddle_ocr must not run — the route decision should fail first")
+    monkeypatch.setattr(pipeline, "run_paddle_ocr", boom_ocr)
+
+    async with session_scope() as session:
+        agent_id, doc_id = await _setup_document(
+            session, graph=_vision_extractor_graph("auto"), file_bytes=b"%PDF-fake", file_type="pdf",
+        )
+    try:
+        await pipeline.process_document(doc_id)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            job = (await session.exec(
+                select(IdpProcessingJob).where(IdpProcessingJob.document_id == doc_id)
+            )).first()
+        assert job.status == "failed"
+        err = (job.error_message or "").lower()
+        assert "ocr" in err and "vision" in err          # actionable guidance
+        assert doc.status == "failed"
+    finally:
+        await _cleanup(agent_id, doc_id)

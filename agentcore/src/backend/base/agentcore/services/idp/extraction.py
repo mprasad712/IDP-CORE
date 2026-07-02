@@ -147,6 +147,9 @@ def _expand_value(v: Any) -> tuple:
                 conf = _DEFAULT_FIELD_CONFIDENCE if val_s is not None else 0.0
         else:
             conf = _DEFAULT_FIELD_CONFIDENCE if val_s is not None else 0.0
+        # Clamp to [0,1]: a model may return 95 (meaning 95%), 1.2, or -0.5 — an out-of-range
+        # score would corrupt the overall-confidence average and break auto-approve routing.
+        conf = max(0.0, min(1.0, conf))
         reasoning = v.get("reasoning") if v.get("reasoning") is not None else None
         return val_s, conf, reasoning
     val_s = str(v) if v not in (None, "") else None
@@ -475,6 +478,222 @@ async def extract_named_config(
     return final_res
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Dynamic vision (multimodal) extraction — decide route, render, extract
+# ──────────────────────────────────────────────────────────────────────
+
+def decide_extraction_input(
+    input_mode: str | None,
+    overall_kind: str,
+    supports_vision: bool,
+    has_ocr_node: bool,
+) -> str:
+    """Decide the extraction route BEFORE OCR runs, from the agent's Input Mode + the detected
+    document kind + whether an OCR node is on the canvas + the model's vision capability.
+
+    Returns one of:
+      "text"        — run the existing text path (OCR if scanned, native text if digital)
+      "vision"      — skip OCR entirely; render page images and send to a vision model
+      "text_vision" — text path AND page images
+
+    ``overall_kind`` ∈ {"digital","scanned","mixed"} (digital/mixed => a native text layer exists).
+    ``supports_vision`` is checkbox-only: True only when the model is marked 'Supports vision'.
+    ``has_ocr_node`` is True when a PaddleOCR node is present on the agent canvas.
+
+    AUTO is canvas-driven: a native text layer wins; else on a scanned doc an OCR node wins
+    (text/OCR) over vision; else a vision model routes to vision; else — a scanned doc with no OCR
+    node and a non-vision model — raise ``PipelineError`` (nothing can read it). Explicit
+    vision/text_vision on a non-vision model also raises.
+    """
+    # Lazy import avoids the extraction<->pipeline import cycle (pipeline imports extraction).
+    from agentcore.services.idp.pipeline import PipelineError
+
+    mode = (input_mode or "auto").strip().lower()
+    has_native_text = overall_kind in ("digital", "mixed")
+
+    if mode == "text":
+        return "text"
+
+    if mode in ("vision", "text_vision"):
+        if not supports_vision:
+            raise PipelineError(
+                "This Input Mode needs a vision-capable model — open the model in the Model "
+                "Catalogue and enable 'Supports vision'."
+            )
+        # text_vision needs native/OCR text to pair with the images; on a scanned doc with no
+        # native text there is nothing to pair, so degrade to vision (pipeline logs a warn).
+        if mode == "text_vision" and not has_native_text:
+            return "vision"
+        return mode
+
+    # auto — canvas-driven
+    if has_native_text:
+        return "text"                 # digital/mixed: use the native text layer (no OCR/vision)
+    if has_ocr_node:
+        return "text"                 # scanned + a PaddleOCR node on the canvas -> run OCR (OCR wins)
+    if supports_vision:
+        return "vision"               # scanned + no OCR node + vision-capable model -> vision (no OCR)
+    # scanned + no OCR node + non-vision model -> nothing can read the document
+    raise PipelineError(
+        "This document is scanned (image-only) but the agent has no OCR node and the selected "
+        "model is not vision-capable. Add a PaddleOCR node, or pick a model marked 'Supports "
+        "vision', to process scanned documents."
+    )
+
+
+def render_document_images(
+    file_bytes: bytes,
+    file_type: str,
+    selected_pages: set[int] | None = None,
+) -> List[tuple]:
+    """Render a document (from raw bytes) to a list of ``(png_bytes, mime)`` for vision extraction.
+
+    Images are passed through as-is; PDFs are rendered page-by-page at 150 DPI (mirrors
+    ``extract_multimodal``). ``selected_pages`` is a 1-based set (from the Page Selector);
+    ``None`` renders every page. Rendering from a byte stream (not a path) so it works with the
+    in-memory ``original_bytes`` the pipeline already holds — no temp file needed.
+    """
+    if not file_bytes:
+        raise ValueError("cannot render vision images: the document is empty (0 bytes)")
+
+    ft = (file_type or "").lower().lstrip(".")
+    _IMG_TYPES = ("png", "jpg", "jpeg", "tiff", "tif", "bmp", "webp")
+    if ft in _IMG_TYPES:
+        # Validate the image actually decodes before base64-ing it to a model (a corrupt/empty
+        # image would otherwise fail with an opaque provider 500). Skip the check only if Pillow
+        # is unavailable, so a missing optional dep never rejects a valid image.
+        try:
+            from PIL import Image as _PILImage
+            import io as _io
+        except Exception:
+            _PILImage = None
+        if _PILImage is not None:
+            try:
+                with _PILImage.open(_io.BytesIO(file_bytes)) as _im:
+                    _im.verify()
+            except Exception as e:
+                raise ValueError(
+                    f"cannot render vision images: the .{ft} file is not a valid/decodable image ({e})"
+                ) from e
+        return [(file_bytes, mimetypes.types_map.get("." + ft, "image/png"))]
+
+    if ft != "pdf":
+        raise ValueError(
+            f"cannot render vision images: file type '.{ft}' is not supported for vision "
+            f"(supported: pdf, {', '.join(_IMG_TYPES)}). Use Text mode / an OCR node for this file, "
+            f"or convert it to PDF."
+        )
+
+    import fitz
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    except Exception as e:
+        raise ValueError(f"cannot render vision images: the PDF could not be opened ({e})") from e
+    out: List[tuple] = []
+    try:
+        for i in range(len(doc)):
+            if selected_pages is not None and (i + 1) not in selected_pages:
+                continue
+            out.append((doc[i].get_pixmap(dpi=150).tobytes("png"), "image/png"))
+    finally:
+        doc.close()
+    return out
+
+
+async def extract_vision(
+    page_images: List[tuple],
+    *,
+    llm_model: Any,
+    prompt: str | None = None,
+    field_config_messages: tuple | None = None,
+    ocr_text: str | None = None,
+) -> Dict[str, Any]:
+    """Extract structured data from PRE-RENDERED page images using a vision LLM (no OCR).
+
+    Exactly one instruction source drives the call:
+      * ``field_config_messages`` — a ``(system, user)`` tuple from a Field Configuration
+        (built by ``build_compact_extraction_messages_vision``), OR
+      * ``prompt`` — a freeform dynamic-mode instruction.
+    ``ocr_text`` (text_vision mode only) is appended to the leading text block so the model sees
+    the OCR text alongside the images — this is the ONE place the OCR text is added.
+
+    Returns the canonical shape ``save_extraction_results`` consumes:
+    ``{headers:{name:{value,confidence,reasoning}}, line_items:[{row_index,columns:[...]}]}``.
+    Mirrors ``extract_multimodal``'s invoke/normalize but takes pre-rendered images + a ready prompt
+    (rendering + config lookup are done by the caller/pipeline).
+    """
+    if llm_model is None:
+        raise ValueError("Language Model is required for vision extraction.")
+    if not page_images:
+        raise ValueError("No page images provided for vision extraction.")
+
+    # 1. Instruction (system + leading text) — named-config messages OR a dynamic prompt.
+    if field_config_messages is not None:
+        sys_prompt, text_instruction = field_config_messages
+    else:
+        sys_prompt = SYSTEM_PROMPT
+        text_instruction = (prompt or "").strip() or "Extract all key fields from this document. Return as structured JSON."
+
+    if ocr_text and ocr_text.strip():
+        text_instruction = (
+            f"{text_instruction}\n\n"
+            "### OCR text from the SAME document (use it together with the image(s)):\n"
+            f"-------\n{ocr_text}\n-------"
+        )
+
+    # 2. Multimodal payload: leading text block, then one image_url block per page.
+    user_content: List[Any] = [{"type": "text", "text": text_instruction}]
+    for img_bytes, mime in page_images:
+        b64_data = base64.b64encode(img_bytes).decode("utf-8")
+        user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_data}"}})
+
+    messages = [SystemMessage(content=sys_prompt), HumanMessage(content=user_content)]
+
+    # 3. Invoke (structured output → raw-JSON fallback) and normalize to the canonical shape.
+    raw_result: Optional[Dict[str, Any]] = None
+    usage_info = None
+    if hasattr(llm_model, "with_structured_output"):
+        try:
+            try:
+                structured_model = llm_model.with_structured_output(StructuredExtractionResult, include_raw=True)
+                res_dict = await structured_model.ainvoke(messages)
+                if isinstance(res_dict, dict):
+                    result = res_dict.get("parsed")
+                    raw_response = res_dict.get("raw")
+                else:
+                    result = res_dict
+                    raw_response = None
+            except TypeError:
+                structured_model = llm_model.with_structured_output(StructuredExtractionResult)
+                result = await structured_model.ainvoke(messages)
+                raw_response = None
+
+            if isinstance(result, StructuredExtractionResult):
+                if result.headers or result.line_items:
+                    raw_result = result.model_dump()
+                    usage_info = _extract_usage_from_response(raw_response, model_fallback=getattr(llm_model, "model_name", None))
+            elif isinstance(result, dict):
+                if result.get("headers") or result.get("line_items"):
+                    raw_result = result
+                    usage_info = _extract_usage_from_response(raw_response, model_fallback=getattr(llm_model, "model_name", None))
+        except Exception as e:
+            logger.warning(f"[Vision] with_structured_output failed: {e}. Falling back to raw JSON.")
+
+    if raw_result is None:
+        response = await llm_model.ainvoke(messages)
+        raw_text = response.content if hasattr(response, "content") else str(response)
+        raw_text = _strip_code_fences(raw_text or "")
+        parsed = json.loads(raw_text)  # a JSONDecodeError here surfaces to the caller (pipeline -> PipelineError)
+        if not isinstance(parsed, dict):
+            raise ValueError("Vision model output was not a JSON object.")
+        raw_result = _expand_extraction(parsed)
+        usage_info = _extract_usage_from_response(response, model_fallback=getattr(llm_model, "model_name", None))
+
+    if usage_info and isinstance(raw_result, dict):
+        raw_result["_usage"] = usage_info
+    return raw_result
+
+
 async def extract_multimodal(
     file_path: str | Path,
     prompt_or_config_id: str | UUID,
@@ -731,6 +950,7 @@ def _ocr_evidence(
     extracted_value: str,
     ocr_tokens: List[Dict[str, Any]],
     llm_conf: float,
+    vision_mode: bool = False,
 ) -> tuple:
     """Return (source_location, confidence_score) from OCR evidence.
 
@@ -753,9 +973,14 @@ def _ocr_evidence(
         return None, 0.0
 
     if not ocr_tokens:
-        # No OCR tokens (e.g. pure digital PDF path without token export).
-        # Dampen the LLM score — it's still overconfident but better than 0.
-        return None, round(min(llm_conf * 0.80, 0.75), 3)
+        # Vision path: there is NO OCR token stream to score against — the model read the pixels
+        # directly — so trust its own per-field confidence (clamped to [0,1] in case it over-reports).
+        if vision_mode:
+            return None, round(max(0.0, min(1.0, llm_conf)), 3)
+        # Text path (unchanged): no OCR tokens (e.g. pure digital PDF without token export).
+        # Dampen the LLM score — it's still overconfident but better than 0. max(0.0,...) guards
+        # against a model reporting a negative confidence (would persist a negative score).
+        return None, round(max(0.0, min(llm_conf * 0.80, 0.75)), 3)
 
     # Pre-build the full document text for multi-token substring checks.
     all_text = " ".join(str(t.get("text", "")).strip() for t in ocr_tokens).lower()
@@ -828,7 +1053,8 @@ def _ocr_evidence(
     # ── Not found in OCR at all ──
     # The model inferred, calculated, or reformatted this value.
     # Use a heavily dampened LLM score so it stays clearly below verified fields.
-    inferred_score = round(min(llm_conf * 0.38, 0.35), 3)
+    # max(0.0,...) guards against a negative model confidence -> never persist a negative score.
+    inferred_score = round(max(0.0, min(llm_conf * 0.38, 0.35)), 3)
     return source_loc, inferred_score
 
 
@@ -837,7 +1063,8 @@ async def save_extraction_results(
     document_id: UUID,
     job_id: UUID,
     extraction_result: Dict[str, Any],
-    ocr_tokens: Optional[List[Dict[str, Any]]] = None
+    ocr_tokens: Optional[List[Dict[str, Any]]] = None,
+    vision_mode: bool = False,
 ) -> float:
     """Persist extraction results and compute OCR-evidence-based field confidence.
 
@@ -869,7 +1096,7 @@ async def save_extraction_results(
         if extracted_val is None:
             conf, source_loc = 0.0, None
         else:
-            source_loc, conf = _ocr_evidence(extracted_val, ocr_tokens or [], llm_conf)
+            source_loc, conf = _ocr_evidence(extracted_val, ocr_tokens or [], llm_conf, vision_mode=vision_mode)
 
         header_rec = IdpExtractedHeader(
             id=uuid4(),
@@ -903,7 +1130,7 @@ async def save_extraction_results(
             if extracted_val is None:
                 conf, source_loc = 0.0, None
             else:
-                source_loc, conf = _ocr_evidence(extracted_val, ocr_tokens or [], llm_conf)
+                source_loc, conf = _ocr_evidence(extracted_val, ocr_tokens or [], llm_conf, vision_mode=vision_mode)
 
             line_rec = IdpExtractedLineItem(
                 id=uuid4(),

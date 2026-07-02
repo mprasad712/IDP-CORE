@@ -42,8 +42,11 @@ from agentcore.services.deps import (
 from agentcore.services.idp import long_doc, text_layer
 from agentcore.services.idp.agent_config import MODE_NAMED, resolve_pipeline_config
 from agentcore.services.idp.extraction import (
+    decide_extraction_input,
     extract_dynamic,
     extract_named_config,
+    extract_vision,
+    render_document_images,
     save_extraction_results,
 )
 from agentcore.services.idp.ocr import run_paddle_ocr
@@ -149,6 +152,75 @@ async def _build_llm(session, model_id: str):
         provider="openai",  # placeholder — the model service resolves the real provider
         model=f"idp-extract-{str(model_id)[:8]}",
     )
+
+
+def _supports_vision(reg) -> bool:
+    """Whether a registry model can accept image input for the vision extraction path.
+
+    Checkbox-only: True ONLY when the model's ``capabilities.supports_vision`` flag is exactly True
+    (set via the 'Supports vision' checkbox in the Model Catalogue). Unset / False / missing model
+    all mean 'not vision-capable' -> False. Deny-list providers that silently STRINGIFY image
+    blocks (they would send garbage) -> always False, even if they claim the capability. The
+    model-service also raises on image content for those providers (defense in depth — Task 10).
+    """
+    if reg is None:
+        return False
+    if getattr(reg, "provider", None) in {"google_genai_vertex"}:
+        return False
+    caps = getattr(reg, "capabilities", None) or {}
+    return caps.get("supports_vision") is True
+
+
+def _vision_error_hint(msg: str) -> str:
+    """Turn a raw provider/transport error string into an actionable hint for a vision failure.
+
+    Returns "" when the error is not a recognised rate-limit / oversize condition (so the caller
+    just shows the raw error). Requires the underlying error text to reach us — see the model
+    client's error surfacing (invoke_via_service) which now includes the service response body.
+    """
+    low = (msg or "").lower()
+    if any(k in low for k in ("429", "rate limit", "rate-limit", "too many requests",
+                              "quota", "resource_exhausted", "resource exhausted")):
+        return (" — the vision model is rate-limited or out of quota; retry later or check the "
+                "model's billing/quota")
+    if any(k in low for k in ("413", "too large", "request entity", "payload",
+                              "context length", "maximum context", "context window",
+                              "timeout", "timed out")):
+        return (" — the document may be too large for vision in one request; add a Page Selector "
+                "or switch Input Mode to Text (OCR)")
+    return ""
+
+
+async def _named_config_vision_messages(session, field_config_id):
+    """Build the (system, user) VISION messages for a named Field Configuration.
+
+    Uses the confidence-requesting vision prompt variant so per-field confidence is the model's
+    genuine score (the vision path has no OCR token stream to re-score against)."""
+    from agentcore.services.database.models.idp.config import (
+        IdpFieldConfiguration,
+        IdpFieldConfigHeader,
+        IdpFieldConfigLineItem,
+    )
+    from agentcore.services.idp.prompt_templates import build_compact_extraction_messages_vision
+
+    config = await session.get(IdpFieldConfiguration, field_config_id)
+    if not config or getattr(config, "deleted_at", None) is not None:
+        raise PipelineError(f"named-config vision: field configuration '{field_config_id}' not found or inactive")
+    headers = (
+        await session.exec(
+            select(IdpFieldConfigHeader)
+            .where(IdpFieldConfigHeader.config_id == field_config_id)
+            .order_by(IdpFieldConfigHeader.display_order)
+        )
+    ).all()
+    line_items = (
+        await session.exec(
+            select(IdpFieldConfigLineItem)
+            .where(IdpFieldConfigLineItem.config_id == field_config_id)
+            .order_by(IdpFieldConfigLineItem.display_order)
+        )
+    ).all()
+    return build_compact_extraction_messages_vision(headers, line_items)
 
 
 def _selected_pages(total_pages: int, cfg) -> set[int]:
@@ -775,11 +847,32 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         digital_pages = {int(p) for p, k in page_status.items() if k == text_layer.DIGITAL}
         scanned_pages = {int(p) for p, k in page_status.items() if k == text_layer.SCANNED}
 
+        # Decide the extraction ROUTE now — BEFORE any OCR — from the agent's Input Mode + the
+        # detected kind + the model's vision capability. 'vision' skips OCR entirely (the model
+        # reads page images directly); 'text'/'text_vision' run the existing OCR/native-text path.
+        # decide_extraction_input may raise PipelineError (vision requested on a text-only model);
+        # that propagates to the outer except -> _fail with a clear message.
+        from agentcore.services.database.models.model_registry.model import ModelRegistry
+        _route_reg = None
+        if cfg.model_id:
+            try:
+                _route_reg = await session.get(ModelRegistry, UUID(str(cfg.model_id)))
+            except (ValueError, TypeError):
+                _route_reg = None
+        route = decide_extraction_input(cfg.input_mode, overall_kind, _supports_vision(_route_reg), cfg.has_ocr_node)
+        if cfg.input_mode == "text_vision" and route == "vision":
+            flow.step("input", "warn", "text+vision requested but the document has no native/OCR text — using vision only")
+        logger.info(f"[pipeline] {document_id}: extraction route={route} (input_mode={cfg.input_mode}, kind={overall_kind})")
+
         # 3+4. Read text by page kind. Native text MUST come from the ORIGINAL bytes
         # (preprocessing rasterizes a PDF and would destroy a digital page's text layer);
         # OCR runs only when scanned pages exist and never replaces native digital text.
         tokens: list[dict] = []
-        if overall_kind == text_layer.DIGITAL:
+        if route == "vision":
+            # Vision route: skip OCR/native-text entirely — the vision model reads the page images
+            # directly. This is what lets a scanned PDF be extracted with NO OCR (Intel-Mac path).
+            flow.step("ocr", "ok", "vision route — OCR skipped (model reads page images directly)")
+        elif overall_kind == text_layer.DIGITAL:
             if trace_ctx:
                 start_span(trace_ctx, "extract_native_text", inputs={"file_type": file_type})
             _, tokens = text_layer.extract_native_text(original_bytes, file_type)
@@ -963,19 +1056,68 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                 await end_idp_trace(trace_ctx, outputs={"status": "skipped"})
             return
 
-        logger.info(f"[pipeline] {document_id}: starting extraction (mode={cfg.extraction_mode})")
-        # 5. extract (text modes; multimodal parked)
-        if cfg.multimodal_requested:
-            flow.step("extract", "warn", "multimodal parked -> using text extraction")  # MULTIMODAL HOOK (PARKED)
+        logger.info(f"[pipeline] {document_id}: starting extraction (mode={cfg.extraction_mode}, route={route})")
+        # 5. extract — vision route sends page images to the model; text routes run OCR/native
+        # text (+ long-doc chunking). The legacy `multimodal_requested` flag (from the extraction_mode
+        # string) only downgrades to text; the real vision path is driven by Input Mode (route) above.
+        if cfg.multimodal_requested and route in ("text", "text_vision"):
+            flow.step("extract", "warn", "legacy multimodal flag → using text extraction (set Input Mode = Vision for the vision path)")
         llm = await _build_llm(session, cfg.model_id)
+        vision_used = route in ("vision", "text_vision")
 
         # HOOK: B35 long-document handling — long docs are split into section/page chunks,
         # extracted per chunk and merged; short docs take the single-pass path unchanged.
-        use_long_doc = bool(cfg.long_doc_enabled) and long_doc.should_chunk(
+        use_long_doc = route in ("text", "text_vision") and bool(cfg.long_doc_enabled) and long_doc.should_chunk(
             tokens, max_pages=cfg.long_doc_max_pages, max_tokens=cfg.long_doc_max_tokens
         )
         try:
-            if use_long_doc:
+            if route in ("vision", "text_vision"):
+                # VISION path: render the selected pages to images and let the model read them
+                # directly. No page cap (product decision) — but log the payload size and turn a
+                # 413 / timeout / context-window error into a readable message (not a raw 413).
+                page_images = render_document_images(original_bytes, file_type, selected)
+                if not page_images:
+                    raise PipelineError("vision mode: could not render any page images from the document")
+                _payload_kb = sum(len(b) for b, _ in page_images) // 1024
+                logger.info(
+                    f"[pipeline] {document_id}: vision extraction — {len(page_images)} page image(s), ~{_payload_kb} KB payload"
+                )
+                if trace_ctx:
+                    start_span(
+                        trace_ctx, "extraction",
+                        inputs={"page_images": len(page_images), "payload_kb": _payload_kb, "vision": True},
+                        observation_type="generation",
+                    )
+                try:
+                    if cfg.extraction_mode == MODE_NAMED and cfg.field_config_id:
+                        fc_msgs = await _named_config_vision_messages(session, cfg.field_config_id)
+                        extracted = await extract_vision(
+                            page_images, llm_model=llm, field_config_messages=fc_msgs,
+                            ocr_text=(merged_text if route == "text_vision" else None),
+                        )
+                    else:
+                        v_prompt = cfg.prompt or "Extract all key fields from this document. Return structured JSON."
+                        extracted = await extract_vision(
+                            page_images, llm_model=llm, prompt=v_prompt,
+                            ocr_text=(merged_text if route == "text_vision" else None),
+                        )
+                except PipelineError:
+                    raise
+                except Exception as ve:
+                    # No page cap (product decision) — but map rate-limit / oversize / timeout to a
+                    # readable, actionable message instead of a raw 500/stack.
+                    raise PipelineError(f"vision extraction failed{_vision_error_hint(str(ve))}: {ve}") from ve
+                usage = None
+                model = None
+                if isinstance(extracted, dict) and "_usage" in extracted:
+                    usage = extracted.pop("_usage")
+                    if usage:
+                        model = usage.get("model")
+                if trace_ctx:
+                    end_span(trace_ctx, "extraction", outputs=extracted, usage=usage, model=model)
+                flow.step("extract", "ok",
+                          f"vision extraction — {len(page_images)} page image(s) (~{_payload_kb} KB) read by the model")
+            elif use_long_doc:
                 sections = long_doc.build_sections(tokens)
                 try:
                     await long_doc.persist_sections(session, document_id, sections)
@@ -1115,6 +1257,7 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             job_id=job.id,
             extraction_result=extracted if isinstance(extracted, dict) else {},
             ocr_tokens=tokens,
+            vision_mode=vision_used,
         )
         if trace_ctx:
             end_span(trace_ctx, "save_results", outputs={"overall_confidence": overall_conf})

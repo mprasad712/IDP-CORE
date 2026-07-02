@@ -24,7 +24,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from app.providers.base import BaseProvider, register_provider
+from app.providers.base import BaseProvider, register_provider, reject_image_messages
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,10 @@ class _VertexExpressChatModel(BaseChatModel):
         return "google-vertex-express"
 
     def _convert_messages(self, messages):
+        # This provider stringifies message content (no image support) — reject images with a
+        # clear error rather than silently sending garbage. (The IDP pipeline also deny-lists
+        # image-stringifying providers up front; this is defense in depth.)
+        reject_image_messages(messages, "google_vertex (Express API key)")
         from google.genai import types
         contents = []
         system_text = ""

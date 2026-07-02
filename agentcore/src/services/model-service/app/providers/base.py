@@ -28,6 +28,36 @@ def get_provider(name: str) -> "BaseProvider":
     return PROVIDER_REGISTRY[name]()
 
 
+def message_has_image(messages: list) -> bool:
+    """True if any message carries image content — a list block with ``type == 'image_url'``.
+
+    Multimodal user messages use list content (text + image_url dicts); text-only messages use a
+    plain string. Only the list-with-image form counts as an image.
+    """
+    for msg in messages:
+        content = getattr(msg, "content", None)
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    return True
+    return False
+
+
+def reject_image_messages(messages: list, provider_label: str) -> None:
+    """Raise a clear error if the messages contain image content, for providers that cannot
+    process images.
+
+    Without this, such a provider silently ``str()``-ifies the list content and sends garbage to
+    the model. Raising turns that into an explicit, user-meaningful failure instead.
+    """
+    if message_has_image(messages):
+        raise ValueError(
+            f"Provider '{provider_label}' does not support image input. Use OpenAI, an "
+            "OpenAI-compatible endpoint, Gemini (API key), Anthropic, or Vertex AI with a "
+            "service account for vision / image-based extraction."
+        )
+
+
 class BaseProvider(ABC):
     """Abstract base class for LLM providers."""
 

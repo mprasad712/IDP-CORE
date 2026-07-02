@@ -22,6 +22,7 @@ from agentcore.services.database.models.idp.config import IdpAgent, IdpAgentRule
 # Node display names on the canvas (components/IDP/*, components/models/registry_model.py)
 _N_EXTRACTOR = "AI Field Extractor"
 _N_MODEL = "Large Language Model"
+_N_OCR = "PaddleOCR"
 _N_SCAN = "Scan Corrector"
 _N_PAGE = "Page Selector"
 _N_DETECTOR = "Document Type Detector"
@@ -65,6 +66,12 @@ class ResolvedPipelineConfig:
     page_range_end: int
     # Classifier may target its own model (SLM/local); else shares the extraction model_id.
     classify_model_id: str | None = None
+    # Extraction input route chosen on the extractor node: "auto" | "text" | "vision" | "text_vision".
+    # "auto" (default) => text whenever native/OCR text exists, else vision if the model can see.
+    input_mode: str = "auto"
+    # Whether a PaddleOCR node is present on the canvas. In Auto mode on a scanned doc, an OCR node
+    # routes to text (OCR wins over vision); its ABSENCE lets a vision model take the vision route.
+    has_ocr_node: bool = False
     # detector
     allowed_extensions: set[str] = field(default_factory=set)
     skip_unmatched: bool = True
@@ -295,6 +302,10 @@ async def resolve_pipeline_config(
     mode, multimodal_requested = _normalize_mode(graph_mode, idp_agent.extraction_mode)
     prompt = _field(extractor, "prompt") or idp_agent.dynamic_prompt
     config_name = _field(extractor, "config_name")
+    # Extraction input route (text vs the model's vision). Normalized; unset/blank -> "auto".
+    input_mode = str(_field(extractor, "input_mode", "auto") or "auto").strip().lower()
+    # Presence of a PaddleOCR node on the canvas drives Auto-mode routing (OCR wins over vision).
+    has_ocr_node = _find_node(data, _N_OCR) is not None
 
     # If the extractor node exposes NO explicit extraction_mode but a Field Configuration IS
     # selected on it, treat the run as named-config. Some node templates (e.g. the universal
@@ -462,6 +473,8 @@ async def resolve_pipeline_config(
     return ResolvedPipelineConfig(
         model_id=model_id,
         classify_model_id=classify_model_id,
+        input_mode=input_mode,
+        has_ocr_node=has_ocr_node,
         extraction_mode=mode,
         prompt=prompt,
         config_name=config_name,

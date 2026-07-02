@@ -715,7 +715,7 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 0,
       base_classes: ["Data"],
-      field_order: ["model_id", "document", "llm", "config_name", "config_names", "model_name"],
+      field_order: ["model_id", "document", "llm", "config_name", "config_names", "input_mode", "model_name"],
       template: {
         document: {
           _input_type: "HandleInput",
@@ -781,15 +781,22 @@ export const IDP_NODES: IDPData = {
           value: [],
         },
         model_id: modelField("model_id", "Model", "Pick a registered model (frontier LLM, local LLM, or SLM). Overrides any connected Language Model node."),
+        input_mode: dropdownField(
+          "input_mode",
+          "Input Mode",
+          ["auto", "text", "vision", "text_vision"],
+          "auto",
+          "How the model reads the document. Auto (recommended): a digital doc uses its text layer; a scanned doc uses OCR when a PaddleOCR node is on the canvas, otherwise a vision-capable model reads the page images (and it errors if there is no OCR node and the model can't see). Text: OCR/native text only. Vision: send page images to a vision model (scanned PDFs, NO OCR). Text + Vision: send both. Vision / Text + Vision require a model marked 'Supports vision' in the Model Catalogue.",
+        ),
         model_name: strField("model_name", "LLM Model", "gpt-4o", "Model to use when no model node is connected.", false, true),
       },
       outputs: [output("extracted_data", "Extracted Data", ["Data"])],
     },
 
 
-    // Multimodal node hidden — the backend currently parks multimodal extraction (downgrades to
-    // text), so exposing a "Vision LLM" node would mislead users. Re-add the node definition here
-    // when the vision extraction path is actually implemented in the pipeline.
+    // Vision extraction is NOT a separate node — it is driven by the "Input Mode" dropdown on the
+    // AI Field Extractor above (auto/text/vision/text_vision). The pipeline renders page images and
+    // sends them to a vision-capable model when the route is vision/text_vision (see pipeline.py).
   },
 
   // ── Rules ─────────────────────────────────────────────────────────────────

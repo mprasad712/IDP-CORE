@@ -40,7 +40,7 @@ from langchain_core.messages import (
 )
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 
-from app.providers.base import BaseProvider, register_provider
+from app.providers.base import BaseProvider, register_provider, reject_image_messages
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,10 @@ class _GenAIVertexChatModel(BaseChatModel):
         object but folding here keeps the logic simple and matches the
         approach used by `_VertexExpressChatModel`).
         """
+        # This provider stringifies message content (no image support) — reject images with a
+        # clear error rather than silently sending garbage. (The IDP pipeline also deny-lists this
+        # provider up front via _supports_vision; this is defense in depth.)
+        reject_image_messages(messages, "google_genai_vertex")
         from google.genai import types
 
         contents: list = []

@@ -259,6 +259,28 @@ def _build_request_payload(
 # ---------------------------------------------------------------------------
 
 
+def _raise_service_error(resp: httpx.Response) -> None:
+    """Like ``resp.raise_for_status()`` but INCLUDE the model-service response body in the error.
+
+    The service returns provider error detail (e.g. a 429 quota message or a 413 payload error) in
+    the JSON ``detail`` field; a bare ``raise_for_status()`` discards it, leaving callers with only
+    "500 Internal Server Error". Surfacing the detail lets the IDP pipeline classify rate-limit /
+    oversize failures and show an actionable message. Additive: only enriches the error text.
+    """
+    if resp.is_error:
+        detail = ""
+        try:
+            body = resp.json()
+            detail = body.get("detail") if isinstance(body, dict) else str(body)
+        except Exception:
+            detail = (resp.text or "")[:600]
+        raise httpx.HTTPStatusError(
+            f"model-service {resp.status_code}: {detail or resp.reason_phrase}",
+            request=resp.request,
+            response=resp,
+        )
+
+
 async def invoke_via_service(
     component: LCModelNode,
     messages: list[BaseMessage],
@@ -731,7 +753,7 @@ class MicroserviceChatModel(BaseChatModel):
                 headers=_headers(self.service_api_key),
                 json=payload,
             )
-            resp.raise_for_status()
+            _raise_service_error(resp)
 
         return self._parse_response(resp.json())
 
@@ -752,7 +774,7 @@ class MicroserviceChatModel(BaseChatModel):
                 headers=_headers(self.service_api_key),
                 json=payload,
             )
-            resp.raise_for_status()
+            _raise_service_error(resp)
 
         return self._parse_response(resp.json())
 

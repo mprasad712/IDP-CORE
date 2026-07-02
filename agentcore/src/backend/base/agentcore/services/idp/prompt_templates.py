@@ -147,6 +147,84 @@ def build_compact_extraction_messages(
     return COMPACT_EXTRACTION_SYSTEM_TEMPLATE, user_prompt
 
 
+COMPACT_VISION_SYSTEM_TEMPLATE = (
+    "You are an expert Intelligent Document Processing (IDP) agent and data extraction specialist.\n"
+    "You are given the document as one or more page IMAGES. Read the values directly from the "
+    "image(s) — there is no OCR text to rely on.\n"
+    "Extract the requested fields and return ONLY a JSON object of this shape:\n"
+    '{"headers": {"field_name": {"value": "value_or_null", "confidence": 0.95}, ...},\n'
+    ' "line_items": [{"column_name": {"value": "value", "confidence": 0.9}, ...}, ...]}\n\n'
+    "Rules:\n"
+    "- 'headers' are single document-level fields; 'line_items' is a list of table rows, each a flat "
+    "object of column_name -> {value, confidence}.\n"
+    "- Extract EVERY row of the table — do not stop early or summarise.\n"
+    "- 'confidence' MUST be a genuine float 0.0–1.0 reflecting how clearly you can read the value "
+    "from the image (0.90+ = crisp and unambiguous; lower = blurry, partially occluded, or inferred).\n"
+    "- If a field is not present: value null, confidence 0.0. Do NOT invent values.\n"
+    "- Dates as YYYY-MM-DD; numbers as plain strings. Values must be strings or null.\n"
+    "- Return ONLY valid JSON — no markdown, no prose, no code fences."
+)
+
+COMPACT_VISION_USER_TEMPLATE = """\
+Extract the value and a confidence score for each field listed below, reading directly from the document image(s) provided in this message.
+
+### Header Fields to Extract:
+{header_field_descriptions}
+
+### Line Item Columns (one object per table row):
+{line_item_descriptions}
+
+### Document:
+The document is provided as page image(s) in this message. Read the values directly from the image(s).
+
+Return ONLY a JSON object of exactly this shape:
+
+{json_schema}\
+"""
+
+
+def build_compact_extraction_messages_vision(
+    headers: List[Any],
+    line_items: List[Any],
+) -> tuple[str, str]:
+    """(system, user) for COMPACT NAMED-CONFIG extraction via VISION (page images, no OCR text).
+
+    Unlike :func:`build_compact_extraction_messages` (which SUPPRESSES confidence because the raw
+    OCR token stream re-scores each value downstream in ``_ocr_evidence``), the vision path has NO
+    OCR tokens to score against — so this variant explicitly asks the model for a genuine per-field
+    ``confidence`` and that score is what gets persisted. The document itself is supplied as image
+    blocks by the caller (``extract_vision``); this only builds the text instruction + schema.
+    """
+    if headers:
+        header_field_descriptions = "\n".join(
+            _field_description(h.field_name, h.field_type, getattr(h, "prompt", None), getattr(h, "description", None))
+            for h in headers
+        )
+    else:
+        header_field_descriptions = "None"
+
+    if line_items:
+        line_item_descriptions = "\n".join(
+            _field_description(getattr(c, "column_name", ""), getattr(c, "column_type", "text"), getattr(c, "prompt", None), None)
+            for c in line_items
+        )
+    else:
+        line_item_descriptions = "None"
+
+    header_schema = {h.field_name: {"value": "<value or null>", "confidence": 0.95} for h in headers}
+    line_items_schema = (
+        [{c.column_name: {"value": "<value>", "confidence": 0.9} for c in line_items}] if line_items else []
+    )
+    json_schema = json.dumps({"headers": header_schema, "line_items": line_items_schema}, indent=2)
+
+    user_prompt = COMPACT_VISION_USER_TEMPLATE.format(
+        header_field_descriptions=header_field_descriptions,
+        line_item_descriptions=line_item_descriptions,
+        json_schema=json_schema,
+    )
+    return COMPACT_VISION_SYSTEM_TEMPLATE, user_prompt
+
+
 def build_extraction_messages(
     headers: List[Any],
     line_items: List[Any],

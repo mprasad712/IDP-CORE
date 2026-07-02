@@ -113,6 +113,8 @@ export default function EditModelModal({
   const [customHeaders, setCustomHeaders] = useState("");
   const [showInOrchestrator, setShowInOrchestrator] = useState(true);
   const [showInAgent, setShowInAgent] = useState(true);
+  // capabilities.supports_vision — lets an IDP agent send page images to this model (vision input).
+  const [supportsVision, setSupportsVision] = useState(false);
 
   // Self-hosted (local LLM / SLM) metadata — only used/shown when selfHostedMode is true.
   const [selfHostedKind, setSelfHostedKind] = useState<"slm" | "local_llm">("slm");
@@ -190,6 +192,7 @@ export default function EditModelModal({
       const si = (model as any).show_in || ["orchestrator", "agent"];
       setShowInOrchestrator(si.includes("orchestrator"));
       setShowInAgent(si.includes("agent"));
+      setSupportsVision(!!model.capabilities?.supports_vision);
 
       const sh = (pc as any).self_hosted ?? {};
       setSelfHostedKind(sh.kind === "local_llm" ? "local_llm" : "slm");
@@ -226,6 +229,7 @@ export default function EditModelModal({
       setCustomHeaders("");
       setShowInOrchestrator(true);
       setShowInAgent(true);
+      setSupportsVision(false);
       setTemperature("");
       setMaxTokens("");
       setDimensions("");
@@ -362,6 +366,15 @@ export default function EditModelModal({
     return arr.length > 0 ? arr : null;
   };
 
+  // Merge the model's existing capabilities with the supports_vision toggle. Returns undefined
+  // when there is nothing to set (create with vision off, or edit of a model that had no
+  // capabilities and vision left off) so we don't introduce a phantom capabilities object.
+  const buildCapabilities = (): Record<string, any> | undefined => {
+    const existing = (model?.capabilities ?? undefined) as Record<string, any> | undefined;
+    if (!existing && !supportsVision) return undefined;
+    return { ...(existing ?? {}), supports_vision: supportsVision };
+  };
+
   const buildTestPayload = () => ({
     provider,
     model_name: modelName,
@@ -428,6 +441,7 @@ export default function EditModelModal({
           provider_config: buildProviderConfig() ?? null,
           default_params: buildDefaultParams() ?? null,
           show_in: buildShowIn(),
+          capabilities: buildCapabilities() ?? null,
           is_active: isActive,
         };
         if (apiKey) payload.api_key = apiKey;
@@ -443,6 +457,7 @@ export default function EditModelModal({
           !isSameValue(payload.base_url, model.base_url ?? null) ||
           !isSameValue(payload.provider_config ?? null, originalProviderConfig) ||
           !isSameValue(payload.default_params ?? null, originalDefaultParams) ||
+          !isSameValue(payload.capabilities ?? null, model.capabilities ?? null) ||
           !isSameValue(payload.is_active, model.is_active);
 
         const normalizedOriginal = Array.from(new Set(effectiveOriginalEnvs)).sort();
@@ -569,6 +584,7 @@ export default function EditModelModal({
           provider_config: buildProviderConfig() ?? null,
           default_params: buildDefaultParams() ?? null,
           show_in: buildShowIn(),
+          capabilities: buildCapabilities() ?? null,
           is_active: isActive,
         };
 
@@ -1041,6 +1057,29 @@ export default function EditModelModal({
               </label>
             </div>
           </fieldset>
+
+          {/* ========== CAPABILITIES ========== */}
+          {!isEmbedding && (
+            <fieldset className="space-y-3">
+              <legend className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+                {t("Capabilities")}
+              </legend>
+              <div className="flex flex-col gap-2">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={supportsVision}
+                    onChange={(e) => setSupportsVision(e.target.checked)}
+                    className="h-4 w-4 rounded border-border"
+                  />
+                  {t("Supports vision")}
+                  <span className="text-xs text-muted-foreground">
+                    ({t("model can read page images — enables IDP Vision / Text + Vision input mode")})
+                  </span>
+                </label>
+              </div>
+            </fieldset>
+          )}
 
           {/* ========== DEFAULT PARAMS ========== */}
           <fieldset className="space-y-4">
