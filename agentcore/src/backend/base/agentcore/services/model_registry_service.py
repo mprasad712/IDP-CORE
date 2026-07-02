@@ -369,19 +369,17 @@ async def sync_model_costs(session: AsyncSession) -> None:
 
     # Aggregate costs
     costs_by_id = {}
-    costs_by_name = {}
-    name_has_tagged_runs = {}
+    legacy_costs_by_name = {}
 
     for r_id, model_name, total_cost in rows:
         if r_id:
             try:
                 costs_by_id[UUID(r_id)] = total_cost
-                if model_name:
-                    name_has_tagged_runs[model_name] = True
             except ValueError:
                 pass
-        if model_name:
-            costs_by_name[model_name] = costs_by_name.get(model_name, 0.0) + total_cost
+        else:
+            if model_name:
+                legacy_costs_by_name[model_name] = legacy_costs_by_name.get(model_name, 0.0) + total_cost
 
     # Update local model registry database
     try:
@@ -389,15 +387,26 @@ async def sync_model_costs(session: AsyncSession) -> None:
         db_result = await session.execute(stmt)
         models = db_result.scalars().all()
 
+        # Find the oldest registered model entry for each unique model name (timezone-naive safe comparison)
+        oldest_model_by_name = {}
+        for m in models:
+            m_dt = m.created_at.replace(tzinfo=None) if m.created_at else datetime.min
+            if m.model_name not in oldest_model_by_name:
+                oldest_model_by_name[m.model_name] = (m, m_dt)
+            else:
+                current_oldest_model, oldest_dt = oldest_model_by_name[m.model_name]
+                if m_dt < oldest_dt:
+                    oldest_model_by_name[m.model_name] = (m, m_dt)
+
+        oldest_ids = {name: item[0].id for name, item in oldest_model_by_name.items()}
+
         updated_count = 0
         for model in models:
-            cost = 0.0
-            # Try to match by registry_model_id first
-            if model.id in costs_by_id:
-                cost = costs_by_id[model.id]
-            # Fall back to model_name match ONLY if there are no registry-specific costs recorded for this name
-            elif model.model_name in costs_by_name and not name_has_tagged_runs.get(model.model_name, False):
-                cost = costs_by_name[model.model_name]
+            tagged_cost = costs_by_id.get(model.id, 0.0)
+            legacy_cost = legacy_costs_by_name.get(model.model_name, 0.0)
+
+            is_oldest = oldest_ids.get(model.model_name) == model.id
+            cost = tagged_cost + (legacy_cost if is_oldest else 0.0)
 
             if model.current_cost != cost:
                 model.current_cost = cost
