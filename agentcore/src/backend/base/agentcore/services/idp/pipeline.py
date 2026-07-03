@@ -21,6 +21,7 @@ import time
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
+import httpx
 from loguru import logger
 from sqlmodel import select
 
@@ -253,10 +254,10 @@ async def _maybe_preprocess(file_bytes: bytes, file_type: str, cfg, flow: "FlowL
         return file_bytes
     try:
         if cfg.fix_skew:
-            file_bytes, angle = await detect_and_correct_skew(file_bytes, file_type)
+            file_bytes, angle = await detect_and_correct_skew(file_bytes, file_type, cfg.skew_threshold)
             flow.step("preprocess", "ok", f"deskew angle={angle:.2f}")
         if cfg.fix_rotation:
-            file_bytes, rot = await detect_and_correct_rotation(file_bytes, file_type)
+            file_bytes, rot = await detect_and_correct_rotation(file_bytes, file_type, cfg.allowed_angles)
             flow.step("preprocess", "ok", f"rotation={rot}")
     except Exception as e:
         flow.step("preprocess", "warn", f"skipped ({e})")
@@ -276,6 +277,33 @@ async def _save_artifact(storage, agent_id: str, rel_path: str, data: bytes) -> 
         await storage.save_file(agent_id=agent_id, file_name=rel_path, data=data)
     except Exception as e:  # pragma: no cover - artifacts are best-effort
         logger.warning(f"[pipeline] could not store artifact {rel_path}: {e}")
+
+
+async def _maybe_webhook(cfg, document_id, job_id, extracted: dict, status: str, flow: "FlowLog") -> None:
+    """POST the extraction result to a configured Webhook Output node. Non-fatal: never raises.
+
+    No-op when no Webhook Output node is on the canvas (``cfg.webhook_url`` is None). A failing POST
+    is logged as a warn step and swallowed so a bad/unreachable webhook can never break processing.
+    """
+    url = getattr(cfg, "webhook_url", None)
+    if not url:
+        return
+    payload = {"status": status, "data": extracted or {}}
+    if getattr(cfg, "webhook_include_metadata", False):
+        payload["metadata"] = {
+            "document_id": str(document_id) if document_id else None,
+            "job_id": str(job_id) if job_id else None,
+            "timestamp": _utcnow().isoformat(),
+        }
+    headers = {"Content-Type": "application/json", **(getattr(cfg, "webhook_headers", {}) or {})}
+    method = (getattr(cfg, "webhook_method", "POST") or "POST").upper()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.request(method, url, json=payload, headers=headers)
+            resp.raise_for_status()
+        flow.step("webhook", "ok", f"POST {url} -> {getattr(resp, 'status_code', '?')}")
+    except Exception as e:  # non-fatal — a failing webhook must never break processing
+        flow.step("webhook", "warn", f"webhook POST failed ({e})")
 
 
 _NUMERIC_OPS = {">", "<", ">=", "<=", "==", "!="}
@@ -366,6 +394,38 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
             )
         ).all()
 
+    # Confidence Router (when the node is on the canvas) is an OVERALL-confidence gate that runs
+    # BEFORE per-field rules: below the threshold -> pending_review (the router's Low-Confidence
+    # branch -> Processed Docs Output in the universal template); at/above -> fall through to the
+    # rules path (the router's High-Confidence branch -> Rules). No router node -> unchanged.
+    if getattr(cfg, "confidence_router_present", False) and overall_conf < cfg.confidence_threshold:
+        flow.step("route", "ok",
+                  f"pending_review (confidence {overall_conf:.4f} < router threshold {cfg.confidence_threshold})",
+                  io={"input": {"overall_conf": round(float(overall_conf), 4),
+                                "threshold": cfg.confidence_threshold, "confidence_router": True},
+                      "output": {"decision": "pending_review"}})
+        return "pending_review"
+
+    # Re-query the just-saved header fields — needed by BOTH the no-rules and rules paths so the
+    # Approval Gate (`approval_field`) can consult an extracted header on either path.
+    headers = (
+        await session.exec(select(IdpExtractedHeader).where(IdpExtractedHeader.job_id == job_id))
+    ).all()
+
+    # Approval Gate: `approval_field` names WHICH value carries the approval decision. Default
+    # "rule_action" -> use the base decision unchanged. Any other value names an extracted HEADER
+    # field whose value is compared against approve_value. Applied on BOTH the rules and no-rules paths.
+    def _apply_gate(base_status: str) -> str:
+        af = getattr(cfg, "approval_field", "rule_action") or "rule_action"
+        if af == "rule_action":
+            return base_status
+        gate_val = next(
+            (h.reviewed_value if getattr(h, "reviewed_value", None) not in (None, "") else h.extracted_value
+             for h in headers if h.field_name == af),
+            None,
+        )
+        return "auto_approved" if str(gate_val) == str(cfg.approve_value) else "pending_review"
+
     if not rules:
         if overall_conf <= 0.0:
             new_status = "pending_review"
@@ -373,16 +433,16 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
             new_status = "auto_approved"
         else:
             new_status = "pending_review"
+        new_status = _apply_gate(new_status)
+        if overall_conf <= 0.0:  # zero-confidence (no fields) always routes to review, even via approval_field
+            new_status = "pending_review"
         flow.step("route", "ok", f"{new_status} (no rules; threshold={cfg.confidence_threshold})",
                   io={"input": {"overall_conf": round(float(overall_conf), 4), "rules_count": 0,
                                "threshold": cfg.confidence_threshold, "default_action": cfg.default_rule_action},
                       "output": {"decision": new_status}})
         return new_status
 
-    # Re-query the just-saved fields + any detected visual elements for the rule conditions.
-    headers = (
-        await session.exec(select(IdpExtractedHeader).where(IdpExtractedHeader.job_id == job_id))
-    ).all()
+    # Re-query the just-saved line-items + any detected visual elements for the rule conditions.
     line_items = (
         await session.exec(select(IdpExtractedLineItem).where(IdpExtractedLineItem.job_id == job_id))
     ).all()
@@ -407,7 +467,8 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
         flow.step("route", "warn", f"rules engine error ({e}); falling back to review")
         return "pending_review"
 
-    new_status = "auto_approved" if action in (cfg.approve_value, "auto_approve") else "pending_review"
+    base_status = "auto_approved" if action in (cfg.approve_value, "auto_approve") else "pending_review"
+    new_status = _apply_gate(base_status)
     if overall_conf <= 0.0:
         new_status = "pending_review"
     flow.step(
@@ -418,6 +479,29 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
             "output": {"decision": new_status, "matched_group": matched, "failed_conditions": failed}},
     )
     return new_status
+
+
+def _match_route(cfg, doc, headers) -> str | None:
+    """Multi-Branch Router: resolve route_field's value -> matched route label, else 'unmatched'.
+
+    Returns None when no router node is present (route_field unset or route_map empty), so the
+    caller leaves ``route_label`` untouched (backward-compatible). ``document_type`` /
+    ``predicted_type`` read the classifier's predicted type off the document; any other route_field
+    names an extracted HEADER whose (reviewed-or-extracted) value is matched. Matching is
+    case-insensitive; a value with no map entry -> "unmatched".
+    """
+    if not getattr(cfg, "route_field", None) or not getattr(cfg, "route_map", None):
+        return None
+    rf = str(cfg.route_field).strip().lower()
+    if rf in ("document_type", "predicted_type"):
+        val = getattr(doc, "predicted_type", None)
+    else:
+        val = next(
+            (h.reviewed_value if getattr(h, "reviewed_value", None) not in (None, "") else h.extracted_value
+             for h in headers if h.field_name == cfg.route_field),
+            None,
+        )
+    return cfg.route_map.get(str(val).strip().lower(), "unmatched") if val is not None else "unmatched"
 
 
 # ─────────────────────────── differentiator hooks ───────────────────────────
@@ -525,6 +609,24 @@ async def _hook_classify(session, document_id: UUID, base_agent, merged_text: st
         if result.get("skip"):
             flow.step("classify", "skip",
                       f"type={result.get('predicted_type')!r} not in selected types — document skipped")
+            return True
+
+        # Multi-type routing (AI Field Extractor `config_names`): the classifier's predicted type
+        # selects the matching Field Configuration; a document whose type has no matching config is
+        # marked skipped. Takes precedence over the classifier's own auto-select. Empty map (no
+        # config_names) -> fall through to the selected_config_id auto-select below, unchanged.
+        if getattr(cfg, "config_name_map", None):
+            pt = (result.get("predicted_type") or "").strip().lower()
+            matched_cid = cfg.config_name_map.get(pt)
+            if matched_cid is not None:
+                cfg.field_config_id = matched_cid if isinstance(matched_cid, UUID) else UUID(str(matched_cid))
+                cfg.extraction_mode = MODE_NAMED
+                flow.step("classify", "ok", f"type={pt!r} -> matched multi-type config",
+                          io={"output": {"predicted_type": result.get("predicted_type"),
+                                         "selected_config_id": str(matched_cid)}})
+                return False
+            flow.step("classify", "skip",
+                      f"type={pt!r} has no matching config in config_names — document skipped")
             return True
 
         sel = result.get("selected_config_id")
@@ -965,6 +1067,9 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             await _save_artifact(
                 storage, agent_scope, f"flow_logs/{document_id}/flow.log", flow.render().encode("utf-8")
             )
+            # Webhook Output: a split parent has no extraction of its own -> notify with an empty
+            # payload and status "skipped" (each child notifies from its own finalize). Non-fatal.
+            await _maybe_webhook(cfg, document_id, job.id, {}, "skipped", flow)
             if trace_ctx:
                 await end_idp_trace(trace_ctx, outputs={"status": "split", "child_ids": [str(cid) for cid in child_ids]})
             return
@@ -995,6 +1100,8 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         # merged, page-numbered, layout-reconstructed text (citation-friendly)
         if trace_ctx:
             start_span(trace_ctx, "text_merge", inputs={"token_count": len(tokens)})
+        # NOTE: this unconditional merge of digital + OCR tokens IS the "Output Parser" node's
+        # behavior; the node has no settings, so no per-node resolution is needed (see plan Task 7).
         merged_text = build_merged_text(tokens)
         if trace_ctx:
             end_span(trace_ctx, "text_merge", outputs={"char_count": len(merged_text)})
@@ -1052,6 +1159,8 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             session.add(doc)
             session.add(job)
             await session.commit()
+            # Webhook Output: a doc skipped by classification still notifies (empty extraction). Non-fatal.
+            await _maybe_webhook(cfg, document_id, job.id, {}, "skipped", flow)
             if trace_ctx:
                 await end_idp_trace(trace_ctx, outputs={"status": "skipped"})
             return
@@ -1328,6 +1437,16 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         # 8. finalize
         doc = await session.get(IdpDocument, document_id)  # refresh (save committed)
         doc.status = new_status
+        # Multi-Branch Router: label the document by which route its route_field matched (or
+        # "unmatched"). No router node -> _match_route returns None -> route_label left untouched
+        # (backward-compatible). Headers are keyed by job.id (their save key), same as _route.
+        _route_headers = (
+            await session.exec(select(IdpExtractedHeader).where(IdpExtractedHeader.job_id == job.id))
+        ).all()
+        route_label = _match_route(cfg, doc, headers=_route_headers)
+        if route_label is not None:
+            doc.route_label = route_label
+            flow.step("route_branch", "ok", f"multi-branch route: {route_label}")
         doc.processing_completed_at = _utcnow()
         ms = int((time.monotonic() - t0) * 1000)
         flow.step("finalize", "ok", f"completed in {ms} ms")
@@ -1342,6 +1461,9 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         await _save_artifact(
             storage, agent_scope, f"flow_logs/{document_id}/flow.log", flow.render().encode("utf-8")
         )
+        # Webhook Output: notify the configured endpoint with the finalized result. Non-fatal and a
+        # no-op when no Webhook Output node is present (cfg.webhook_url is None).
+        await _maybe_webhook(cfg, document_id, job.id, extracted, new_status, flow)
         if trace_ctx:
             await end_idp_trace(trace_ctx, outputs={"status": new_status}, processing_time_ms=ms)
 
@@ -1372,6 +1494,8 @@ def _apply_failure(doc, job, flow: FlowLog, message: str, *, touch_doc: bool) ->
 
 async def _fail(session, doc, job, flow: FlowLog, message: str, *, touch_doc: bool = True) -> None:
     """Record a failed run (best-effort, with its own rollback guard)."""
+    # NOTE: the failure-path Webhook Output notification is a DEFERRED follow-up (Codex blocker #4):
+    # _fail has no `cfg` and a failure can occur before cfg is resolved, so no _maybe_webhook here.
     doc_id = doc.id if doc is not None else None
     job_id = job.id if job is not None else None
     try:

@@ -59,6 +59,8 @@ class IdpDocument(SQLModel, table=True):  # type: ignore[call-arg]
     )
     source_metadata: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
     predicted_type: str | None = Field(default=None, sa_column=Column(String(100), nullable=True))
+    # Multi-Branch Router node label (route_1..route_5 / "unmatched"); NULL when no router node runs.
+    route_label: str | None = Field(default=None, sa_column=Column(String, nullable=True))
     status: str = Field(
         default="queued",
         sa_column=Column(String(30), nullable=False, default="queued", index=True),

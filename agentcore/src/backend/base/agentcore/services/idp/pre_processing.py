@@ -8,8 +8,11 @@ from loguru import logger
 from agentcore.services.idp.doc_orientation import predict_orientation
 
 
-def deskew_image(image: np.ndarray) -> tuple[np.ndarray, float]:
+def deskew_image(image: np.ndarray, skew_threshold: float = 0.1) -> tuple[np.ndarray, float]:
     """Detect and correct minor skew (small rotation angles) in a document image.
+
+    ``skew_threshold`` is the minimum absolute tilt (degrees) that triggers a correction; a
+    smaller detected tilt is left untouched. The historical 0.1 floor is always enforced.
 
     Returns the corrected image and the skew angle in degrees.
     """
@@ -31,7 +34,7 @@ def deskew_image(image: np.ndarray) -> tuple[np.ndarray, float]:
     if abs(angle) > 85.0:
         angle = 0.0
 
-    if abs(angle) < 0.1:
+    if abs(angle) < max(skew_threshold, 0.1):
         return image, 0.0
 
     (h, w) = image.shape[:2]
@@ -69,7 +72,7 @@ def detect_rotation_angle(image: np.ndarray) -> int:
 
 # ─────────────────────────────── sync implementations ────────────────────────
 
-def _sync_correct_skew(file_bytes: bytes, file_type: str) -> tuple[bytes, float]:
+def _sync_correct_skew(file_bytes: bytes, file_type: str, skew_threshold: float = 0.1) -> tuple[bytes, float]:
     if file_type == "pdf":
         try:
             doc = fitz.open(stream=file_bytes, filetype="pdf")
@@ -80,7 +83,7 @@ def _sync_correct_skew(file_bytes: bytes, file_type: str) -> tuple[bytes, float]
                 pix = doc[page_num].get_pixmap(dpi=150)
                 nparr = np.frombuffer(pix.tobytes("png"), np.uint8)
                 img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                corrected_img, angle = deskew_image(img)
+                corrected_img, angle = deskew_image(img, skew_threshold)
                 avg_angle += angle
                 _, encoded_page = cv2.imencode(".png", corrected_img)
                 img_doc = fitz.open(stream=encoded_page.tobytes(), filetype="png")
@@ -101,7 +104,7 @@ def _sync_correct_skew(file_bytes: bytes, file_type: str) -> tuple[bytes, float]
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if img is None:
                 return file_bytes, 0.0
-            corrected_img, angle = deskew_image(img)
+            corrected_img, angle = deskew_image(img, skew_threshold)
             _, encoded_img = cv2.imencode(f".{file_type}", corrected_img)
             return encoded_img.tobytes(), angle
         except Exception as e:
@@ -109,7 +112,12 @@ def _sync_correct_skew(file_bytes: bytes, file_type: str) -> tuple[bytes, float]
             return file_bytes, 0.0
 
 
-def _sync_correct_rotation(file_bytes: bytes, file_type: str) -> tuple[bytes, int]:
+def _sync_correct_rotation(
+    file_bytes: bytes, file_type: str, allowed_angles: list[int] | None = None
+) -> tuple[bytes, int]:
+    # Only snap to the configured rotations; a detected angle outside the set is treated as
+    # upright (no rotation). Default = the historical {90, 180, 270}.
+    allowed = set(allowed_angles or [90, 180, 270])
     if file_type == "pdf":
         try:
             doc = fitz.open(stream=file_bytes, filetype="pdf")
@@ -120,6 +128,8 @@ def _sync_correct_rotation(file_bytes: bytes, file_type: str) -> tuple[bytes, in
                 nparr = np.frombuffer(pix.tobytes("png"), np.uint8)
                 img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 angle = detect_rotation_angle(img)
+                if angle not in allowed:
+                    angle = 0
                 if page_num == 0:
                     detected_angle = angle
                 corrected_img = rotate_image(img, angle)
@@ -143,6 +153,8 @@ def _sync_correct_rotation(file_bytes: bytes, file_type: str) -> tuple[bytes, in
             if img is None:
                 return file_bytes, 0
             angle = detect_rotation_angle(img)
+            if angle not in allowed:
+                angle = 0
             corrected_img = rotate_image(img, angle)
             _, encoded_img = cv2.imencode(f".{file_type}", corrected_img)
             return encoded_img.tobytes(), angle
@@ -153,15 +165,19 @@ def _sync_correct_rotation(file_bytes: bytes, file_type: str) -> tuple[bytes, in
 
 # ─────────────────────────────── async public API ────────────────────────────
 
-async def detect_and_correct_skew(file_bytes: bytes, file_type: str) -> tuple[bytes, float]:
+async def detect_and_correct_skew(
+    file_bytes: bytes, file_type: str, skew_threshold: float = 0.1
+) -> tuple[bytes, float]:
     """Detect and correct document skew. Runs in executor to avoid blocking the event loop."""
     file_type = file_type.lower().strip(".")
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _sync_correct_skew, file_bytes, file_type)
+    return await loop.run_in_executor(None, _sync_correct_skew, file_bytes, file_type, skew_threshold)
 
 
-async def detect_and_correct_rotation(file_bytes: bytes, file_type: str) -> tuple[bytes, int]:
+async def detect_and_correct_rotation(
+    file_bytes: bytes, file_type: str, allowed_angles: list[int] | None = None
+) -> tuple[bytes, int]:
     """Detect and correct page rotation (90 / 180 / 270). Runs in executor to avoid blocking the event loop."""
     file_type = file_type.lower().strip(".")
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _sync_correct_rotation, file_bytes, file_type)
+    return await loop.run_in_executor(None, _sync_correct_rotation, file_bytes, file_type, allowed_angles)

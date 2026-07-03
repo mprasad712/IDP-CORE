@@ -33,6 +33,8 @@ _N_MATH = "Math Reconcile"
 _N_CONFIDENCE_ROUTER = "Confidence Router"
 _N_CHUNKING = "Chunking Strategy"
 _N_RULES = "Rules / Conditions"
+_N_WEBHOOK = "Webhook Output"
+_N_ROUTER = "Multi-Branch Router"
 # Visual Element Detection node toggles -> the element types the backend detector ACTUALLY
 # emits (signature, checkbox, qr, barcode). Stamps/logos/handwriting are not yet detected by
 # the backend, so those node toggles are intentionally NOT mapped — mapping them would put a
@@ -72,6 +74,10 @@ class ResolvedPipelineConfig:
     # Whether a PaddleOCR node is present on the canvas. In Auto mode on a scanned doc, an OCR node
     # routes to text (OCR wins over vision); its ABSENCE lets a vision model take the vision route.
     has_ocr_node: bool = False
+    # AI Field Extractor `config_names` multi-type routing (companion to field_config_id above):
+    # maps a doc-type name (lowercased) -> its field_config_id. Non-empty => the classifier's
+    # predicted type picks the config per document; empty {} => classifier auto-select stays.
+    config_name_map: dict = field(default_factory=dict)
     # detector
     allowed_extensions: set[str] = field(default_factory=set)
     skip_unmatched: bool = True
@@ -84,6 +90,8 @@ class ResolvedPipelineConfig:
     # routing / behaviour
     default_rule_action: str = "pending_review"
     confidence_threshold: float = 0.8
+    confidence_router_present: bool = False
+    confidence_field: str = "confidence"
     multi_doc_split: bool = False
     ocr_lang: str = "en"
     # differentiators. The three node-features turn ON when their canvas node is present
@@ -109,6 +117,17 @@ class ResolvedPipelineConfig:
     canvas_rules: list[dict] = field(default_factory=list)
     approval_field: str = "rule_action"
     approve_value: str = "auto_approve"
+    # Webhook Output node: POST the finalized result to an external endpoint (non-fatal).
+    # Absent node -> webhook_url None -> the pipeline's webhook step is a no-op.
+    webhook_url: str | None = None
+    webhook_method: str = "POST"
+    webhook_headers: dict = field(default_factory=dict)
+    webhook_include_metadata: bool = False
+    # Multi-Branch Router node: route_field names the value to switch on (a header name, or
+    # document_type/predicted_type); route_map maps that value (lowercased) -> a route label
+    # (route_1..route_5). Absent node -> route_field None + empty route_map -> no route_label set.
+    route_field: str | None = None
+    route_map: dict = field(default_factory=dict)
 
 
 # ───────────────────────── graph helpers ─────────────────────────
@@ -270,12 +289,25 @@ def _as_bool(v, default: bool) -> bool:
 
 
 def _parse_angles(v) -> list[int]:
+    """Parse the Scan Corrector `allowed_angles` field into a list of ints.
+
+    Accepts a comma-string ("90,180,270") OR a list/tuple (as the UI may emit). Invalid
+    entries are skipped; an empty/invalid result falls back to the default [90, 180, 270].
+    """
     if isinstance(v, str):
         out = []
         for part in v.split(","):
             part = part.strip()
             if part.isdigit():
                 out.append(int(part))
+        return out or [90, 180, 270]
+    if isinstance(v, (list, tuple)):
+        out = []
+        for x in v:
+            try:
+                out.append(int(str(x).strip()))
+            except (TypeError, ValueError):
+                continue
         return out or [90, 180, 270]
     return [90, 180, 270]
 
@@ -284,6 +316,55 @@ def _parse_ext(v) -> set[str]:
     if isinstance(v, str):
         return {e.strip().lower().lstrip(".") for e in v.split(",") if e.strip()}
     return set()
+
+
+async def _lookup_config_id_by_name(session, org_id, name: str) -> UUID | None:
+    """Resolve a Field Configuration NAME -> id.
+
+    Deterministic + tenant-safe ordering (identical to the legacy inline lookup): the agent's own
+    org first (unique by the (org_id, name) constraint, newest wins), else ONLY global configs
+    (org_id NULL) — never another tenant's private config — preferring a real config over a
+    catalogue template (is_template False sorts first), then newest. Returns None on a miss.
+    """
+    if not name:
+        return None
+    base_q = select(IdpFieldConfiguration).where(
+        IdpFieldConfiguration.name == name,
+        IdpFieldConfiguration.deleted_at.is_(None),
+        IdpFieldConfiguration.is_active.is_(True),
+    )
+    row = None
+    if org_id is not None:
+        row = (
+            await session.exec(
+                base_q.where(IdpFieldConfiguration.org_id == org_id)
+                .order_by(IdpFieldConfiguration.created_at.desc())
+            )
+        ).first()
+    if row is None:
+        row = (
+            await session.exec(
+                base_q.where(IdpFieldConfiguration.org_id.is_(None)).order_by(
+                    IdpFieldConfiguration.is_template.asc(),
+                    IdpFieldConfiguration.created_at.desc(),
+                )
+            )
+        ).first()
+    return row.id if row else None
+
+
+async def _build_config_name_map(session, org_id, names: list[str]) -> dict:
+    """Map each Field Configuration NAME -> its id (lowercased key). Unresolvable names are dropped.
+
+    Powers the AI Field Extractor's ``config_names`` multi-type routing: the classifier's predicted
+    type (lowercased) is matched against this map to pick the matching config per document.
+    """
+    out: dict[str, UUID] = {}
+    for nm in names or []:
+        cid = await _lookup_config_id_by_name(session, org_id, nm)
+        if cid is not None:
+            out[nm.strip().lower()] = cid
+    return out
 
 
 async def resolve_pipeline_config(
@@ -325,37 +406,22 @@ async def resolve_pipeline_config(
         # "no field configuration resolved") rather than silently using a stale/wrong config.
         field_config_id = None
         try:
-            base_q = select(IdpFieldConfiguration).where(
-                IdpFieldConfiguration.name == config_name,
-                IdpFieldConfiguration.deleted_at.is_(None),
-                IdpFieldConfiguration.is_active.is_(True),
+            field_config_id = await _lookup_config_id_by_name(
+                session, getattr(base_agent, "org_id", None), config_name
             )
-            agent_org_id = getattr(base_agent, "org_id", None)
-            row = None
-            if agent_org_id is not None:
-                row = (
-                    await session.exec(
-                        base_q.where(IdpFieldConfiguration.org_id == agent_org_id)
-                        .order_by(IdpFieldConfiguration.created_at.desc())
-                    )
-                ).first()
-            if row is None:  # no org-scoped match -> ONLY global configs (org_id NULL), never
-                # another tenant's private config. Prefer a real global config over a catalogue
-                # template (is_template False sorts first), then newest. Deterministic + tenant-safe.
-                row = (
-                    await session.exec(
-                        base_q.where(IdpFieldConfiguration.org_id.is_(None)).order_by(
-                            IdpFieldConfiguration.is_template.asc(),
-                            IdpFieldConfiguration.created_at.desc(),
-                        )
-                    )
-                ).first()
-            if row:
-                field_config_id = row.id
-            else:
+            if field_config_id is None:
                 logger.warning(f"[agent_config] named config '{config_name}' not found / not active")
         except Exception as e:  # pragma: no cover - defensive
             logger.warning(f"[agent_config] config_name lookup failed: {e}")
+
+    # AI Field Extractor multi-type routing: the plural `config_names` list names several Field
+    # Configurations; the classifier's predicted type later selects the matching one per document.
+    # Empty/absent -> {} -> the classifier's own auto-select stays in charge (backward-compatible).
+    config_names_raw = _field(extractor, "config_names")
+    config_names = [str(x) for x in config_names_raw] if isinstance(config_names_raw, list) else []
+    config_name_map = await _build_config_name_map(
+        session, getattr(base_agent, "org_id", None), config_names
+    )
 
     # model
     model_id = _resolve_model_id_from_graph(data)
@@ -419,6 +485,31 @@ async def resolve_pipeline_config(
         _field(gate_node, "approve_value") if gate_node else extra.get("approve_value") or "auto_approve"
     )
 
+    # 6. Webhook Output settings — the node's PRESENCE + a URL turn it on; absent -> url None (no-op).
+    webhook_node = _find_node(data, _N_WEBHOOK)
+    webhook_url = (_field(webhook_node, "url") or None) if webhook_node else None
+    webhook_method = str(_field(webhook_node, "method", "POST") or "POST").upper() if webhook_node else "POST"
+    webhook_include_metadata = _as_bool(_field(webhook_node, "include_metadata"), False) if webhook_node else False
+    _wh_headers_raw = _field(webhook_node, "headers") if webhook_node else None
+    try:
+        webhook_headers = json.loads(_wh_headers_raw) if isinstance(_wh_headers_raw, str) and _wh_headers_raw.strip() else {}
+    except Exception:
+        webhook_headers = {}
+    if not isinstance(webhook_headers, dict):
+        webhook_headers = {}
+
+    # 7. Multi-Branch Router settings — the node's PRESENCE + a route_field turn it on. Reads
+    #    route_field (the value to switch on) and route_1..route_5 (the values that map to each
+    #    route label). Absent node -> route_field None + empty map -> no routing (backward-compat).
+    router_mb = _find_node(data, _N_ROUTER)
+    route_field = (_field(router_mb, "route_field") or None) if router_mb else None
+    route_map: dict[str, str] = {}
+    if router_mb:
+        for i in range(1, 6):
+            v = _field(router_mb, f"route_{i}")
+            if v:
+                route_map[str(v).strip().lower()] = f"route_{i}"
+
     # ── Differentiator toggles: a canvas node's PRESENCE enables the feature; idp_agent.extra
     # is a fallback/override (so API/test config and on-the-fly toggling still work). ──
     classifier_node = _find_node(data, _N_CLASSIFIER)
@@ -443,6 +534,11 @@ async def resolve_pipeline_config(
     # ConfidenceRouter threshold overrides the extra/default confidence_threshold
     if confidence_router_node:
         confidence_threshold = _to_float(_field(confidence_router_node, "threshold"), confidence_threshold)
+
+    confidence_router_present = confidence_router_node is not None
+    confidence_field = str(
+        _field(confidence_router_node, "confidence_field") if confidence_router_node else "confidence"
+    ) or "confidence"
 
     detect_enabled = detection_node is not None or _as_bool(extra.get("detect_enabled"), False)
     if detection_node is not None:
@@ -479,6 +575,7 @@ async def resolve_pipeline_config(
         prompt=prompt,
         config_name=config_name,
         field_config_id=field_config_id,
+        config_name_map=config_name_map,
         multimodal_requested=multimodal_requested,
         page_selection_mode=str(_field(page, "selection_mode", "all")),
         first_n_pages=_to_int(_field(page, "first_n_pages"), 3),
@@ -488,11 +585,15 @@ async def resolve_pipeline_config(
         skip_unmatched=bool(_field(detector, "skip_unmatched", True)),
         min_text_length=_to_int(_field(detector, "min_text_length"), 50),
         fix_skew=bool(_field(scan, "fix_skew", True)),
-        skew_threshold=_to_float(_field(scan, "skew_threshold"), 0.5),
+        # No Scan Corrector node -> keep the historical effective floor (0.1); with a node, honor
+        # its configured threshold (default 0.5). Preserves behavior for agents without the node.
+        skew_threshold=(_to_float(_field(scan, "skew_threshold"), 0.5) if scan is not None else 0.1),
         fix_rotation=bool(_field(scan, "fix_rotation", True)),
         allowed_angles=_parse_angles(_field(scan, "allowed_angles")),
         default_rule_action=default_rule_action,
         confidence_threshold=confidence_threshold,
+        confidence_router_present=confidence_router_present,
+        confidence_field=confidence_field,
         multi_doc_split=bool(idp_agent.multi_doc_split),
         ocr_lang=ocr_lang,
         classify_enabled=classify_enabled,
@@ -514,6 +615,12 @@ async def resolve_pipeline_config(
         canvas_rules=canvas_rules,
         approval_field=approval_field,
         approve_value=approve_value,
+        webhook_url=webhook_url,
+        webhook_method=webhook_method,
+        webhook_headers=webhook_headers,
+        webhook_include_metadata=webhook_include_metadata,
+        route_field=route_field,
+        route_map=route_map,
     )
 
 
