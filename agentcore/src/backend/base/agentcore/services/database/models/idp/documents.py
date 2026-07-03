@@ -73,6 +73,7 @@ class IdpDocument(SQLModel, table=True):  # type: ignore[call-arg]
     failed_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False, index=True))
     updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
+    deleted_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
 
     __table_args__ = (
         CheckConstraint("source IN ('upload','mail_connector','sharepoint','onedrive','other')", name="ck_idp_documents_source"),

@@ -9,14 +9,16 @@ import {
   Clock,
   AlertCircle,
   MinusCircle,
+  Plus,
   X,
   RotateCcw,
   Info,
   ListTree,
   Save,
   GitCompare,
+  Trash2,
 } from "lucide-react";
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,6 +50,9 @@ import {
   useGetProcessedDocs,
   useGetProcessedDoc,
   usePatchProcessedDocFields,
+  useDeleteProcessedDoc,
+  usePostLineItemRow,
+  useDeleteLineItemRow,
   usePostProcessedDocReview,
   type ProcessedDoc as ApiProcessedDoc,
   type ProcessedDocDetail,
@@ -79,6 +84,13 @@ interface LineItem {
   [col: string]: string;
 }
 
+// Per-cell / per-field extraction evidence (model reasoning + source location),
+// surfaced as an Info tooltip on both header fields and line-item cells.
+type FieldEvidence = {
+  reasoning?: string | null;
+  source?: Record<string, unknown> | null;
+};
+
 interface ProcessedDoc {
   id: string;
   name: string;
@@ -96,6 +108,8 @@ interface ProcessedDoc {
   reviewDraft?: boolean; // reviewer saved edits as a draft (pending, not yet submitted)
   // rowId -> (columnName -> idp_extracted_line_items.id), so edited cells can be PATCHed.
   cellIds?: Record<string, Record<string, string>>;
+  // rowId -> (columnName -> per-cell evidence), so line-item cells can show reasoning/source.
+  cellMeta?: Record<string, Record<string, FieldEvidence>>;
 }
 
 // ─── API → page adapters ──────────────────────────────────────────────────────
@@ -141,11 +155,16 @@ function enrichWithDetail(
   const cols = Array.from(new Set(detail.line_items.map((li) => li.column_name)));
   const rows: Record<number, LineItem> = {};
   const cellIds: Record<string, Record<string, string>> = {};
+  const cellMeta: Record<string, Record<string, FieldEvidence>> = {};
   detail.line_items.forEach((li) => {
     const rowId = String(li.row_index);
     rows[li.row_index] = rows[li.row_index] ?? ({ id: rowId } as LineItem);
     rows[li.row_index][li.column_name] = li.reviewed_value ?? li.extracted_value ?? "";
     (cellIds[rowId] = cellIds[rowId] ?? {})[li.column_name] = li.id;
+    (cellMeta[rowId] = cellMeta[rowId] ?? {})[li.column_name] = {
+      reasoning: li.reasoning_trace,
+      source: li.source_location,
+    };
   });
   return {
     ...base,
@@ -154,10 +173,15 @@ function enrichWithDetail(
     lineItems: Object.values(rows),
     lineItemColumns: cols,
     cellIds,
+    cellMeta,
   };
 }
 
-// ─── CSV export (client-side; no backend export endpoint) ──────────────────────
+// ─── CSV export ────────────────────────────────────────────────────────────────
+// Two paths: (1) exportDocData → the REAL backend export of a single document's
+// extracted header + line-item VALUES (endpoint GET /processed-docs/{id}/export).
+// (2) exportDocsToCsv → a lightweight client-side SUMMARY of a list of docs
+// (filename/agent/date/type/confidence/status only) used by the page-level bulk export.
 
 function _csvEscape(v: unknown): string {
   return `"${String(v ?? "").replace(/"/g, '""')}"`;
@@ -198,8 +222,34 @@ async function downloadDocLog(doc: ProcessedDoc): Promise<void> {
   }
 }
 
-/** Build the reasoning + source-location tooltip text for a field (audit/evidence trail). */
-function evidenceTitle(f: ExtractedField): string {
+/**
+ * Download the REAL extracted data (header fields + line items) for a single
+ * processed document via the authenticated backend export endpoint.
+ * `values=both` returns the reviewed value falling back to the extracted value.
+ */
+async function exportDocData(
+  docId: string,
+  filename: string,
+  format: "csv" | "excel" = "csv",
+): Promise<void> {
+  try {
+    const res = await api.get(
+      `/api/v1/idp/processed-docs/${docId}/export?format=${format}&values=both`,
+      { responseType: "blob" },
+    );
+    const url = URL.createObjectURL(res.data as Blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${filename || "document"}.${format === "excel" ? "xlsx" : "csv"}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error("[ProcessedDocs] data export failed", e);
+  }
+}
+
+/** Build the reasoning + source-location tooltip text for a field/cell (audit/evidence trail). */
+function evidenceTitle(f: FieldEvidence): string {
   const parts: string[] = [];
   if (f.reasoning) parts.push(`Why: ${f.reasoning}`);
   const src = f.source as { page_number?: number; bounding_box?: unknown } | null | undefined;
@@ -506,6 +556,11 @@ function DocDetailView({
   const patchFields = usePatchProcessedDocFields(doc.id);
   const postReview  = usePostProcessedDocReview(doc.id);
 
+  // Line-item row add/delete persist immediately via their own endpoints (separate from the
+  // PATCH-save flow); both invalidate the detail query so the fresh row set + cell ids refetch.
+  const postLineItemRow   = usePostLineItemRow();
+  const deleteLineItemRow = useDeleteLineItemRow();
+
   // Sync local state when the detail data arrives after initial render.
   // useState only uses the prop value on mount; subsequent prop updates are ignored
   // unless we explicitly sync here. We only overwrite when the incoming data is
@@ -532,6 +587,34 @@ function DocDetailView({
     setLineItems((prev) => prev.map((r) => r.id === id ? { ...r, [col]: value } : r));
   };
 
+  // Add a blank line-item row (persists immediately at the backend), then reflect it locally so
+  // it's editable right away; the refetch supplies its cell ids so the existing PATCH-save flow
+  // can persist edits to the new row. `some` guard avoids a duplicate if the refetch synced first.
+  const handleAddRow = async () => {
+    const columns: Record<string, string | null> = {};
+    doc.lineItemColumns.forEach((col) => { columns[col] = ""; });
+    try {
+      const res = await postLineItemRow.mutateAsync({ id: doc.id, columns });
+      const newRow: LineItem = { id: String(res.row_index) };
+      doc.lineItemColumns.forEach((col) => { newRow[col] = ""; });
+      setLineItems((prev) => (prev.some((r) => r.id === newRow.id) ? prev : [...prev, newRow]));
+    } catch (e) {
+      console.error("[ProcessedDocs] add line-item row failed", e);
+    }
+  };
+
+  // Delete an entire line-item row. row.id === String(row_index) (set in enrichWithDetail), so the
+  // real row_index is Number(row.id). Persists immediately, then drops the row from local state.
+  const handleDeleteRow = async (row: LineItem) => {
+    if (!window.confirm("Delete this line-item row?")) return;
+    try {
+      await deleteLineItemRow.mutateAsync({ id: doc.id, rowIndex: Number(row.id) });
+      setLineItems((prev) => prev.filter((r) => r.id !== row.id));
+    } catch (e) {
+      console.error("[ProcessedDocs] delete line-item row failed", e);
+    }
+  };
+
 
   // draft=true → "Save as Draft": persist edits only, keep the doc in Pending Review.
   // draft=false → "Submit": persist edits + finalize (records reviewer, moves to Reviewed).
@@ -541,8 +624,8 @@ function DocDetailView({
     let editsSaved = false;
     try {
       // Build the field-update payload from the DB ids carried through enrichWithDetail.
-      // (Add Row / row-delete are disabled for backend docs — there are no create/delete
-      // line-item endpoints — so only existing cells are edited, and every cell id resolves.)
+      // (Row add/delete persist immediately via their own endpoints; this PATCH only updates
+      // existing cell VALUES — every edited cell id resolves via doc.cellIds after refetch.)
       const headers: FieldUpdateItem[] = fields
         .filter((f) => f.fieldId)
         .map((f) => ({ id: f.fieldId as string, value: f.value === "" ? null : f.value }));
@@ -690,31 +773,91 @@ function DocDetailView({
                       {doc.lineItemColumns.map((col) => (
                         <TableHead key={col} className="text-[11px] font-semibold uppercase tracking-wide py-2">{col}</TableHead>
                       ))}
+                      {!isReadOnly && <TableHead className="w-10 py-2" />}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {lineItems.map((row) => (
+                    {lineItems.map((row) => {
+                      // A newly added row (Add Row) has no backend cell ids until the detail
+                      // refetch lands. handleSave skips rows with no doc.cellIds entry, so
+                      // allowing edits before sync would SILENTLY DROP them. Until cellIds
+                      // arrive, keep the row read-only with a subtle "syncing…" affordance;
+                      // once the refetch populates cellIds the row becomes editable normally.
+                      const rowSyncing = !isReadOnly && !doc.cellIds?.[row.id];
+                      return (
                       <TableRow key={row.id} className="hover:bg-muted/20">
-                        {doc.lineItemColumns.map((col) => (
-                          <TableCell key={col} className="py-2">
-                            {isReadOnly ? (
-                              <span className="text-sm">{row[col]}</span>
+                        {doc.lineItemColumns.map((col) => {
+                          const meta = doc.cellMeta?.[row.id]?.[col];
+                          return (
+                            <TableCell key={col} className="py-2">
+                              <div className="flex items-center gap-1.5">
+                                {isReadOnly ? (
+                                  <span className="text-sm flex-1">{row[col]}</span>
+                                ) : rowSyncing ? (
+                                  // Not yet editable: value would be dropped on Save until this
+                                  // row's cell ids arrive from the detail refetch.
+                                  <Input
+                                    value={row[col] ?? ""}
+                                    readOnly
+                                    disabled
+                                    title="Saving new row… editable once synced"
+                                    className="h-7 text-sm bg-transparent border-transparent px-2 flex-1 opacity-60 cursor-not-allowed"
+                                  />
+                                ) : (
+                                  <Input
+                                    value={row[col] ?? ""}
+                                    onChange={(e) => updateCell(row.id, col, e.target.value)}
+                                    className="h-7 text-sm bg-transparent border-transparent hover:border-input focus:border-[#D04A02] px-2 flex-1"
+                                  />
+                                )}
+                                {meta && (meta.reasoning || meta.source) && (
+                                  <span title={evidenceTitle(meta)} className="text-muted-foreground/40 hover:text-foreground cursor-help flex-shrink-0" aria-label={`Extraction evidence — ${evidenceTitle(meta)}`}>
+                                    <Info className="h-3.5 w-3.5" />
+                                  </span>
+                                )}
+                              </div>
+                            </TableCell>
+                          );
+                        })}
+                        {!isReadOnly && (
+                          <TableCell className="py-2 w-10 text-right">
+                            {rowSyncing ? (
+                              <span
+                                title="Saving new row…"
+                                aria-label="Saving new row"
+                                className="inline-flex h-5 w-5 items-center justify-center"
+                              >
+                                <span className="h-3 w-3 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-[#D04A02]" />
+                              </span>
                             ) : (
-                              <Input
-                                value={row[col] ?? ""}
-                                onChange={(e) => updateCell(row.id, col, e.target.value)}
-                                className="h-7 text-sm bg-transparent border-transparent hover:border-input focus:border-[#D04A02] px-2"
-                              />
+                              <button
+                                title="Delete row"
+                                disabled={deleteLineItemRow.isPending}
+                                onClick={() => handleDeleteRow(row)}
+                                className="p-1 rounded-md text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
                             )}
                           </TableCell>
-                        ))}
+                        )}
                       </TableRow>
-                    ))}
+                      );
+                    })}
                   </TableBody>
                 </Table>
               </div>
-              {/* Add Row / row-delete removed: editing existing cell values persists via PATCH,
-                  but there is no backend endpoint to create or delete line-item rows yet. */}
+              {/* Add Row — persists a blank row via POST /line-items; it becomes editable via the
+                  existing cell-PATCH flow. Hidden for read-only (auto-approved / reviewed) docs. */}
+              {!isReadOnly && (
+                <button
+                  onClick={handleAddRow}
+                  disabled={postLineItemRow.isPending}
+                  className="mt-2 flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-[#D04A02] transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                >
+                  <Plus className="h-3.5 w-3.5" /> {postLineItemRow.isPending ? "Adding…" : "Add Row"}
+                </button>
+              )}
             </section>
           )}
 
@@ -863,6 +1006,13 @@ function DocTable({
   docs: ProcessedDoc[];
   onView: (doc: ProcessedDoc) => void;
 }) {
+  // Soft-delete: hides the doc from the list (row is retained in the DB with deleted_at set).
+  const deleteDoc = useDeleteProcessedDoc();
+  const handleDelete = async (e: ReactMouseEvent, doc: ProcessedDoc) => {
+    e.stopPropagation(); // keep the row-click drawer from opening
+    if (!window.confirm("Delete this document? It will be hidden from the list.")) return;
+    await deleteDoc.mutateAsync(doc.id); // onSuccess invalidates the list query -> row disappears
+  };
   if (docs.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-muted-foreground gap-3">
@@ -931,12 +1081,19 @@ function DocTable({
                   </button>
                   <button
                     title="Export CSV"
-                    onClick={(e) => { e.stopPropagation(); exportDocsToCsv([doc], `${doc.name || "document"}.csv`); }}
+                    onClick={(e) => { e.stopPropagation(); exportDocData(doc.id, doc.name); }}
                     className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                   >
                     <Download className="h-3.5 w-3.5" />
                   </button>
-                  {/* Delete hidden: no backend DELETE endpoint for processed docs yet. */}
+                  <button
+                    title="Delete"
+                    disabled={deleteDoc.isPending}
+                    onClick={(e) => handleDelete(e, doc)}
+                    className="p-1.5 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               </TableCell>
             </TableRow>

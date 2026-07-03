@@ -5,12 +5,13 @@ import re
 from datetime import datetime, timezone
 from loguru import logger
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, status, Response
 from fastapi.responses import StreamingResponse
 from fastapi_pagination import Params, Page
 from fastapi_pagination.ext.sqlmodel import apaginate
 from sqlmodel import select, or_, and_
+from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, Field as PydanticField
 
 from agentcore.api.utils import CurrentActiveUser, DbSession
@@ -126,6 +127,9 @@ class DocumentReviewRequest(BaseModel):
     notes: str | None = None
     expected_updated_at: datetime | None = None  # M4: optional optimistic-lock precondition
 
+class LineItemRowCreate(BaseModel):
+    columns: dict[str, str | None]  # column_name -> value for the new row
+
 # ──────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────
@@ -221,6 +225,9 @@ async def list_processed_docs(
         stmt = stmt.join(IdpAgent, IdpDocument.agent_id == IdpAgent.id)
         stmt = stmt.where(IdpAgent.extra["has_processed_docs_output"].astext == "true")
 
+    # Hide soft-deleted documents (deleted_at set) from all list results.
+    stmt = stmt.where(IdpDocument.deleted_at.is_(None))
+
     # Apply query filters
     if status_filter:
         stmt = stmt.where(IdpDocument.status == status_filter)
@@ -271,7 +278,7 @@ async def get_processed_doc(
 ):
     """Retrieve full details of an extracted document including header and line items."""
     doc = await session.get(IdpDocument, id)
-    if not doc:
+    if not doc or doc.deleted_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     if not await _can_access_document(session, current_user, doc):
@@ -335,7 +342,7 @@ async def get_processed_doc_file(
     on all deployment configurations).
     """
     doc = await session.get(IdpDocument, id)
-    if not doc:
+    if not doc or doc.deleted_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     if not await _can_access_document(session, current_user, doc):
@@ -415,7 +422,7 @@ async def export_processed_doc(
         )
 
     doc = await session.get(IdpDocument, id)
-    if not doc:
+    if not doc or doc.deleted_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     if not await _can_access_document(session, current_user, doc):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -470,7 +477,7 @@ async def update_extracted_fields(
 ):
     """Apply human modifications to extracted headers or line items (HITL edits)."""
     doc = await session.get(IdpDocument, id)
-    if not doc:
+    if not doc or doc.deleted_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     if not await _can_access_document(session, current_user, doc):
@@ -518,6 +525,83 @@ async def update_extracted_fields(
     return await get_processed_doc(session=session, id=id, current_user=current_user)
 
 
+@router.post("/{id}/line-items", status_code=status.HTTP_201_CREATED)
+async def add_line_item_row(
+    *, session: DbSession, id: UUID, payload: LineItemRowCreate, current_user: CurrentActiveUser,
+):
+    """Add a new line-item ROW (one cell per column) to the latest job of a document."""
+    doc = await session.get(IdpDocument, id)
+    if not doc or doc.deleted_at is not None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if not await _can_access_document(session, current_user, doc):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to edit this document.")
+    job_id = await _latest_job_id(session, id)
+    if not job_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No processing job for this document.")
+    if not payload.columns:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No columns provided for the new row.")
+
+    async def _attempt() -> int:
+        """Compute max(row_index)+1 and insert the row's cells + bump the doc. One call = one txn."""
+        max_row = (await session.exec(
+            select(IdpExtractedLineItem.row_index)
+            .where(IdpExtractedLineItem.document_id == id, IdpExtractedLineItem.job_id == job_id)
+            .order_by(IdpExtractedLineItem.row_index.desc()).limit(1)
+        )).first()
+        new_row = (max_row + 1) if max_row is not None else 0
+        for col_name, val in payload.columns.items():
+            session.add(IdpExtractedLineItem(
+                id=uuid4(), document_id=id, job_id=job_id, row_index=new_row,
+                column_name=col_name, extracted_value=(str(val) if val is not None else None),
+                reviewed_value=(str(val) if val is not None else None), confidence_score=None, is_reviewed=True,
+            ))
+        doc.updated_at = datetime.now(timezone.utc); session.add(doc)
+        await session.commit()
+        return new_row
+
+    # Two concurrent adds can both read the same max(row_index) and collide on the
+    # UniqueConstraint(job_id, row_index, column_name), raising IntegrityError. Roll back,
+    # recompute the next index once, and retry; if it still collides, return a clean 409.
+    try:
+        new_row = await _attempt()
+    except IntegrityError:
+        await session.rollback()
+        try:
+            new_row = await _attempt()
+        except IntegrityError:
+            await session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Could not add row due to a concurrent edit. Please retry.",
+            )
+    return {"row_index": new_row}
+
+
+@router.delete("/{id}/line-items/{row_index}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_line_item_row(
+    *, session: DbSession, id: UUID, row_index: int, current_user: CurrentActiveUser,
+):
+    """Delete an entire line-item ROW (all its cells) from the latest job of a document."""
+    doc = await session.get(IdpDocument, id)
+    if not doc or doc.deleted_at is not None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if not await _can_access_document(session, current_user, doc):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to edit this document.")
+    job_id = await _latest_job_id(session, id)
+    rows = (await session.exec(
+        select(IdpExtractedLineItem).where(
+            IdpExtractedLineItem.document_id == id,
+            IdpExtractedLineItem.job_id == job_id,
+            IdpExtractedLineItem.row_index == row_index,
+        )
+    )).all()
+    for r in rows:
+        await session.delete(r)
+    doc.updated_at = datetime.now(timezone.utc); session.add(doc)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/{id}/review", status_code=status.HTTP_200_OK)
 async def review_processed_doc(
     *,
@@ -528,7 +612,7 @@ async def review_processed_doc(
 ):
     """Complete document review, updating its status to 'reviewed' and logging the HITL session."""
     doc = await session.get(IdpDocument, id)
-    if not doc:
+    if not doc or doc.deleted_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     if not await _can_access_document(session, current_user, doc):
@@ -591,7 +675,7 @@ async def approve_processed_doc(
 ):
     """Directly approve a processed document, transitioning its status to 'reviewed' (or 'auto_approved' if root)."""
     doc = await session.get(IdpDocument, id)
-    if not doc:
+    if not doc or doc.deleted_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     if not await _can_access_document(session, current_user, doc):
@@ -617,3 +701,20 @@ async def approve_processed_doc(
     session.add(doc)
     await session.commit()
     return {"status": "success", "document_status": doc.status}
+
+
+@router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_processed_doc(
+    *, session: DbSession, id: UUID, current_user: CurrentActiveUser,
+):
+    """Soft-delete a processed document: mark deleted_at (hidden from lists) but keep the row/file."""
+    doc = await session.get(IdpDocument, id)
+    if not doc or doc.deleted_at is not None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if not await _can_access_document(session, current_user, doc):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    doc.deleted_at = datetime.now(timezone.utc)
+    doc.updated_at = datetime.now(timezone.utc)
+    session.add(doc)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
