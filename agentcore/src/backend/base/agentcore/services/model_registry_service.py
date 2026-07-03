@@ -66,6 +66,8 @@ async def create_model(
         capabilities=data.capabilities,
         default_params=data.default_params,
         is_active=data.is_active,
+        cost_limit=data.cost_limit,
+        current_cost=0.0,
         created_by=data.created_by,
     )
 
@@ -280,3 +282,140 @@ async def _fetch_config_from_model_service(model_id: UUID) -> dict | None:
     except Exception as e:
         logger.debug("Model-service config fetch failed for %s: %s", model_id, e)
         return None
+
+
+async def sync_model_costs(session: AsyncSession) -> None:
+    """Sync model costs from the Langfuse database to the local model registry.
+
+    Queries the 'observations' table in Langfuse to find the sum of cost
+    for each model, matching by registry_model_id in metadata (or fallback model name).
+    """
+    import os
+    from uuid import UUID
+    from sqlalchemy import create_engine, text
+    from sqlmodel import select
+    from agentcore.services.database.models.model_registry.model import ModelRegistry
+
+    rows = []
+
+    # 1. Try to query Clickhouse first (used by newer Langfuse versions for observations)
+    clickhouse_url = os.getenv("CLICKHOUSE_URL", "http://localhost:8123").strip()
+    clickhouse_user = os.getenv("CLICKHOUSE_USER", "").strip()
+    clickhouse_password = os.getenv("CLICKHOUSE_PASSWORD", "").strip()
+
+    if not clickhouse_url.startswith("http"):
+        clickhouse_url = f"http://{clickhouse_url}"
+
+    try:
+        import httpx
+        # Clickhouse query to get total cost grouped by model and registry_model_id
+        ch_query = """
+            SELECT 
+                metadata['registry_model_id'] AS registry_model_id,
+                provided_model_name AS model_name,
+                SUM(total_cost) AS total_cost
+            FROM observations
+            WHERE type = 'GENERATION' AND provided_model_name IS NOT NULL
+            GROUP BY registry_model_id, model_name
+            FORMAT JSON
+        """
+        auth = None
+        if clickhouse_user and clickhouse_password:
+            auth = (clickhouse_user, clickhouse_password)
+
+        resp = httpx.post(clickhouse_url, auth=auth, data=ch_query, timeout=10.0)
+        if resp.status_code == 200:
+            data = resp.json().get("data", [])
+            for item in data:
+                rows.append((
+                    item.get("registry_model_id") or "",
+                    item.get("model_name") or "",
+                    float(item.get("total_cost") or 0.0)
+                ))
+            logger.info("Successfully fetched %d rows from Clickhouse observations", len(rows))
+    except Exception as e:
+        logger.debug("Failed to query Clickhouse for model costs: %s", e)
+
+    # 2. Fall back to Postgres if Clickhouse query returned no data or failed
+    if not rows:
+        langfuse_db_url = os.getenv("LANGFUSE_DB_URL", "").strip()
+        if langfuse_db_url:
+            try:
+                engine = create_engine(langfuse_db_url, future=True)
+                pg_query = """
+                    SELECT 
+                        COALESCE(
+                            metadata->>'registry_model_id', 
+                            metadata->'invocation_params'->>'registry_model_id'
+                        ) AS registry_model_id,
+                        model AS model_name,
+                        SUM(COALESCE(calculated_total_cost, total_cost, 0)) AS total_cost
+                    FROM observations
+                    WHERE type = 'GENERATION'
+                    GROUP BY registry_model_id, model
+                """
+                with engine.connect() as conn:
+                    result = conn.execute(text(pg_query))
+                    for r in result.fetchall():
+                        rows.append((
+                            r[0] or "",
+                            r[1] or "",
+                            float(r[2] or 0.0)
+                        ))
+                engine.dispose()
+                logger.info("Successfully fetched %d rows from Postgres observations fallback", len(rows))
+            except Exception as e:
+                logger.error("Failed to query Langfuse Postgres database for model costs: %s", e)
+
+    # Aggregate costs
+    costs_by_id = {}
+    legacy_costs_by_name = {}
+
+    for r_id, model_name, total_cost in rows:
+        if r_id:
+            try:
+                costs_by_id[UUID(r_id)] = total_cost
+            except ValueError:
+                pass
+        else:
+            if model_name:
+                legacy_costs_by_name[model_name] = legacy_costs_by_name.get(model_name, 0.0) + total_cost
+
+    # Update local model registry database
+    try:
+        stmt = select(ModelRegistry)
+        db_result = await session.execute(stmt)
+        models = db_result.scalars().all()
+
+        # Find the oldest registered model entry for each unique model name (timezone-naive safe comparison)
+        oldest_model_by_name = {}
+        for m in models:
+            m_dt = m.created_at.replace(tzinfo=None) if m.created_at else datetime.min
+            if m.model_name not in oldest_model_by_name:
+                oldest_model_by_name[m.model_name] = (m, m_dt)
+            else:
+                current_oldest_model, oldest_dt = oldest_model_by_name[m.model_name]
+                if m_dt < oldest_dt:
+                    oldest_model_by_name[m.model_name] = (m, m_dt)
+
+        oldest_ids = {name: item[0].id for name, item in oldest_model_by_name.items()}
+
+        updated_count = 0
+        for model in models:
+            tagged_cost = costs_by_id.get(model.id, 0.0)
+            legacy_cost = legacy_costs_by_name.get(model.model_name, 0.0)
+
+            is_oldest = oldest_ids.get(model.model_name) == model.id
+            cost = tagged_cost + (legacy_cost if is_oldest else 0.0)
+
+            if model.current_cost != cost:
+                model.current_cost = cost
+                session.add(model)
+                updated_count += 1
+
+        if updated_count > 0:
+            await session.commit()
+            logger.info("Successfully synced cost for %d models", updated_count)
+    except Exception as e:
+        logger.error("Failed to update model registry costs in database: %s", e)
+

@@ -63,6 +63,10 @@ async def initialize_database(*, fix_migration: bool = False) -> None:
     except Exception:
         logger.exception("Failed to seed predefined tags (non-fatal)")
     try:
+        await _seed_help_support_faq(database_service)
+    except Exception:
+        logger.exception("Failed to seed Help & Support FAQ (non-fatal)")
+    try:
         from agentcore.services.idp.catalogue import seed_idp_templates
         async with session_getter(database_service) as session:
             await seed_idp_templates(session)
@@ -95,6 +99,56 @@ async def _seed_predefined_tags(db_service: DatabaseService) -> None:
                 )
         await session.commit()
     logger.debug("Predefined tags seeded")
+
+
+async def _seed_help_support_faq(db_service: DatabaseService) -> None:
+    """Insert default Help & Support FAQ questions from the faqs/ directory if they don't already exist."""
+    import os
+    from pathlib import Path
+    from agentcore.services.database.models.help_support.model import HelpSupportQuestion
+
+    faq_dir = Path(__file__).parent / "faqs"
+    if not (faq_dir.exists() and faq_dir.is_dir()):
+        logger.warning(f"FAQ directory {faq_dir} does not exist or is not a directory.")
+        return
+
+    faq_files = list(faq_dir.glob("*.md"))
+    if not faq_files:
+        logger.debug("No FAQ files found in faqs directory.")
+        return
+
+    async with session_getter(db_service) as session:
+        for file_path in faq_files:
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                if not content:
+                    continue
+                
+                lines = content.splitlines()
+                first_line = lines[0].strip()
+                if first_line.startswith("# "):
+                    question_text = first_line[2:].strip()
+                else:
+                    question_text = first_line
+
+                answer_text = "\n".join(lines[1:]).strip()
+                if not question_text or not answer_text:
+                    continue
+
+                existing = (
+                    await session.exec(
+                        select(HelpSupportQuestion).where(HelpSupportQuestion.question == question_text)
+                    )
+                ).first()
+                if not existing:
+                    session.add(HelpSupportQuestion(question=question_text, answer=answer_text))
+                    logger.debug(f"FAQ entry seeded from {file_path.name}: {question_text[:40]}...")
+            except Exception as e:
+                logger.warning(f"Failed to parse or seed FAQ file {file_path.name}: {e}")
+
+        await session.commit()
+    logger.debug("Help & Support FAQs seeded successfully")
 
 
 @asynccontextmanager

@@ -472,6 +472,7 @@ export default function ModelCatalogue(): JSX.Element {
                       "Model ID",
                       "Environment",
                       "Visibility",
+                      "Cost / Limit",
                       ...(isDepartmentAdmin ? ["Created By"] : []),
                       ...(isSuperAdmin ? ["Department Scope"] : []),
                       "Type",
@@ -488,13 +489,15 @@ export default function ModelCatalogue(): JSX.Element {
                               ? "w-[18%] min-w-[220px]"
                               : h === "Provider"
                                 ? "w-[10%] min-w-[120px]"
-                                : h === "Department Scope"
-                                  ? "w-[8%] min-w-[110px]"
-                                  : h === "Environment" || h === "Visibility" || h === "Type" || h === "Status"
-                                    ? "w-[7%] min-w-[90px]"
-                                    : h === "Actions"
-                                      ? "w-[5%] min-w-[64px]"
-                                      : ""
+                                : h === "Cost / Limit"
+                                  ? "w-[10%] min-w-[120px]"
+                                  : h === "Department Scope"
+                                    ? "w-[8%] min-w-[110px]"
+                                    : h === "Environment" || h === "Visibility" || h === "Type" || h === "Status"
+                                      ? "w-[7%] min-w-[90px]"
+                                      : h === "Actions"
+                                        ? "w-[5%] min-w-[64px]"
+                                        : ""
                         }`}
                       >
                         {t(h)}
@@ -507,7 +510,7 @@ export default function ModelCatalogue(): JSX.Element {
                   {filteredModels.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={9 + (isDepartmentAdmin ? 1 : 0) + (isSuperAdmin ? 1 : 0) + (canSeeActions ? 1 : 0)}
+                        colSpan={10 + (isDepartmentAdmin ? 1 : 0) + (isSuperAdmin ? 1 : 0) + (canSeeActions ? 1 : 0)}
                         className="px-6 py-12 text-center text-sm text-muted-foreground"
                       >
                         {displayModels.length === 0
@@ -581,6 +584,23 @@ export default function ModelCatalogue(): JSX.Element {
                               VISIBILITY_LABELS[model.visibility_scope ?? "private"] ??
                                 model.visibility_scope ??
                                 "Private",
+                            )}
+                          </span>
+                        </td>
+
+                        {/* Cost / Limit */}
+                        <td className="w-[10%] min-w-[120px] px-4 py-4 text-sm align-middle">
+                          <span className="font-medium">
+                            ${model.current_cost !== undefined ? Number(model.current_cost).toFixed(4) : "0.0000"}
+                          </span>
+                          <span className="text-muted-foreground">
+                            {" / "}
+                            {model.cost_limit !== null && model.cost_limit !== undefined ? (
+                              <span className="text-destructive font-semibold">
+                                ${Number(model.cost_limit).toFixed(2)}
+                              </span>
+                            ) : (
+                              "∞"
                             )}
                           </span>
                         </td>
