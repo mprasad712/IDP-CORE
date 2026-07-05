@@ -245,7 +245,12 @@ export function AgentSidebarComponent({ isLoading, readOnly = false }: AgentSide
   const baseData = useMemo(() => {
     const merged: Record<string, any> = { ...IDP_NODES };
     if (data["models"]) {
-      merged["models"] = data["models"];
+      // Embeddings Model is not offered in the IDP builder — show only the LLM model node.
+      merged["models"] = Object.fromEntries(
+        Object.entries(data["models"]).filter(
+          ([, comp]: [string, any]) => comp?.display_name !== "Embeddings Model",
+        ),
+      );
     }
     return merged;
   }, [data]);

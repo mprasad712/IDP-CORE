@@ -35,15 +35,16 @@ _N_CHUNKING = "Chunking Strategy"
 _N_RULES = "Rules / Conditions"
 _N_WEBHOOK = "Webhook Output"
 _N_ROUTER = "Multi-Branch Router"
-# Visual Element Detection node toggles -> the element types the backend detector ACTUALLY
-# emits (signature, checkbox, qr, barcode). Stamps/logos/handwriting are not yet detected by
-# the backend, so those node toggles are intentionally NOT mapped — mapping them would put a
-# never-emitted type into the filter and silently drop everything. If a user selects only the
-# unsupported toggles (or none), the set is empty -> None -> detect all supported types.
+# Visual Element Detection node toggles -> stored element types. QR/barcode use a
+# deterministic decoder (pyzbar, no model). Signature/checkbox/stamp/logo are detected by a
+# vision LLM connected to the node.
+# If a user selects no toggles, the set is empty -> None -> detect all supported types.
 _DETECT_FIELD_TO_TYPES = {
     "detect_signatures": ("signature",),
     "detect_checkboxes": ("checkbox",),
     "detect_qr": ("qr", "barcode"),
+    "detect_stamps": ("stamp",),
+    "detect_logos": ("logo",),
 }
 
 # Service-level extraction modes (multimodal is parked -> downgraded to a text mode)
@@ -104,6 +105,9 @@ class ResolvedPipelineConfig:
     classify_doc_types: list[str] = field(default_factory=list)
     detect_enabled: bool = False
     detect_enabled_types: set[str] | None = None
+    # Vision model for signature/checkbox/stamp/logo/handwriting detection (QR/barcode need no
+    # model). Resolved from the detection node's own model / wired LLM, else the extraction model.
+    detect_model_id: str | None = None
     math_reconcile_enabled: bool = False
     math_reconcile_max_attempts: int = 2
     math_reconcile_tolerance: float = 0.01
@@ -202,6 +206,27 @@ def _direct_model_uuid(node: dict | None) -> str | None:
         return str(UUID(candidate))
     except (ValueError, TypeError):
         return None
+
+
+def _llm_model_for_node(data: dict | None, node: dict | None) -> str | None:
+    """Model registry UUID from a 'Large Language Model' node wired into ``node``'s ``llm`` handle.
+
+    Mirrors the extractor's edge resolution but for an arbitrary IDP node (e.g. Visual Element
+    Detection). Returns None when nothing suitable is connected."""
+    if not node:
+        return None
+    node_id = node.get("id")
+    if not node_id:
+        return None
+    llm_by_id = {n.get("id"): n for n in _find_nodes(data, _N_MODEL)}
+    if not llm_by_id:
+        return None
+    for edge in _edges(data):
+        if edge.get("target") == node_id and edge.get("source") in llm_by_id:
+            mid = _llm_node_model_uuid(llm_by_id[edge.get("source")])
+            if mid:
+                return mid
+    return None
 
 
 def _resolve_model_id_from_graph(data: dict | None) -> str | None:
@@ -556,6 +581,14 @@ async def resolve_pipeline_config(
             else None
         )
 
+    # Vision model for element detection: the detection node's own model / wired LLM node, else
+    # fall back to the extraction model. (None collapses to model_id when there is no detection node.)
+    detect_model_id = (
+        _direct_model_uuid(detection_node)
+        or _llm_model_for_node(data, detection_node)
+        or model_id
+    )
+
     math_reconcile_enabled = math_node is not None or _as_bool(extra.get("math_reconcile_enabled"), False)
     math_reconcile_max_attempts = _to_int(
         _field(math_node, "max_retries") if math_node else extra.get("math_reconcile_max_attempts"), 2
@@ -602,6 +635,7 @@ async def resolve_pipeline_config(
         classify_doc_types=classify_doc_types,
         detect_enabled=detect_enabled,
         detect_enabled_types=detect_enabled_types,
+        detect_model_id=detect_model_id,
         math_reconcile_enabled=math_reconcile_enabled,
         math_reconcile_max_attempts=math_reconcile_max_attempts,
         math_reconcile_tolerance=math_reconcile_tolerance,

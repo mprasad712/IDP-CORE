@@ -8,12 +8,93 @@ import { useUploadAndProcess } from "@/controllers/API/queries/idp/use-upload-an
 import useAgentsManagerStore from "@/stores/agentsManagerStore";
 import useAgentStore from "@/stores/agentStore";
 import useAlertStore from "@/stores/alertStore";
+import { useIdpResultStore } from "@/stores/idpResultStore";
 import IconComponent from "../../../../../../components/common/genericIconComponent";
 import { ICON_STROKE_WIDTH } from "../../../../../../constants/constants";
 import { cn } from "../../../../../../utils/utils";
 
 const IDP_DOCUMENT_TYPES = new Set(["DocumentUpload", "ConnectorInput"]);
 const IDP_ACCEPT = ".pdf,.png,.jpg,.jpeg,.tiff,.tif,.bmp,.xlsx,.xls,.docx,.doc";
+
+// The element types the Visual Element Detection node can produce. We always emit ALL of
+// these as keys so the output shows signature/stamp/logo even when the model found none
+// (empty array) — not just the types that happened to be detected.
+const DETECTION_KEYS = [
+  "signature",
+  "checkbox",
+  "qr",
+  "barcode",
+  "stamp",
+  "logo",
+] as const;
+
+/** Checkbox decoded_value is a JSON string {label, state}; legacy rows were plain "checked"/"unchecked". */
+function parseCheckbox(decoded: any): { label: string | null; state: string } {
+  try {
+    const o = typeof decoded === "string" ? JSON.parse(decoded) : decoded;
+    if (o && typeof o === "object" && ("state" in o || "label" in o)) {
+      return { label: o.label ?? null, state: o.state ?? "unchecked" };
+    }
+  } catch {
+    /* legacy plain-string value */
+  }
+  return {
+    label: null,
+    state: String(decoded ?? "").toLowerCase() === "checked" ? "checked" : "unchecked",
+  };
+}
+
+/** Group a flat detected-elements list into { <type>: [...] } with every DETECTION_KEYS key present. */
+function groupDetected(elements: any[]): Record<string, any[]> {
+  const grouped: Record<string, any[]> = {};
+  for (const k of DETECTION_KEYS) grouped[k] = [];
+  for (const e of elements || []) {
+    const key = e.element_type;
+    // Handwriting detection was removed — ignore any legacy "annotation" rows.
+    if (key === "annotation" || key === "handwriting") continue;
+    if (key === "checkbox") {
+      const { label, state } = parseCheckbox(e.decoded_value);
+      (grouped[key] = grouped[key] || []).push({
+        page: e.page_number,
+        label,
+        state,
+        confidence: e.confidence,
+      });
+    } else {
+      (grouped[key] = grouped[key] || []).push({
+        page: e.page_number,
+        value: e.decoded_value,
+        confidence: e.confidence,
+      });
+    }
+  }
+  return grouped;
+}
+
+/** Shape the polled processed-doc into the display object shown in the main chat area. */
+function buildIdpDisplay(result: any) {
+  return {
+    status: result.status,
+    document_type: result.predicted_type,
+    confidence: result.overall_confidence,
+    headers: result.headers?.map((h: any) => ({
+      field: h.field_name,
+      value: h.extracted_value,
+      confidence: h.confidence_score,
+    })),
+    line_items: result.line_items?.map((li: any) => ({
+      row: li.row_index,
+      column: li.column_name,
+      value: li.extracted_value,
+      confidence: li.confidence_score,
+    })),
+    // Grouped by type with every detectable type as a key (empty when none found).
+    // Only present when a Visual Element Detection node ran for this document.
+    ...(result.detected_elements?.length
+      ? { detected_elements: groupDetected(result.detected_elements) }
+      : {}),
+  };
+}
 
 interface NoInputViewProps {
   isBuilding: boolean;
@@ -31,6 +112,8 @@ const NoInputView: React.FC<NoInputViewProps> = ({
   const nodes = useAgentStore((state) => state.nodes);
   const currentAgentId = useAgentsManagerStore((state) => state.currentAgentId);
   const setErrorData = useAlertStore((state) => state.setErrorData);
+  const setIdpResult = useIdpResultStore((state) => state.setResult);
+  const clearIdpResult = useIdpResultStore((state) => state.clearResult);
 
   const isIDPAgent = nodes.some(
     (n: any) => n.data?.type && IDP_DOCUMENT_TYPES.has(n.data.type),
@@ -53,6 +136,15 @@ const NoInputView: React.FC<NoInputViewProps> = ({
   };
 
   useEffect(() => () => stopPolling(), []);
+
+  // Publish the extracted result to the shared store so the MAIN chat area renders it
+  // (instead of showing it docked at the bottom of the input). Clear it on unmount.
+  useEffect(() => {
+    if (state === "done" && result) {
+      setIdpResult(buildIdpDisplay(result));
+    }
+  }, [state, result, setIdpResult]);
+  useEffect(() => () => clearIdpResult(), [clearIdpResult]);
 
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollCountRef = useRef(0);
@@ -126,6 +218,7 @@ const NoInputView: React.FC<NoInputViewProps> = ({
     setFile(null);
     setResult(null);
     setErrorMsg("");
+    clearIdpResult();
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -276,43 +369,20 @@ const NoInputView: React.FC<NoInputViewProps> = ({
         </div>
       )}
 
-      {/* JSON result */}
+      {/* Done — the extracted result is rendered in the MAIN chat area (idpResultStore). */}
       {state === "done" && result && (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Extracted Data
-            </span>
-            <Button variant="ghost" size="icon" className="h-6 w-6" onClick={reset}>
-              <IconComponent
-                name="X"
-                className="h-3.5 w-3.5"
-                strokeWidth={ICON_STROKE_WIDTH}
-              />
-            </Button>
+        <div className="flex flex-col items-center gap-3 rounded-lg border border-border bg-muted/30 px-4 py-5">
+          <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+            <IconComponent
+              name="CircleCheck"
+              className="h-5 w-5 text-emerald-500"
+              strokeWidth={ICON_STROKE_WIDTH}
+            />
+            Document processed
           </div>
-          <pre className="max-h-64 overflow-auto rounded-lg border border-border bg-muted/40 p-3 text-xs text-foreground custom-scroll">
-            {JSON.stringify(
-              {
-                status: result.status,
-                document_type: result.predicted_type,
-                confidence: result.overall_confidence,
-                headers: result.headers?.map((h: any) => ({
-                  field: h.field_name,
-                  value: h.extracted_value,
-                  confidence: h.confidence_score,
-                })),
-                line_items: result.line_items?.map((li: any) => ({
-                  row: li.row_index,
-                  column: li.column_name,
-                  value: li.extracted_value,
-                  confidence: li.confidence_score,
-                })),
-              },
-              null,
-              2,
-            )}
-          </pre>
+          <p className="text-xs text-muted-foreground">
+            Extracted data is shown above.
+          </p>
           <Button variant="outline" className="w-full text-sm" onClick={reset}>
             Process Another Document
           </Button>

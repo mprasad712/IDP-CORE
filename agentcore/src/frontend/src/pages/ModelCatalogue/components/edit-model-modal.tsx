@@ -1041,43 +1041,8 @@ export default function EditModelModal({
             )}
           </fieldset>
 
-          {/* ========== AVAILABILITY ========== */}
-          <fieldset className="space-y-3">
-            <legend className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-              {t("Availability")}
-            </legend>
-            <p className="text-xs text-muted-foreground">
-              {t("Choose where this model should appear")}
-            </p>
-            <div className="flex flex-col gap-2">
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={showInOrchestrator}
-                  onChange={(e) => {
-                    if (!e.target.checked && !showInAgent) return; // at least one must be checked
-                    setShowInOrchestrator(e.target.checked);
-                  }}
-                  className="h-4 w-4 rounded border-border"
-                />
-                {t("Orchestrator Chat")}
-                <span className="text-xs text-muted-foreground">({t("direct model chat")})</span>
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={showInAgent}
-                  onChange={(e) => {
-                    if (!e.target.checked && !showInOrchestrator) return; // at least one must be checked
-                    setShowInAgent(e.target.checked);
-                  }}
-                  className="h-4 w-4 rounded border-border"
-                />
-                {t("Agent Canvas")}
-                <span className="text-xs text-muted-foreground">({t("for building agents")})</span>
-              </label>
-            </div>
-          </fieldset>
+          {/* AVAILABILITY section removed from the UI — models default to both
+              Orchestrator + Agent (show_in stays ["orchestrator","agent"] via buildShowIn). */}
 
           {/* ========== CAPABILITIES ========== */}
           {!isEmbedding && (

@@ -62,8 +62,6 @@ export default function RequestModelModal({
   const [azureApiVersion, setAzureApiVersion] = useState(DEFAULT_AZURE_API_VERSION);
   const [vertexProjectId, setVertexProjectId] = useState("");
   const [vertexLocation, setVertexLocation] = useState("us-central1");
-  const [showInOrchestrator, setShowInOrchestrator] = useState(true);
-  const [showInAgent, setShowInAgent] = useState(true);
   const [customHeaders, setCustomHeaders] = useState("");
   const [environmentSelection, setEnvironmentSelection] = useState<"uat" | "prod" | "both">("uat");
   const [visibilityScope, setVisibilityScope] = useState<"private" | "department" | "organization">("private");
@@ -353,12 +351,8 @@ export default function RequestModelModal({
               ...(temperature !== "" ? { temperature: Number(temperature) } : {}),
               ...(maxTokens !== "" ? { max_tokens: Number(maxTokens) } : {}),
             },
-        show_in: (() => {
-          const arr: string[] = [];
-          if (showInOrchestrator) arr.push("orchestrator");
-          if (showInAgent) arr.push("agent");
-          return arr.length > 0 ? arr : ["orchestrator", "agent"];
-        })(),
+        // Availability UI removed — models are available in both surfaces by default.
+        show_in: ["orchestrator", "agent"],
         is_active: true,
       });
       setSuccessData({
@@ -557,34 +551,8 @@ export default function RequestModelModal({
             </div>
           </fieldset>
 
-          <fieldset className="space-y-3">
-            <legend className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-              {t("Availability")}
-            </legend>
-            <p className="text-xs text-muted-foreground">{t("Choose where this model should appear")}</p>
-            <div className="flex flex-col gap-2">
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={showInOrchestrator}
-                  onChange={(e) => { if (!e.target.checked && !showInAgent) return; setShowInOrchestrator(e.target.checked); }}
-                  className="h-4 w-4 rounded border-border"
-                />
-                {t("Orchestrator Chat")}
-                <span className="text-xs text-muted-foreground">({t("direct model chat")})</span>
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={showInAgent}
-                  onChange={(e) => { if (!e.target.checked && !showInOrchestrator) return; setShowInAgent(e.target.checked); }}
-                  className="h-4 w-4 rounded border-border"
-                />
-                {t("Agent Canvas")}
-                <span className="text-xs text-muted-foreground">({t("for building agents")})</span>
-              </label>
-            </div>
-          </fieldset>
+          {/* AVAILABILITY section removed from the UI — show_in defaults to both
+              ["orchestrator","agent"] in the submit payload. */}
 
           <fieldset className="space-y-4">
             <legend className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">

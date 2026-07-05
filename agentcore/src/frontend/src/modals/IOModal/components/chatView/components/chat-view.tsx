@@ -8,6 +8,7 @@ import useCustomUseFileHandler from "@/customization/hooks/use-custom-use-file-h
 import { track } from "@/customization/utils/analytics";
 import { useGetAgentId } from "@/modals/IOModal/hooks/useGetAgentId";
 import useAgentsManagerStore from "@/stores/agentsManagerStore";
+import { useIdpResultStore } from "@/stores/idpResultStore";
 import { useMessagesStore } from "@/stores/messagesStore";
 import { useUtilityStore } from "@/stores/utilityStore";
 import { useVoiceStore } from "@/stores/voiceStore";
@@ -48,6 +49,7 @@ export default function ChatView({
     undefined,
   );
   const messages = useMessagesStore((state) => state.messages);
+  const idpResult = useIdpResultStore((state) => state.result);
   const nodes = useAgentStore((state) => state.nodes);
   const chatInput = inputs.find((input) => input.type === "ChatInput");
   const chatInputNode = nodes.find((node) => node.id === chatInput?.id);
@@ -251,6 +253,17 @@ export default function ChatView({
                   onHitlDone={handleHitlDone}
                 />
               ))
+            ) : idpResult ? (
+              <div className="flex min-h-0 w-full flex-1 flex-col">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Extracted Data
+                  </span>
+                </div>
+                <pre className="custom-scroll min-h-0 flex-1 overflow-auto rounded-lg border border-border bg-muted/40 p-4 text-xs text-foreground">
+                  {JSON.stringify(idpResult, null, 2)}
+                </pre>
+              </div>
             ) : (
               <div className="flex w-full flex-grow flex-col items-center justify-center">
                 <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border bg-muted/30 p-8">

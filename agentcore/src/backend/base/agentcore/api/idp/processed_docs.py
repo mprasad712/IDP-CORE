@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field as PydanticField
 
 from agentcore.api.utils import CurrentActiveUser, DbSession
 from agentcore.services.database.models.idp.documents import (
+    IdpDetectedElement,
     IdpDocument,
     IdpExtractedHeader,
     IdpExtractedLineItem,
@@ -92,9 +93,23 @@ class ExtractedLineItemRead(BaseModel):
     class Config:
         from_attributes = True
 
+class DetectedElementRead(BaseModel):
+    id: UUID
+    element_type: str  # signature|stamp|checkbox|qr|barcode|logo|annotation
+    page_number: int
+    bounding_box: dict | None
+    confidence: float | None
+    decoded_value: str | None
+
+    class Config:
+        from_attributes = True
+
 class ProcessedDocDetailRead(ProcessedDocRead):
     headers: list[ExtractedHeaderRead] = []
     line_items: list[ExtractedLineItemRead] = []
+    # Visual Element Detection output (signatures/checkboxes/QR/stamps/logos/handwriting).
+    # Empty unless a Visual Element Detection node ran for this document.
+    detected_elements: list[DetectedElementRead] = []
     error_message: str | None = None
 
 # Key used inside IdpDocument.extra (JSONB) to mark a saved-but-not-submitted review draft.
@@ -312,9 +327,18 @@ async def get_processed_doc(
     )
     line_items = (await session.exec(stmt_lines)).all()
 
+    # Detected visual elements (document-scoped, produced by a Visual Element Detection node).
+    stmt_detected = (
+        select(IdpDetectedElement)
+        .where(IdpDetectedElement.document_id == id)
+        .order_by(IdpDetectedElement.page_number.asc(), IdpDetectedElement.created_at.asc())
+    )
+    detected_elements = (await session.exec(stmt_detected)).all()
+
     detail = ProcessedDocDetailRead.model_validate(doc)
     detail.headers = headers
     detail.line_items = line_items
+    detail.detected_elements = detected_elements
     detail.error_message = last_job.error_message if last_job else None
     return detail
 

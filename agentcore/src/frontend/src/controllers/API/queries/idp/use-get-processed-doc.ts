@@ -28,9 +28,19 @@ export interface ExtractedLineItem {
   is_reviewed: boolean;
 }
 
+export interface DetectedElement {
+  id: string;
+  element_type: string; // signature|stamp|checkbox|qr|barcode|logo|annotation
+  page_number: number;
+  bounding_box: Record<string, number> | null;
+  confidence: number | null;
+  decoded_value: string | null;
+}
+
 export interface ProcessedDocDetail extends ProcessedDoc {
   headers: ExtractedHeader[];
   line_items: ExtractedLineItem[];
+  detected_elements: DetectedElement[];
   error_message: string | null;
 }
 

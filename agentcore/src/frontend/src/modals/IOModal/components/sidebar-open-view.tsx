@@ -1,6 +1,7 @@
 import ShadTooltip from "@/components/common/shadTooltipComponent";
 import { Button } from "@/components/ui/button";
 import useAgentStore from "@/stores/agentStore";
+import { useIdpResultStore } from "@/stores/idpResultStore";
 import { useVoiceStore } from "@/stores/voiceStore";
 import IconComponent from "../../../components/common/genericIconComponent";
 import type { SidebarOpenViewProps } from "../types/sidebar-open-view";
@@ -23,6 +24,8 @@ export const SidebarOpenView = ({
   const setNewChatOnPlayground = useAgentStore(
     (state) => state.setNewChatOnPlayground,
   );
+
+  const clearIdpResult = useIdpResultStore((state) => state.clearResult);
 
   return (
     <>
@@ -49,6 +52,7 @@ export const SidebarOpenView = ({
                     setSelectedViewField(undefined);
                     setNewSessionCloseVoiceAssistant(true);
                     setNewChatOnPlayground(true);
+                    clearIdpResult();
                   }}
                 >
                   <IconComponent

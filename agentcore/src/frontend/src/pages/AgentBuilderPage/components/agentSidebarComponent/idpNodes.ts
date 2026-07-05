@@ -117,25 +117,6 @@ function dropdownField(name: string, display_name: string, options: string[], va
 
 // Registry-backed model picker (rendered by IDPModelDropdown via the `idp_model_fetch` flag).
 // Stores "display | model_name | uuid"; the backend resolves the UUID (agent_config.py).
-function modelField(name: string, display_name: string, info = "") {
-  return {
-    _input_type: "StrInput",
-    idp_model_fetch: true,
-    advanced: false,
-    display_name,
-    dynamic: false,
-    info,
-    list: false,
-    name,
-    placeholder: "Select a model...",
-    required: false,
-    show: true,
-    title_case: false,
-    type: "str",
-    value: "",
-  };
-}
-
 function promptField(name: string, display_name: string, value = "", info = "") {
   return {
     _input_type: "MessageTextInput",
@@ -715,7 +696,7 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 0,
       base_classes: ["Data"],
-      field_order: ["model_id", "document", "llm", "config_name", "config_names", "input_mode", "model_name"],
+      field_order: ["document", "llm", "config_name", "config_names", "input_mode", "model_name"],
       template: {
         document: {
           _input_type: "HandleInput",
@@ -780,7 +761,6 @@ export const IDP_NODES: IDPData = {
           type: "str",
           value: [],
         },
-        model_id: modelField("model_id", "Model", "Pick a registered model (frontier LLM, local LLM, or SLM). Overrides any connected Language Model node."),
         input_mode: dropdownField(
           "input_mode",
           "Input Mode",
@@ -869,9 +849,9 @@ export const IDP_NODES: IDPData = {
           advanced: false,
           display_name: "Extracted Data",
           dynamic: false,
-          info: "Final extracted (and optionally validated) data to store.",
+          info: "Final results to store. Connect the AI Field Extractor here; you can also connect the Visual Element Detection 'Detected Elements' output — both are stored in the Processed Docs record.",
           input_types: ["Data"],
-          list: false,
+          list: true,
           name: "data",
           placeholder: "",
           required: true,
@@ -952,7 +932,7 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 0,
       base_classes: ["Message"],
-      field_order: ["model_id", "document", "llm", "document_types", "confidence_threshold", "model_name"],
+      field_order: ["document", "llm", "document_types", "confidence_threshold", "model_name"],
       template: {
         document: {
           _input_type: "MessageInput",
@@ -1008,7 +988,6 @@ export const IDP_NODES: IDPData = {
           "Predictions below this threshold are marked as 'unknown'.",
           true,
         ),
-        model_id: modelField("model_id", "Model", "Pick a registered model (frontier LLM, local LLM, or SLM). Overrides any connected Language Model node."),
         model_name: strField(
           "model_name",
           "LLM Model",
@@ -1036,10 +1015,14 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 0,
       base_classes: ["Message", "Data"],
-      // Only the element types the backend actually detects are exposed (signature / checkbox /
-      // QR-barcode). Stamps, logos and handwriting are not yet implemented, so their toggles are
-      // removed to avoid promising unsupported detection.
-      field_order: ["document", "detect_signatures", "detect_checkboxes", "detect_qr"],
+      // QR / barcodes use a built-in decoder (pyzbar) — no model needed. Signatures, checkboxes,
+      // stamps, logos and handwriting are detected by a vision LLM: connect a vision-capable
+      // Language Model node (or pick one via the Model dropdown).
+      field_order: [
+        "document", "llm",
+        "detect_signatures", "detect_checkboxes", "detect_qr",
+        "detect_stamps", "detect_logos",
+      ],
       template: {
         document: {
           _input_type: "MessageInput",
@@ -1056,13 +1039,28 @@ export const IDP_NODES: IDPData = {
           type: "other",
           value: "",
         },
+        llm: {
+          _input_type: "HandleInput",
+          advanced: false,
+          display_name: "Language Model",
+          dynamic: false,
+          info: "Connect a vision-capable Large Language Model node. Used to detect signatures, checkboxes, stamps, logos and handwriting from the page images. QR / barcodes use a built-in decoder and don't need a model.",
+          input_types: ["LanguageModel"],
+          list: false,
+          name: "llm",
+          placeholder: "",
+          required: false,
+          show: true,
+          type: "other",
+          value: "",
+        },
         detect_signatures: boolField("detect_signatures", "Detect Signatures", true),
         detect_checkboxes: boolField("detect_checkboxes", "Detect Checkboxes", true),
         detect_qr: boolField("detect_qr", "Detect QR / Barcodes", true),
-        // detect_stamps / detect_logos / detect_handwriting removed — not supported by the backend detector.
+        detect_stamps: boolField("detect_stamps", "Detect Stamps", true),
+        detect_logos: boolField("detect_logos", "Detect Logos", true),
       },
       outputs: [
-        output("document_with_annotations", "Document + Annotations", ["Message"]),
         output("detected_elements", "Detected Elements", ["Data"]),
       ],
     },

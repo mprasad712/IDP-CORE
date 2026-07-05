@@ -131,8 +131,11 @@ def _io_sample_rows(extracted: dict) -> list:
 
 
 # ─────────────────────────────── helpers ───────────────────────────────
-async def _build_llm(session, model_id: str):
-    """Build a MicroserviceChatModel for a registry model UUID (validated)."""
+async def _build_llm(session, model_id: str, *, temperature: float | None = None):
+    """Build a MicroserviceChatModel for a registry model UUID (validated).
+
+    ``temperature`` is forwarded to the model service; pass 0 for tasks that should be as
+    reproducible as possible (e.g. visual element detection)."""
     from agentcore.services.database.models.model_registry.model import ModelRegistry
     from agentcore.services.model_service_client import MicroserviceChatModel
 
@@ -152,6 +155,7 @@ async def _build_llm(session, model_id: str):
         registry_model_id=str(model_id),
         provider="openai",  # placeholder — the model service resolves the real provider
         model=f"idp-extract-{str(model_id)[:8]}",
+        temperature=temperature,
     )
 
 
@@ -545,30 +549,85 @@ async def _hook_split(session, storage, doc, tokens, page_status, cfg, flow: "Fl
 
 
 async def _hook_detect(session, document_id: UUID, file_bytes: bytes, file_type: str, cfg, flow: "FlowLog") -> None:
-    """B30 visual element detection -> idp_detected_elements (used later by the rules engine)."""
+    """B30 visual element detection -> idp_detected_elements (used later by the rules engine).
+
+    QR/barcode use pyzbar (deterministic). Signature/checkbox/stamp/logo/handwriting use a vision
+    LLM built from ``cfg.detect_model_id`` (which falls back to the extraction model)."""
     if not cfg.detect_enabled:
+        logger.info(f"[detect] {document_id}: skipped — no Visual Element Detection node on the canvas")
         return
     try:
-        from agentcore.services.idp.visual_detection import detect_and_persist, OPENCV_AVAILABLE, PYZBAR_AVAILABLE
+        from agentcore.services.idp.visual_detection import detect_and_persist, PYZBAR_AVAILABLE
     except ImportError:
         flow.step("detect_elements", "warn", "visual detection persistence not available yet")
         return
-    # Don't report a silent "0 detected" when NO backend can run — that reads as
-    # "ran, found nothing" when really nothing executed. (opencv does signatures/checkboxes;
-    # pyzbar does QR/barcode — either alone is still a working backend.)
-    if not OPENCV_AVAILABLE and not PYZBAR_AVAILABLE:
-        flow.step("detect_elements", "warn", "detection backend unavailable (opencv + pyzbar missing) — skipped")
+
+    # Split the wanted element types: barcodes use pyzbar, everything else needs the vision model.
+    wanted = cfg.detect_enabled_types  # None -> all types
+    _BARCODE = {"qr", "barcode"}
+    wants_barcode = wanted is None or bool(wanted & _BARCODE)
+    wants_vlm = wanted is None or bool(wanted - _BARCODE)
+    logger.info(
+        f"[detect] {document_id}: starting — enabled_types={sorted(wanted) if wanted else 'ALL'}, "
+        f"model={str(getattr(cfg, 'detect_model_id', None) or cfg.model_id)[:8]}…"
+    )
+
+    # Build the vision model only when a VLM element type is wanted and a model is resolved.
+    llm_model = None
+    detect_model_id = getattr(cfg, "detect_model_id", None) or cfg.model_id
+    if wants_vlm and detect_model_id:
+        try:
+            # Use the model's default temperature — forcing 0 on this vision model produced
+            # empty detections in testing, while the default reliably found elements.
+            llm_model = await _build_llm(session, detect_model_id)
+        except Exception as e:
+            flow.step("detect_elements", "warn", f"vision model unavailable ({e}); detecting QR/barcode only")
+
+    # Nothing can run? (no pyzbar for barcodes AND no vision model for the rest.) Say so explicitly
+    # rather than logging a misleading "0 detected".
+    can_barcode = wants_barcode and PYZBAR_AVAILABLE
+    can_vlm = wants_vlm and llm_model is not None
+    if not can_barcode and not can_vlm:
+        if wants_vlm and not detect_model_id:
+            msg = "no vision model — connect a Language Model to the Visual Element Detection node"
+        else:
+            msg = "no detection backend available — skipped"
+        flow.step("detect_elements", "warn", msg)
+        logger.info(f"[detect] {document_id}: {msg}")
         return
+
     try:
         # Isolated session: detect_and_persist commits internally; a failure must not poison main.
+        diag: dict = {}
         async with session_scope() as hook_session:
-            ids = await detect_and_persist(hook_session, document_id, file_bytes, file_type, cfg.detect_enabled_types)
+            ids = await detect_and_persist(
+                hook_session, document_id, file_bytes, file_type, wanted,
+                llm_model=llm_model, diag=diag, clear_existing=True,
+            )
         detail = f"{len(ids)} element(s) detected"
-        if not OPENCV_AVAILABLE:
-            detail += " (signature/checkbox skipped — opencv not installed)"
-        if not PYZBAR_AVAILABLE:
+        # Surface what the vision model actually did, so a silent 0 is diagnosable in the flow log:
+        # pages sent to the model, raw items it returned (before filtering), and any per-page errors.
+        if llm_model is not None:
+            detail += (
+                f" — vision model {str(detect_model_id)[:8]}…: "
+                f"{diag.get('pages', 0)} page(s) sent, {diag.get('raw_items', 0)} raw item(s)"
+            )
+            if diag.get("retries"):
+                detail += f", {diag['retries']} retry(ies) on empty"
+            errs = diag.get("errors") or []
+            if errs:
+                detail += f", {len(errs)} page error(s): {errs[0]}"
+            # When the model returned but nothing parsed, show what it actually said.
+            samples = diag.get("samples") or []
+            if diag.get("raw_items", 0) == 0 and samples:
+                detail += f" | model output: {samples[0]}"
+        if wants_barcode and not PYZBAR_AVAILABLE:
             detail += " (QR/barcode skipped — pyzbar not installed)"
+        if wants_vlm and llm_model is None:
+            detail += " (signature/checkbox/stamp/logo skipped — no vision model)"
         flow.step("detect_elements", "ok", detail)
+        # Also emit to the server log so detection status is visible without opening the flow log.
+        logger.info(f"[detect] {document_id}: {detail}")
     except Exception as e:
         flow.step("detect_elements", "warn", f"skipped ({e})")
 
@@ -652,8 +711,11 @@ async def _hook_classify(session, document_id: UUID, base_agent, merged_text: st
     return False
 
 
-async def _hook_math_reconcile(extracted, llm, job, cfg, flow: "FlowLog"):
-    """B31 math reconcile: fix arithmetic BEFORE save. Returns the (possibly corrected) extraction."""
+async def _hook_math_reconcile(extracted, llm, job, cfg, flow: "FlowLog", *, page_images=None, ocr_text=None):
+    """B31 math reconcile: fix arithmetic BEFORE save. Returns the (possibly corrected) extraction.
+
+    ``page_images`` (vision route) / ``ocr_text`` (text route) are forwarded so a correction can
+    re-read the document instead of only rebalancing numbers."""
     if not cfg.math_reconcile_enabled or not isinstance(extracted, dict):
         return extracted
     try:
@@ -666,6 +728,8 @@ async def _hook_math_reconcile(extracted, llm, job, cfg, flow: "FlowLog"):
             extracted, llm,
             max_attempts=cfg.math_reconcile_max_attempts,
             tolerance=getattr(cfg, "math_reconcile_tolerance", 0.01),
+            ocr_text=ocr_text,
+            page_images=page_images,
         )
         res = res if isinstance(res, dict) else {}
         job.math_reconcile_attempts = int(res.get("attempts", 0) or 0)
@@ -1174,6 +1238,7 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         llm = await _build_llm(session, cfg.model_id)
         vision_used = route in ("vision", "text_vision")
         _rmid = getattr(llm, "registry_model_id", None)
+        page_images = None  # set on the vision path below; kept None for text routes
 
         # HOOK: B35 long-document handling — long docs are split into section/page chunks,
         # extracted per chunk and merged; short docs take the single-pass path unchanged.
@@ -1336,7 +1401,11 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         # HOOK: B31 math reconcile — re-prompt the LLM to fix arithmetic BEFORE saving.
         if trace_ctx:
             start_span(trace_ctx, "math_reconcile", inputs={"attempts_max": cfg.math_reconcile_max_attempts}, observation_type="generation", registry_model_id=_rmid)
-        extracted = await _hook_math_reconcile(extracted, llm, job, cfg, flow)
+        extracted = await _hook_math_reconcile(
+            extracted, llm, job, cfg, flow,
+            page_images=(page_images if vision_used else None),
+            ocr_text=(merged_text if (merged_text and merged_text.strip()) else None),
+        )
         
         reconcile_usage = None
         reconcile_model = None

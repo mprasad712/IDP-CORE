@@ -91,6 +91,33 @@ type FieldEvidence = {
   source?: Record<string, unknown> | null;
 };
 
+type DetectedElementRow = {
+  type: string; // signature|stamp|checkbox|qr|barcode|logo
+  page: number;
+  value: string | null; // decoded_value (QR payload, text on a stamp, etc.)
+  label?: string | null; // checkbox: the option the box refers to
+  state?: string | null; // checkbox: "checked" | "unchecked"
+  confidence: number; // 0–100
+  boundingBox?: Record<string, number> | null;
+};
+
+/** Checkbox decoded_value is JSON {label, state}; legacy rows were a plain "checked"/"unchecked" string. */
+function parseCheckbox(decoded: unknown): { label: string | null; state: string } {
+  try {
+    const o = typeof decoded === "string" ? JSON.parse(decoded) : decoded;
+    if (o && typeof o === "object" && ("state" in o || "label" in o)) {
+      const rec = o as { label?: string | null; state?: string };
+      return { label: rec.label ?? null, state: rec.state ?? "unchecked" };
+    }
+  } catch {
+    /* legacy plain-string value */
+  }
+  return {
+    label: null,
+    state: String(decoded ?? "").toLowerCase() === "checked" ? "checked" : "unchecked",
+  };
+}
+
 interface ProcessedDoc {
   id: string;
   name: string;
@@ -101,6 +128,8 @@ interface ProcessedDoc {
   overallConfidence: number;
   status: DocStatus;
   headerFields: ExtractedField[];
+  // Visual Element Detection output — only populated when that node ran for the document.
+  detectedElements?: DetectedElementRow[];
   lineItems: LineItem[];
   lineItemColumns: string[];
   reviewer?: string;
@@ -166,10 +195,29 @@ function enrichWithDetail(
       source: li.source_location,
     };
   });
+  const detectedElements: DetectedElementRow[] = (detail.detected_elements ?? [])
+    // Handwriting detection was removed — hide any legacy "annotation" rows from old runs.
+    .filter((e) => e.element_type !== "annotation")
+    .map((e) => {
+      const row: DetectedElementRow = {
+        type: e.element_type,
+        page: e.page_number,
+        value: e.decoded_value,
+        confidence: Math.round((e.confidence ?? 0) * 100),
+        boundingBox: e.bounding_box,
+      };
+      if (e.element_type === "checkbox") {
+        const cb = parseCheckbox(e.decoded_value);
+        row.label = cb.label;
+        row.state = cb.state;
+      }
+      return row;
+    });
   return {
     ...base,
     reviewDraft: detail.review_draft ?? base.reviewDraft,
     headerFields,
+    detectedElements,
     lineItems: Object.values(rows),
     lineItemColumns: cols,
     cellIds,
@@ -760,20 +808,91 @@ function DocDetailView({
             </div>
           </section>
 
+          {/* Detected visual elements — only shown when a Visual Element Detection node ran */}
+          {(doc.detectedElements?.length ?? 0) > 0 && (
+            <section>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 mb-3">
+                Detected Elements
+              </p>
+              {/* Coverage: every detectable type with its count (0 when the model found none). */}
+              <div className="mb-3 flex flex-wrap gap-1.5">
+                {["signature", "checkbox", "qr", "barcode", "stamp", "logo"].map(
+                  (type) => {
+                    const count = (doc.detectedElements ?? []).filter(
+                      (el) => (el.type === "annotation" ? "handwriting" : el.type) === type,
+                    ).length;
+                    return (
+                      <span
+                        key={type}
+                        className={cn(
+                          "rounded px-2 py-0.5 text-[10px] font-medium capitalize",
+                          count > 0
+                            ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                            : "bg-muted text-muted-foreground/60",
+                        )}
+                      >
+                        {type} {count}
+                      </span>
+                    );
+                  },
+                )}
+              </div>
+              <div className="rounded-xl border divide-y overflow-hidden">
+                {doc.detectedElements!.map((el, i) => (
+                  <div
+                    key={`${el.type}-${el.page}-${i}`}
+                    className="grid items-center gap-3 px-4 py-2.5 grid-cols-[120px_48px_1fr_auto]"
+                  >
+                    <span className="text-[11px] font-semibold capitalize truncate">{el.type}</span>
+                    <span className="text-[11px] font-mono text-muted-foreground">p.{el.page}</span>
+                    <span className="text-sm">
+                      {el.type === "checkbox" ? (
+                        <span className="flex items-center gap-2">
+                          <span className="truncate">
+                            {el.label || (
+                              <span className="italic text-muted-foreground/50">(no label)</span>
+                            )}
+                          </span>
+                          <span
+                            className={cn(
+                              "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
+                              el.state === "checked"
+                                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                                : "bg-muted text-muted-foreground/70",
+                            )}
+                          >
+                            {el.state}
+                          </span>
+                        </span>
+                      ) : (
+                        el.value || (
+                          <span className="italic text-muted-foreground/50 font-normal">—</span>
+                        )
+                      )}
+                    </span>
+                    <div className="flex items-center justify-end">
+                      <ConfidencePill score={el.confidence} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
           {/* Line items */}
           {doc.lineItemColumns.length > 0 && (
             <section>
               <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 mb-3">
                 Line Items
               </p>
-              <div className="rounded-xl border overflow-hidden">
-                <Table>
+              <div className="rounded-xl border overflow-x-auto custom-scroll">
+                <Table className="w-auto">
                   <TableHeader>
                     <TableRow className="bg-muted/30 hover:bg-muted/30">
                       {doc.lineItemColumns.map((col) => (
-                        <TableHead key={col} className="text-[11px] font-semibold uppercase tracking-wide py-2">{col}</TableHead>
+                        <TableHead key={col} className="text-[11px] font-semibold uppercase tracking-wide py-1.5 whitespace-nowrap">{col}</TableHead>
                       ))}
-                      {!isReadOnly && <TableHead className="w-10 py-2" />}
+                      {!isReadOnly && <TableHead className="w-10 py-1.5" />}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -789,10 +908,10 @@ function DocDetailView({
                         {doc.lineItemColumns.map((col) => {
                           const meta = doc.cellMeta?.[row.id]?.[col];
                           return (
-                            <TableCell key={col} className="py-2">
+                            <TableCell key={col} className="py-0.5 whitespace-nowrap align-middle">
                               <div className="flex items-center gap-1.5">
                                 {isReadOnly ? (
-                                  <span className="text-sm flex-1">{row[col]}</span>
+                                  <span className="text-sm" title={row[col] ?? ""}>{row[col]}</span>
                                 ) : rowSyncing ? (
                                   // Not yet editable: value would be dropped on Save until this
                                   // row's cell ids arrive from the detail refetch.
@@ -801,13 +920,14 @@ function DocDetailView({
                                     readOnly
                                     disabled
                                     title="Saving new row… editable once synced"
-                                    className="h-7 text-sm bg-transparent border-transparent px-2 flex-1 opacity-60 cursor-not-allowed"
+                                    className="h-6 w-28 text-sm bg-transparent border-transparent px-2 opacity-60 cursor-not-allowed"
                                   />
                                 ) : (
                                   <Input
                                     value={row[col] ?? ""}
                                     onChange={(e) => updateCell(row.id, col, e.target.value)}
-                                    className="h-7 text-sm bg-transparent border-transparent hover:border-input focus:border-[#D04A02] px-2 flex-1"
+                                    title={row[col] ?? ""}
+                                    className="h-6 w-28 text-sm bg-transparent border-transparent hover:border-input focus:border-[#D04A02] px-2"
                                   />
                                 )}
                                 {meta && (meta.reasoning || meta.source) && (
@@ -820,7 +940,7 @@ function DocDetailView({
                           );
                         })}
                         {!isReadOnly && (
-                          <TableCell className="py-2 w-10 text-right">
+                          <TableCell className="py-1 w-10 text-right">
                             {rowSyncing ? (
                               <span
                                 title="Saving new row…"

@@ -1,11 +1,105 @@
 from __future__ import annotations
 
+import base64
 import json
+import re
 from typing import Any, Dict, List, Optional
 from loguru import logger
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from agentcore.services.idp.extraction import StructuredExtractionResult, _extract_usage_from_response
+
+
+# Identified (total_field, amount_column) cached per extraction SHAPE (the set of field names),
+# so a given Field Configuration is classified by the model ONCE and reused for every document.
+_FIELD_ID_CACHE: dict[tuple, tuple[Optional[str], Optional[str]]] = {}
+
+_IDENTIFY_SYSTEM = (
+    "You map extracted document fields to their arithmetic roles for reconciliation. "
+    "Respond with ONLY a JSON object, no prose."
+)
+
+
+def _first_json_object(raw: str) -> dict:
+    """Parse the first JSON object out of a model response (tolerant of fences / prose)."""
+    s = (raw or "").strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
+        s = re.sub(r"\n?```$", "", s).strip()
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", s, re.DOTALL)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            pass
+    return {}
+
+
+async def _identify_fields(extracted: dict, llm_model: Any) -> tuple[Optional[str], Optional[str]]:
+    """Ask the model which header field is the reconciliation total and which line-item column is
+    the per-row amount to sum. Returns ``(total_field, amount_column)`` — either may be None.
+
+    Cached per set of field names (≈ per Field Configuration): runs once, then reused. This is the
+    config-driven replacement for a hardcoded key list — it works for ANY field naming.
+    """
+    headers = extracted.get("headers", {}) or {}
+    line_items = extracted.get("line_items", []) or []
+    header_names = sorted(headers.keys())
+    column_names = sorted({
+        c.get("column_name")
+        for row in line_items
+        for c in (row.get("columns", []) or [])
+        if c.get("column_name")
+    })
+    if not header_names or not column_names:
+        return None, None
+
+    cache_key = (tuple(header_names), tuple(column_names))
+    if cache_key in _FIELD_ID_CACHE:
+        return _FIELD_ID_CACHE[cache_key]
+
+    header_lines = "\n".join(f"  {n} = {(headers.get(n) or {}).get('value')}" for n in header_names)
+    user = (
+        "Header fields (name = sample value):\n" + header_lines + "\n\n"
+        "Line-item columns: " + ", ".join(column_names) + "\n\n"
+        "Return ONLY this JSON:\n"
+        '{"total_field": <the header field holding the document total to reconcile against the sum '
+        'of the line amounts, or null>, "amount_column": <the line-item column holding each row\'s '
+        "amount to sum, or null>}\n"
+        "Prefer a pre-tax / taxable / net total when one exists (it matches the sum of line net "
+        "amounts). If nothing applies, use null."
+    )
+    try:
+        resp = await llm_model.ainvoke([SystemMessage(content=_IDENTIFY_SYSTEM), HumanMessage(content=user)])
+        raw = resp.content if hasattr(resp, "content") else str(resp)
+        if not isinstance(raw, str):
+            raw = json.dumps(raw)
+        obj = _first_json_object(raw)
+
+        def _clean(v):
+            v = str(v).strip() if v is not None else ""
+            return v if v and v.lower() not in ("null", "none") else None
+
+        tf = _clean(obj.get("total_field"))
+        ac = _clean(obj.get("amount_column"))
+        if tf not in headers:          # only trust names that actually exist
+            tf = None
+        if ac not in column_names:
+            ac = None
+        result = (tf, ac)
+        logger.info(f"[Math Reconcile] identified total_field={tf!r}, amount_column={ac!r}")
+    except Exception as e:
+        logger.warning(f"[Math Reconcile] field identification failed: {e}")
+        result = (None, None)
+
+    _FIELD_ID_CACHE[cache_key] = result
+    return result
 
 
 def parse_float(val: Any) -> float | None:
@@ -54,15 +148,22 @@ async def reconcile_math(
     max_attempts: int = 2,
     tolerance: float = 0.01,
     ocr_text: str | None = None,
+    page_images: list | None = None,
 ) -> dict:
-    """Identify arithmetic mismatches between totals and line items, re-prompting the LLM to resolve them.
+    """Detect and fix arithmetic mismatches between the document total and its line items.
+
+    The total field + line-amount column are identified by the model (``_identify_fields``, cached
+    per config) — no hardcoded key list. The comparison itself is done deterministically in code.
+    On a mismatch the model is re-prompted to correct the values; for scanned/vision docs the page
+    image(s) are attached so it can RE-READ the true value instead of only juggling numbers.
 
     Args:
         extracted: The extracted JSON dictionary matching StructuredExtractionResult.
-        llm_model: The LLM model to use for corrections.
+        llm_model: The LLM model to use for identification + corrections.
         max_attempts: Max correction retry attempts.
         tolerance: Allowed discrepancy float limit.
-        ocr_text: Optional layout-reconstructed OCR text for context.
+        ocr_text: Optional OCR text (text-route docs) used as correction context.
+        page_images: Optional ``[(png_bytes, mime), ...]`` (vision-route docs) attached to the fix.
 
     Returns:
         A dict matching {"extracted", "attempts", "balanced", "report"}.
@@ -79,44 +180,43 @@ async def reconcile_math(
     else:
         current_extracted = extracted
 
-    # Configurable candidate keys
-    total_keys = ["total_amount", "total", "invoice_total", "grand_total", "amount_due", "total_due", "net_amount", "subtotal"]
-    amount_col_keys = ["line_amount", "amount", "line_total", "total", "item_total", "subtotal", "price"]
+    # Identify the total field + line-amount column with the model (cached ≈ per config). Falls
+    # back to a minimal keyword guess only if identification returns nothing, so nothing regresses.
+    id_total, id_amount = await _identify_fields(current_extracted, llm_model)
+    fallback_total = ["invoice_taxable_value", "taxable_value", "net_amount", "subtotal",
+                      "total_amount", "total", "invoice_total", "grand_total", "invoice_value",
+                      "amount_due", "total_due"]
+    fallback_amount = ["line_amount", "amount", "line_total", "net_worth", "item_total", "total", "value", "price"]
 
-    # Helper function to compute mathematical values
     def evaluate_balance(data: dict) -> tuple[float | None, str | None, float, bool]:
-        headers = data.get("headers", {})
-        total_val = None
+        headers = data.get("headers", {}) or {}
+
+        # total: the identified field first, else the first present fallback key
         total_key = None
-        for tk in total_keys:
-            if tk in headers and headers[tk].get("value") is not None:
+        total_val = None
+        for tk in ([id_total] if id_total else []) + fallback_total:
+            if tk and tk in headers and (headers[tk] or {}).get("value") is not None:
                 parsed = parse_float(headers[tk]["value"])
                 if parsed is not None:
-                    total_key = tk
-                    total_val = parsed
+                    total_key, total_val = tk, parsed
                     break
 
-        line_items = data.get("line_items", [])
+        # amount: use ONLY the identified column when known; else scan the fallback list per row
+        amount_cols = [id_amount] if id_amount else fallback_amount
         line_sums = 0.0
         has_lines = False
-        for row in line_items:
-            row_val = None
-            for col in row.get("columns", []):
-                if col.get("column_name") in amount_col_keys and col.get("value") is not None:
+        for row in data.get("line_items", []) or []:
+            for col in row.get("columns", []) or []:
+                if col.get("column_name") in amount_cols and col.get("value") is not None:
                     parsed = parse_float(col["value"])
                     if parsed is not None:
-                        row_val = parsed
+                        line_sums += parsed
+                        has_lines = True
                         break
-            if row_val is not None:
-                line_sums += row_val
-                has_lines = True
 
         if total_val is not None and has_lines:
-            diff = abs(total_val - line_sums)
-            balanced = diff <= tolerance
-            return total_val, total_key, line_sums, balanced
-        
-        # If total or lines are missing/not numeric, we consider it balanced (or check skipped)
+            return total_val, total_key, line_sums, abs(total_val - line_sums) <= tolerance
+        # No recognizable total or amounts -> nothing to check -> treat as balanced (skip).
         return total_val, total_key, line_sums, True
 
     # Initial evaluation
@@ -137,22 +237,42 @@ async def reconcile_math(
         attempts_run += 1
         discrepancy_str = discrepancy_logs[-1]
 
+        if page_images:
+            source_hint = (
+                "The document page image(s) are attached. Re-read the page to find the CORRECT "
+                "value and fix whichever value was extracted incorrectly (do not just change a "
+                "number to make it add up)."
+            )
+        elif ocr_text:
+            source_hint = "Inspect the OCR text below to find any value that was extracted incorrectly."
+        else:
+            source_hint = "Recompute from the numbers so the total equals the sum of the line amounts."
+
         system_prompt = (
-            "You are a mathematical reconciliation assistant.\n"
-            "An extraction process extracted headers and line items from a document, but there is a mathematical discrepancy:\n"
-            f"{discrepancy_str}\n\n"
-            "Please review the extracted values and either correct the header total or the line item amounts so they balance mathematically.\n"
-            "If the document has OCR text, inspect it to see if any values were extracted incorrectly.\n"
-            "Ensure you return the complete corrected extraction data following the original schema."
+            "You are a document arithmetic reconciliation assistant.\n"
+            "An extraction has a mathematical discrepancy between the header total and the sum of "
+            f"the line-item amounts:\n{discrepancy_str}\n\n"
+            f"{source_hint}\n"
+            "Return the COMPLETE corrected extraction data following the original schema."
         )
 
         user_prompt = f"Original Extracted Data:\n{json.dumps(current_extracted, indent=2)}"
-        if ocr_text:
+        if ocr_text and not page_images:
             user_prompt += f"\n\nDocument OCR Text Context:\n{ocr_text[:6000]}"
+
+        if page_images:
+            # Multimodal correction: text + the page image(s) so the model can re-read the doc.
+            human_content: list = [{"type": "text", "text": user_prompt}]
+            for img_bytes, mime in page_images[:3]:
+                b64 = base64.b64encode(img_bytes).decode("utf-8")
+                human_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+            human_message = HumanMessage(content=human_content)
+        else:
+            human_message = HumanMessage(content=user_prompt)
 
         messages = [
             SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt)
+            human_message,
         ]
 
         result = None

@@ -378,7 +378,7 @@ export default function ModelCatalogue(): JSX.Element {
               {t("Model Type")}
             </p>
             <div className="flex gap-2">
-              {(["llm", "embedding"] as ModelTypeFilter[]).map((type) => (
+              {(["llm"] as ModelTypeFilter[]).map((type) => (
                 <Button
                   key={type}
                   size="sm"
@@ -477,7 +477,6 @@ export default function ModelCatalogue(): JSX.Element {
                       ...(isSuperAdmin ? ["Department Scope"] : []),
                       "Type",
                       "Status",
-                      "Available In",
                     ...(canSeeActions ? ["Actions"] : []),
                     ].map((h) => (
                       <th
@@ -699,21 +698,7 @@ export default function ModelCatalogue(): JSX.Element {
                           )}
                         </td>
 
-                        {/* Show In */}
-                        <td className="px-4 py-4">
-                          <div className="flex gap-1">
-                            {((model as any).show_in || ["orchestrator", "agent"]).includes("orchestrator") && (
-                              <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
-                                {t("Orch")}
-                              </span>
-                            )}
-                            {((model as any).show_in || ["orchestrator", "agent"]).includes("agent") && (
-                              <span className="rounded bg-purple-100 px-1.5 py-0.5 text-[10px] font-medium text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
-                                {t("Agent")}
-                              </span>
-                            )}
-                          </div>
-                        </td>
+                        {/* "Available In" column removed from the UI */}
 
                         {canSeeActions ? (
                           <td className="w-[5%] min-w-[64px] px-4 py-4">

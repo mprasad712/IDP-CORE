@@ -56,21 +56,21 @@ class GoogleProvider(BaseProvider):
         model_kwargs: dict[str, Any] | None = None,
     ) -> BaseChatModel:
         api_key = provider_config.get("api_key", "")
-        # Support Vertex AI Express mode: keys starting with "AQ." are Vertex AI keys
-        # that must be sent to the Vertex AI endpoint, not the Gemini Developer API.
-        use_vertexai = provider_config.get("use_vertexai")
-        if use_vertexai is None:
-            use_vertexai = bool(api_key and api_key.startswith("AQ."))
+        # This is the Google AI Studio (Gemini Developer API) provider. Google now issues standard
+        # AI Studio keys that START WITH "AQ.", so the key prefix is NOT a reliable Vertex signal —
+        # only route to Vertex when the caller explicitly asks. (Use the dedicated google_vertex
+        # provider for real Vertex access with a service account / Vertex Express key.)
+        use_vertexai = bool(provider_config.get("use_vertexai"))
 
         kwargs: dict[str, Any] = {
             "model": model,
             "google_api_key": api_key,
             "streaming": streaming,
         }
-        if use_vertexai:
-            # Route through Vertex AI instead of Gemini Developer API
-            import os
-            os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
+        # Always set this explicitly. GOOGLE_GENAI_USE_VERTEXAI is process-global, so leaving it
+        # unset after a previous Vertex call would stick every later Google request on Vertex.
+        import os
+        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true" if use_vertexai else "false"
 
         if temperature is not None:
             kwargs["temperature"] = temperature
