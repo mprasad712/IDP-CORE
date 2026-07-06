@@ -60,11 +60,29 @@ from agentcore.services.idp.rules_engine import _to_number, evaluate_rules
 from agentcore.services.idp.idp_tracing import create_idp_trace, end_idp_trace, start_span, end_span
 
 
-def _graph_exec_enabled(idp_agent) -> bool:
+def _idp_engine_value(idp_agent) -> str:
+    """Resolved engine string from ``IDP_EXECUTION_ENGINE`` (deployment-wide) with a per-agent
+    ``idp_agent.extra["execution_engine"]`` override. Lower-cased; empty when unset."""
     import os
-    if os.getenv("IDP_GRAPH_EXECUTION", "false").strip().lower() == "true":
-        return True
-    return bool((getattr(idp_agent, "extra", None) or {}).get("graph_execution"))
+    env = os.getenv("IDP_EXECUTION_ENGINE", "").strip().lower()
+    if env:
+        return env
+    engine = (getattr(idp_agent, "extra", None) or {}).get("execution_engine")
+    return str(engine or "").strip().lower()
+
+
+def _idp_engine_is_native(idp_agent) -> bool:
+    """True when the NATIVE engine runs the IDP nodes through the *same* generic ``graph_langgraph``
+    engine that simple chat agents use (hydrate canvas nodes with their ``components/IDP`` source, then
+    build + stream per-vertex). ``IDP_EXECUTION_ENGINE=native``. The fixed ``_run`` is the default."""
+    return _idp_engine_value(idp_agent) == "native"
+
+
+def _idp_engine_label(idp_agent) -> str:
+    """Which IDP execution engine will run this document, for the flow log / server log:
+    ``native`` (the wired canvas run through the generic graph_langgraph engine) or ``fixed``
+    (the default config-driven pipeline). Resolved from ``IDP_EXECUTION_ENGINE`` + per-agent override."""
+    return "native" if _idp_engine_is_native(idp_agent) else "fixed"
 
 
 def _utcnow() -> datetime:
@@ -1003,21 +1021,19 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         if cfg.allowed_extensions and file_type not in cfg.allowed_extensions and cfg.skip_unmatched:
             raise PipelineError(f"file type '{file_type}' not allowed by this agent")
 
-        if _graph_exec_enabled(idp_agent):
-            # Graph-driven execution path (Phase 1). LAZY import to avoid the import cycle
-            # (graph_exec imports pipeline at module load).
-            from agentcore.services.idp.graph_exec import PipelineContext, plan_execution, run_graph_pipeline
-            _graph_data = getattr(base_agent, "data", None) or {}
-            plan = plan_execution(_graph_data)
-            if plan.errors:
-                raise PipelineError("; ".join(plan.errors))
-            gctx = PipelineContext(
-                session=session, document_id=document_id, doc=doc, job=job,
-                idp_agent=idp_agent, base_agent=base_agent, cfg=cfg, flow=flow,
-                storage=storage, agent_scope=agent_scope, trace_ctx=trace_ctx, t0=t0,
-                file_bytes=file_bytes, original_bytes=file_bytes, file_type=file_type,
-            )
-            await run_graph_pipeline(gctx, plan, _graph_data)
+        # Record which execution engine runs this document (IDP_EXECUTION_ENGINE / per-agent), so the
+        # flow log clearly shows graph vs fixed.
+        _engine = _idp_engine_label(idp_agent)
+        flow.step("engine", "ok", f"IDP execution engine: {_engine}")
+        logger.info(f"[pipeline] {document_id}: IDP execution engine = {_engine}")
+
+        if _idp_engine_is_native(idp_agent):
+            # NATIVE engine: run the wired canvas nodes through the SAME generic graph_langgraph
+            # engine simple agents use (hydrate each node with its components/IDP source, build the
+            # LangGraphAdapter, stream per-vertex events under job.id for native canvas highlighting).
+            # LAZY import to avoid any import cycle.
+            from agentcore.services.idp.graph_native.process import run_native_for_document
+            await run_native_for_document(session, doc, job, base_agent, flow, trace_ctx)
             return
 
         # 2. detect digital/scanned (per page)

@@ -6,6 +6,26 @@ from agentcore.services.idp.extraction import extract_dynamic
 from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
 from agentcore.schema.data import Data
 from agentcore.schema.message import Message
+from agentcore.services.idp.graph_native.payload import get_payload
+
+
+def test_convert_kwargs_keeps_config_name_string():
+    """Regression: convert_kwargs used to DELETE any 'config'-named string field whose value wasn't
+    valid JSON — silently blanking the AI Field Extractor's config_name (e.g. 'Invoice') so extraction
+    ran with no configuration. It must keep plain strings and still parse genuine JSON kwargs."""
+    from agentcore.interface.initialize.loading import convert_kwargs
+
+    out = convert_kwargs({"config_name": "Invoice", "config_names": ["A"], "model_kwargs": '{"a": 1}', "x": "y"})
+    assert out["config_name"] == "Invoice"      # plain string kept (not deleted)
+    assert out["config_names"] == ["A"]          # list untouched
+    assert out["model_kwargs"] == {"a": 1}       # genuine JSON string still parsed to a dict
+
+
+def _extracted(out) -> dict:
+    """The extractor carries its result in the IDP payload (additional_kwargs['idp']['extracted']),
+    NOT in .data — the engine strips additional_kwargs once .data is set, which would drop the
+    document_id mid-graph. Direct callers read the fields via the payload."""
+    return get_payload(out).get("extracted", {})
 
 @pytest.fixture
 def anyio_backend():
@@ -159,38 +179,6 @@ async def test_extract_dynamic_dirty_json_fallback():
 
     # Columns present in the document get the same default confidence.
     assert res["line_items"][0]["columns"][0]["confidence"] == _DEFAULT_FIELD_CONFIDENCE
-
-@pytest.mark.anyio
-async def test_llm_extractor_node_integration():
-    """Verify the IDPLLMExtractor node calls the extract_dynamic method in dynamic_prompt mode."""
-    raw_json_response = """
-    {
-      "headers": {
-        "total": {
-          "value": "500.00",
-          "confidence": 0.99,
-          "reasoning": "Reason here"
-        }
-      },
-      "line_items": []
-    }
-    """
-    mock_llm = MockLLM(response_text=raw_json_response)
-    
-    # Set up node inputs
-    node = IDPLLMExtractor()
-    node.document = Message(text="Total: 500.00")
-    node.llm = mock_llm
-    node.extraction_mode = "dynamic_prompt"
-    node.prompt = "Extract total"
-
-    # Call the node method
-    out_data = await node.extract()
-    
-    assert isinstance(out_data, Data)
-    assert out_data.data["headers"]["total"]["value"] == "500.00"
-    assert "1 header(s)" in node.status
-
 
 @pytest.mark.anyio
 async def test_extract_named_config_success():
@@ -350,7 +338,7 @@ async def test_llm_extractor_node_named_config_integration():
     out_data = await node.extract()
     
     assert isinstance(out_data, Data)
-    assert out_data.data["headers"]["total"]["value"] == "750.00"
+    assert _extracted(out_data)["headers"]["total"]["value"] == "750.00"
     
     # Cleanup
     async with session_scope() as session:
@@ -475,40 +463,6 @@ async def test_extract_multimodal_success_config(tmp_path):
         if db_cfg:
             await session.delete(db_cfg)
         await session.commit()
-
-
-@pytest.mark.anyio
-async def test_llm_extractor_node_multimodal_integration(tmp_path):
-    """Verify IDPLLMExtractor runs multimodal mode when selected."""
-    from PIL import Image as PILImage
-    
-    img_path = tmp_path / "node_test.png"
-    img = PILImage.new("RGB", (100, 100), color="white")
-    img.save(img_path)
-
-    raw_response = {
-        "headers": {
-            "invoice_number": {
-                "value": "INV-NODE-M1",
-                "confidence": 0.9,
-                "reasoning": "Detected"
-            }
-        },
-        "line_items": []
-    }
-    mock_llm = MockLLM(response_text=json.dumps(raw_response))
-
-    node = IDPLLMExtractor()
-    # Pass path inside Message files
-    node.document = Message(text="Dummy text", files=[str(img_path)])
-    node.llm = mock_llm
-    node.extraction_mode = "multimodal_prompt"
-    node.prompt = "Extract invoice"
-
-    out_data = await node.extract()
-
-    assert isinstance(out_data, Data)
-    assert out_data.data["headers"]["invoice_number"]["value"] == "INV-NODE-M1"
 
 
 @pytest.mark.anyio

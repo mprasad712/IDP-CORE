@@ -2,6 +2,7 @@ import ShadTooltip from "@/components/common/shadTooltipComponent";
 import { Button } from "@/components/ui/button";
 import useAgentStore from "@/stores/agentStore";
 import { useIdpResultStore } from "@/stores/idpResultStore";
+import { useIdpSessionStore } from "@/stores/idpSessionStore";
 import { useVoiceStore } from "@/stores/voiceStore";
 import IconComponent from "../../../components/common/genericIconComponent";
 import type { SidebarOpenViewProps } from "../types/sidebar-open-view";
@@ -26,6 +27,7 @@ export const SidebarOpenView = ({
   );
 
   const clearIdpResult = useIdpResultStore((state) => state.clearResult);
+  const deselectIdpSession = useIdpSessionStore((state) => state.selectSession);
 
   return (
     <>
@@ -53,6 +55,7 @@ export const SidebarOpenView = ({
                     setNewSessionCloseVoiceAssistant(true);
                     setNewChatOnPlayground(true);
                     clearIdpResult();
+                    deselectIdpSession(null); // start a fresh IDP upload (keeps history)
                   }}
                 >
                   <IconComponent

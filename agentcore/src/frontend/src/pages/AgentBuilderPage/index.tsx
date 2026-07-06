@@ -21,6 +21,7 @@ import { useTranslation } from "react-i18next";
 import { AuthContext } from "@/contexts/authContext";
 import VersionSavePrompt from "@/components/core/agentToolbarComponent/components/version-save-prompt";
 import CopyAgentDialog from "@/components/agents/copy-agent-dialog";
+import IdpRunPanel from "@/components/idp/idp-run-panel";
 import {
   AgentSearchProvider,
   AgentSidebarComponent,
@@ -329,6 +330,8 @@ export default function AgentBuilderPage({ view }: { view?: boolean }): JSX.Elem
                 {t("Copy")}
               </Button>
             )}
+            {/* IDP: upload a doc and watch the canvas nodes light up as they run (IDP agents only). */}
+            <IdpRunPanel />
             <CopyAgentDialog
               open={cloneOpen}
               onOpenChange={setCloneOpen}

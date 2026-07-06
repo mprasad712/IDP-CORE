@@ -131,6 +131,32 @@ def _strip_code_fences(text: str) -> str:
     return raw
 
 
+def _loads_lenient(raw_text: str) -> Any:
+    """Parse a model's JSON output, tolerating the usual LLM malformations.
+
+    Vision / text models frequently emit *almost*-valid JSON — a trailing comma before ``}``/``]``,
+    an unquoted key, prose around the object, or a truncated tail when they hit the output-token
+    limit. A plain ``json.loads`` raises ``JSONDecodeError`` on any of these and fails the whole
+    extraction. This strips code fences, tries a strict parse, and on failure repairs with
+    ``json_repair`` (closes open braces, drops trailing commas, quotes keys). Re-raises the original
+    error only if the output is truly unrecoverable.
+    """
+    text = _strip_code_fences(raw_text or "").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            from json_repair import repair_json
+
+            repaired = repair_json(text, return_objects=True)
+            if isinstance(repaired, (dict, list)):
+                logger.warning("[Extraction] model JSON was malformed — repaired with json_repair")
+                return repaired
+        except Exception:
+            pass
+        raise
+
+
 def _expand_value(v: Any) -> tuple:
     """Map a scalar value OR a {value,confidence,reasoning} dict to (value:str|None, confidence, reasoning).
 
@@ -274,7 +300,7 @@ async def extract_dynamic(
         try:
             response = await asyncio.wait_for(llm_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
             raw_content = response.content if hasattr(response, "content") else str(response)
-            parsed = json.loads(_strip_code_fences(raw_content))
+            parsed = _loads_lenient(raw_content)
             res = _expand_extraction(parsed)
             res["_usage"] = _extract_usage_from_response(response, model_fallback=getattr(llm_model, "model_name", None))
             return res
@@ -333,7 +359,7 @@ async def extract_dynamic(
             lines_raw = lines_raw[:-1]
         raw_content = "\n".join(lines_raw).strip()
 
-    parsed = json.loads(raw_content)
+    parsed = _loads_lenient(raw_content)
     if not isinstance(parsed, dict):
         raise ValueError("Parsed LLM output is not a JSON object.")
 
@@ -386,7 +412,7 @@ async def _compact_invoke(system: str, user: str, llm_model: Any) -> Dict[str, A
     try:
         response = await llm_model.ainvoke(messages)
         raw_content = response.content if hasattr(response, "content") else str(response)
-        parsed = json.loads(_strip_code_fences(raw_content))
+        parsed = _loads_lenient(raw_content)
         res = _expand_extraction(parsed)
         res["_usage"] = _extract_usage_from_response(response, model_fallback=getattr(llm_model, "model_name", None))
         return res
@@ -683,7 +709,7 @@ async def extract_vision(
         response = await llm_model.ainvoke(messages)
         raw_text = response.content if hasattr(response, "content") else str(response)
         raw_text = _strip_code_fences(raw_text or "")
-        parsed = json.loads(raw_text)  # a JSONDecodeError here surfaces to the caller (pipeline -> PipelineError)
+        parsed = _loads_lenient(raw_text)  # tolerant of the model's near-valid JSON (repairs trailing commas / truncation)
         if not isinstance(parsed, dict):
             raise ValueError("Vision model output was not a JSON object.")
         raw_result = _expand_extraction(parsed)
@@ -824,7 +850,7 @@ async def extract_multimodal(
                 if lines_mm and lines_mm[-1].strip() == "```":
                     lines_mm = lines_mm[:-1]
                 raw_text = "\n".join(lines_mm).strip()
-            parsed = json.loads(raw_text)
+            parsed = _loads_lenient(raw_text)
             if not isinstance(parsed, dict):
                 raise ValueError("Parsed output is not a JSON object.")
             parsed.setdefault("headers", {})

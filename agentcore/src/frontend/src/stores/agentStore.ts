@@ -661,6 +661,18 @@ const useAgentStore = create<AgentStoreType>((set, get) => ({
     stream?: boolean;
     eventDelivery?: EventDeliveryType;
   }) => {
+    // IDP agents don't chat-build. They process documents through the IDP /process endpoint, which
+    // runs THIS SAME graph on the generic engine with a document_id injected (and streams per-vertex
+    // events for canvas highlighting). A generic build here has no document_id, so the Document Upload
+    // node fails with "no document_id provided". Skip the chat-build for any flow with an IDP input.
+    const IDP_INPUT_TYPES = new Set(["DocumentUpload", "ConnectorInput"]);
+    if (
+      get().nodes.some(
+        (n: any) => n.data?.type && IDP_INPUT_TYPES.has(n.data.type),
+      )
+    ) {
+      return;
+    }
     set({
       pastBuildAgentParams: {
         startNodeId,

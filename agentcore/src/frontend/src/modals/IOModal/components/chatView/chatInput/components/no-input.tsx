@@ -9,6 +9,11 @@ import useAgentsManagerStore from "@/stores/agentsManagerStore";
 import useAgentStore from "@/stores/agentStore";
 import useAlertStore from "@/stores/alertStore";
 import { useIdpResultStore } from "@/stores/idpResultStore";
+import { useIdpRunStore } from "@/stores/idpRunStore";
+import {
+  type IdpSession,
+  useIdpSessionStore,
+} from "@/stores/idpSessionStore";
 import IconComponent from "../../../../../../components/common/genericIconComponent";
 import { ICON_STROKE_WIDTH } from "../../../../../../constants/constants";
 import { cn } from "../../../../../../utils/utils";
@@ -123,10 +128,20 @@ const NoInputView: React.FC<NoInputViewProps> = ({
   const [state, setState] = useState<ProcessingState>("idle");
   const [errorMsg, setErrorMsg] = useState("");
   const [result, setResult] = useState<any>(null);
+  const [docId, setDocId] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { run: uploadAndProcess } = useUploadAndProcess();
+  const setActiveRun = useIdpRunStore((s) => s.setActiveRun);
+  // Persisted run history — survives closing the Playground and page reloads, so a result never
+  // vanishes and the user can revisit any past document.
+  const sessions = useIdpSessionStore((s) => s.sessions);
+  const activeSessionId = useIdpSessionStore((s) => s.activeId);
+  const upsertSession = useIdpSessionStore((s) => s.upsertSession);
+  const selectSession = useIdpSessionStore((s) => s.selectSession);
+  // Guards against double-polling the same document (handleRun vs the restore effect).
+  const attachedRef = useRef<string | null>(null);
 
   const stopPolling = () => {
     if (pollRef.current) {
@@ -137,14 +152,9 @@ const NoInputView: React.FC<NoInputViewProps> = ({
 
   useEffect(() => () => stopPolling(), []);
 
-  // Publish the extracted result to the shared store so the MAIN chat area renders it
-  // (instead of showing it docked at the bottom of the input). Clear it on unmount.
-  useEffect(() => {
-    if (state === "done" && result) {
-      setIdpResult(buildIdpDisplay(result));
-    }
-  }, [state, result, setIdpResult]);
-  useEffect(() => () => clearIdpResult(), [clearIdpResult]);
+  // NOTE: the extracted result is published to `useIdpResultStore` (rendered in the MAIN chat area)
+  // when a run finishes or a past session is opened — see `pollForResult` and the restore effect below.
+  // It is intentionally NOT cleared on unmount, so closing the Playground doesn't wipe the result.
 
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollCountRef = useRef(0);
@@ -173,18 +183,29 @@ const NoInputView: React.FC<NoInputViewProps> = ({
         "split",
       ];
       if (terminal.includes(doc.status)) {
+        attachedRef.current = null;
         if (doc.status === "failed") {
           const msg = doc.error_message || "Document processing failed";
           setState("error");
           setErrorMsg(msg);
+          upsertSession({ id: documentId, status: "error", error: msg });
           setErrorData({ title: "Processing failed", list: [msg] });
         } else if (doc.status === "skipped") {
+          // Show the specific reason the extractor recorded (e.g. multiple field configs with no
+          // Document Classifier to route them), falling back to a generic message.
+          const msg =
+            doc.error_message ||
+            "Document was skipped — no matching field configuration.";
           setState("error");
-          setErrorMsg("Document type not in selected types — document was skipped");
-          setErrorData({ title: "Document skipped", list: ["The document type was not in the configured list and was skipped."] });
+          setErrorMsg(msg);
+          upsertSession({ id: documentId, status: "error", error: msg });
+          setErrorData({ title: "Document skipped", list: [msg] });
         } else {
+          const display = buildIdpDisplay(doc);
           setResult(doc);
           setState("done");
+          setIdpResult(display);
+          upsertSession({ id: documentId, status: "done", result: display });
         }
         return;
       }
@@ -198,12 +219,29 @@ const NoInputView: React.FC<NoInputViewProps> = ({
   const handleRun = async () => {
     if (!file) return;
     try {
+      stopPolling(); // kill any in-flight poll (e.g. switching from an active session)
       setState("uploading");
       setErrorMsg("");
       pollCountRef.current = 0;
       const processResult = await uploadAndProcess(currentAgentId, file);
+      const did = String(processResult.document_id);
+      const jid = processResult.job_id ? String(processResult.job_id) : null;
+      setDocId(did);
+      // Share the run so the Builder-page panel keeps tracking it (timeline + native canvas
+      // highlighting) even after this Playground modal is closed — the backend run is detached.
+      setActiveRun(did, file.name, jid);
+      // Record + open a persisted session so this run (and its result) survives a modal close/reload.
+      upsertSession({
+        id: did,
+        jobId: jid,
+        fileName: file.name,
+        agentId: currentAgentId ?? null,
+        status: "processing",
+      });
+      attachedRef.current = did; // handleRun owns this poll; the restore effect won't double it
       setState("processing");
-      pollForResult(String(processResult.document_id));
+      selectSession(did);
+      pollForResult(did);
     } catch (e: any) {
       const msg = e?.response?.data?.detail || e?.message || "Upload failed";
       setState("error");
@@ -214,12 +252,58 @@ const NoInputView: React.FC<NoInputViewProps> = ({
 
   const reset = () => {
     stopPolling();
+    attachedRef.current = null;
     setState("idle");
     setFile(null);
     setResult(null);
+    setDocId(null);
     setErrorMsg("");
     clearIdpResult();
+    selectSession(null); // back to the fresh upload + history view
   };
+
+  // Attach the view to a session: re-render a finished/failed one, or resume polling an in-flight run
+  // (the detached backend run kept going while the modal was closed). Idempotent per document.
+  const showSession = (s: IdpSession) => {
+    setDocId(s.id);
+    if (s.status === "done") {
+      stopPolling();
+      attachedRef.current = null;
+      setResult(null);
+      setState("done");
+      if (s.result) setIdpResult(s.result);
+    } else if (s.status === "error") {
+      stopPolling();
+      attachedRef.current = null;
+      setState("error");
+      setErrorMsg(s.error ?? "Processing failed");
+    } else {
+      setState("processing");
+      if (attachedRef.current !== s.id) {
+        attachedRef.current = s.id;
+        pollCountRef.current = 0;
+        stopPolling();
+        pollForResult(s.id);
+      }
+    }
+  };
+
+  // On mount and whenever the active session changes (user picks one from history), show it.
+  useEffect(() => {
+    if (!activeSessionId) {
+      stopPolling();
+      attachedRef.current = null;
+      setDocId(null);
+      setResult(null);
+      setState("idle");
+      setIdpResult(null);
+      return;
+    }
+    const s = sessions.find((x) => x.id === activeSessionId);
+    if (s) showSession(s);
+    // Intentionally only re-run when the active session id changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSessionId]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -354,13 +438,18 @@ const NoInputView: React.FC<NoInputViewProps> = ({
         </>
       )}
 
-      {/* In-progress state */}
+      {/* In-progress state — a simple spinner. The per-node progress lights up on the CANVAS
+          (Builder-page run panel), not here in the Playground. */}
       {(state === "uploading" || state === "processing") && (
-        <div className="flex flex-col items-center gap-3 rounded-lg border border-border bg-muted/30 px-4 py-6">
-          <Loading className="h-6 w-6 text-primary" />
-          <p className="text-sm font-medium text-foreground">
-            {state === "uploading" ? "Uploading document…" : "Processing document…"}
-          </p>
+        <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/30 px-4 py-4">
+          <div className="flex flex-col items-center gap-3 py-2">
+            <Loading className="h-6 w-6 text-primary" />
+            <p className="text-sm font-medium text-foreground">
+              {state === "uploading"
+                ? "Uploading document…"
+                : "Processing document…"}
+            </p>
+          </div>
           {file && (
             <p className="max-w-[240px] truncate text-xs text-muted-foreground">
               {file.name}
@@ -370,7 +459,7 @@ const NoInputView: React.FC<NoInputViewProps> = ({
       )}
 
       {/* Done — the extracted result is rendered in the MAIN chat area (idpResultStore). */}
-      {state === "done" && result && (
+      {state === "done" && (
         <div className="flex flex-col items-center gap-3 rounded-lg border border-border bg-muted/30 px-4 py-5">
           <div className="flex items-center gap-2 text-sm font-medium text-foreground">
             <IconComponent

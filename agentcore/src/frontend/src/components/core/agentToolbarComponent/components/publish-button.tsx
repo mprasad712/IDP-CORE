@@ -375,6 +375,38 @@ const PublishButton = ({}: PublishButtonProps) => {
       setErrorData({ title: "No active agent found." });
       return;
     }
+
+    // Pre-publish validation: an AI Field Extractor needs a Field Configuration, and any Large
+    // Language Model node needs a model selected — otherwise the published agent can't extract.
+    const idpErrors: string[] = [];
+    for (const n of useAgentStore.getState().nodes) {
+      const dn = (n as any).data?.node?.display_name;
+      const tmpl = (n as any).data?.node?.template ?? {};
+      if (dn === "AI Field Extractor") {
+        const single = tmpl.config_name?.value;
+        const multi = tmpl.config_names?.value;
+        const hasConfig =
+          (typeof single === "string" && single.trim().length > 0) ||
+          (Array.isArray(multi) && multi.length > 0);
+        if (!hasConfig) {
+          idpErrors.push(
+            "AI Field Extractor: select a Field Configuration (single or Multi-Type).",
+          );
+        }
+      }
+      if (dn === "Large Language Model") {
+        const model = tmpl.registry_model?.value;
+        if (!model || (typeof model === "string" && model.trim().length === 0)) {
+          idpErrors.push(
+            "Large Language Model: select a model in the Registry Model dropdown.",
+          );
+        }
+      }
+    }
+    if (idpErrors.length > 0) {
+      setErrorData({ title: "Cannot publish — fix these first", list: idpErrors });
+      return;
+    }
     if (hasPendingApproval) {
       setErrorData({
         title: "Awaiting approval",

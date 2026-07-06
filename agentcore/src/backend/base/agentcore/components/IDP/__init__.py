@@ -6,6 +6,11 @@ from agentcore.components._importing import import_mod
 
 if TYPE_CHECKING:
     from agentcore.components.IDP.connector_input import IDPConnectorInput
+    from agentcore.components.IDP.document_upload import IDPDocumentUpload
+    from agentcore.components.IDP.processed_docs_output import IDPProcessedDocsOutput
+    from agentcore.components.IDP.paddle_ocr import IDPPaddleOCR
+    from agentcore.components.IDP.visual_element_detection import IDPVisualElementDetection
+    from agentcore.components.IDP.math_reconcile import IDPMathReconcile
     from agentcore.components.IDP.approval_gate import IDPApprovalGate
     from agentcore.components.IDP.chunk_aggregator import IDPChunkAggregator
     from agentcore.components.IDP.chunking_strategy import IDPChunkingStrategy
@@ -23,6 +28,11 @@ if TYPE_CHECKING:
 
 _dynamic_imports = {
     "IDPConnectorInput": "connector_input",
+    "IDPDocumentUpload": "document_upload",
+    "IDPProcessedDocsOutput": "processed_docs_output",
+    "IDPPaddleOCR": "paddle_ocr",
+    "IDPVisualElementDetection": "visual_element_detection",
+    "IDPMathReconcile": "math_reconcile",
     "IDPApprovalGate": "approval_gate",
     "IDPChunkAggregator": "chunk_aggregator",
     "IDPChunkingStrategy": "chunking_strategy",

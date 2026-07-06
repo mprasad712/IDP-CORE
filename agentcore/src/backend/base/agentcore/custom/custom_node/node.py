@@ -456,9 +456,22 @@ class Node(ExecutableNode):
         # if they exist (generated from the frontend)
         outputs = []
         if self._vertex and self._vertex.outputs:
+            # The `method` (which Python method produces an output) is defined by the CLASS, never by
+            # the frontend/user. A stale saved node can carry a wrong method — e.g. == the output name
+            # ("document" instead of "load") — which then resolves to the Output attribute itself and
+            # fails with "'Output' object is not callable". Heal it from the class output of the same
+            # name so drag-templates saved against an older component still run.
+            class_methods = {
+                o.name: o.method
+                for o in (self.outputs or [])
+                if getattr(o, "name", None) and getattr(o, "method", None)
+            }
             for output in self._vertex.outputs:
                 try:
                     output_ = Output(**output)
+                    class_method = class_methods.get(output_.name)
+                    if class_method and output_.method != class_method:
+                        output_.method = class_method
                     outputs.append(output_)
                 except ValidationError as e:
                     msg = f"Invalid output: {e}"

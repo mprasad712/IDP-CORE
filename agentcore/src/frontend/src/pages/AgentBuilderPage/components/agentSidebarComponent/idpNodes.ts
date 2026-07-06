@@ -138,7 +138,14 @@ function promptField(name: string, display_name: string, value = "", info = "") 
 
 // ─── output helpers ───────────────────────────────────────────────────────────
 
-function output(name: string, display_name: string, types: string[] = ["Message"]) {
+function output(
+  name: string,
+  display_name: string,
+  types: string[] = ["Message"],
+  // group_outputs TRUE renders each output as its OWN connector handle (what a router needs so you
+  // can wire both branches); FALSE collapses them into a single handle with a dropdown selector.
+  separateHandle = false,
+) {
   return {
     types,
     selected: types[0],
@@ -147,7 +154,7 @@ function output(name: string, display_name: string, types: string[] = ["Message"
     method: name,
     cache: true,
     allows_loop: false,
-    group_outputs: false,
+    group_outputs: separateHandle,
     tool_mode: true,
     hidden: false,
   };
@@ -182,7 +189,8 @@ export const IDP_NODES: IDPData = {
   idp_input: {
     DocumentUpload: {
       display_name: "Document Upload",
-      description: "Manual upload of single or multiple documents (PDF, image, Excel, Word).",
+      description:
+        "Entry point for the uploaded document. The file is uploaded in the Playground (or via the API), which feeds it into this node — there is no manual upload on the canvas.",
       icon: "Upload",
       documentation: "",
       beta: false,
@@ -190,22 +198,8 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 0,
       base_classes: ["Message"],
-      field_order: ["files", "allow_multiple"],
-      template: {
-        files: fileField(
-          "files",
-          "Documents",
-          ["pdf", "png", "jpg", "jpeg", "tiff", "bmp", "xlsx", "xls", "docx", "doc"],
-          "Upload one or more documents to process.",
-        ),
-        allow_multiple: boolField(
-          "allow_multiple",
-          "Allow Multiple Files",
-          true,
-          "When enabled, multiple files can be uploaded at once.",
-          true,
-        ),
-      },
+      field_order: [],
+      template: {},
       outputs: [output("document", "Document", ["Message"])],
     },
 
@@ -481,8 +475,8 @@ export const IDP_NODES: IDPData = {
         ),
       },
       outputs: [
-        output("digital_path", "Digital (True)", ["Message"]),
-        output("scanned_path", "Scanned (False)", ["Message"]),
+        output("digital_path", "Digital (True)", ["Message"], true),
+        output("scanned_path", "Scanned (False)", ["Message"], true),
       ],
     },
 
@@ -823,8 +817,8 @@ export const IDP_NODES: IDPData = {
         ),
       },
       outputs: [
-        output("passed", "Passed", ["Data"]),
-        output("failed", "Failed", ["Data"]),
+        output("passed", "Passed", ["Data"], true),
+        output("failed", "Failed", ["Data"], true),
       ],
     },
   },
@@ -1154,12 +1148,12 @@ export const IDP_NODES: IDPData = {
         route_5: strField("route_5", "Route 5 Value", "", "Field value that maps to output Route 5.", false, true),
       },
       outputs: [
-        output("route_1_out", "Route 1", ["Message", "Data"]),
-        output("route_2_out", "Route 2", ["Message", "Data"]),
-        output("route_3_out", "Route 3", ["Message", "Data"]),
-        output("route_4_out", "Route 4", ["Message", "Data"]),
-        output("route_5_out", "Route 5", ["Message", "Data"]),
-        output("unmatched", "Unmatched", ["Message", "Data"]),
+        output("route_1_out", "Route 1", ["Message", "Data"], true),
+        output("route_2_out", "Route 2", ["Message", "Data"], true),
+        output("route_3_out", "Route 3", ["Message", "Data"], true),
+        output("route_4_out", "Route 4", ["Message", "Data"], true),
+        output("route_5_out", "Route 5", ["Message", "Data"], true),
+        output("unmatched", "Unmatched", ["Message", "Data"], true),
       ],
     },
 
@@ -1204,8 +1198,8 @@ export const IDP_NODES: IDPData = {
         ),
       },
       outputs: [
-        output("auto_approved", "Auto Approved", ["Data"]),
-        output("pending_review", "Pending Review", ["Data"]),
+        output("auto_approved", "Auto Approved", ["Data"], true),
+        output("pending_review", "Pending Review", ["Data"], true),
       ],
     },
 
@@ -1250,8 +1244,8 @@ export const IDP_NODES: IDPData = {
         ),
       },
       outputs: [
-        output("high_confidence", "High Confidence", ["Data"]),
-        output("low_confidence", "Low Confidence", ["Data"]),
+        output("high_confidence", "High Confidence", ["Data"], true),
+        output("low_confidence", "Low Confidence", ["Data"], true),
       ],
     },
   },

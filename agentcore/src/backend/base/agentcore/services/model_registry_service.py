@@ -20,6 +20,10 @@ from agentcore.utils.crypto import decrypt_api_key, decrypt_api_key_with_fallbac
 
 logger = logging.getLogger(__name__)
 
+# Set once the Langfuse Postgres `observations` table is confirmed absent (Langfuse not set up on this
+# machine), so we stop re-running — and re-logging — a query that will keep failing. Cleared on restart.
+_LANGFUSE_PG_UNAVAILABLE = False
+
 
 def _encryption_key() -> str:
     """Return the primary encryption key from environment."""
@@ -337,7 +341,8 @@ async def sync_model_costs(session: AsyncSession) -> None:
         logger.debug("Failed to query Clickhouse for model costs: %s", e)
 
     # 2. Fall back to Postgres if Clickhouse query returned no data or failed
-    if not rows:
+    global _LANGFUSE_PG_UNAVAILABLE
+    if not rows and not _LANGFUSE_PG_UNAVAILABLE:
         langfuse_db_url = os.getenv("LANGFUSE_DB_URL", "").strip()
         if langfuse_db_url:
             try:
@@ -365,7 +370,17 @@ async def sync_model_costs(session: AsyncSession) -> None:
                 engine.dispose()
                 logger.info("Successfully fetched %d rows from Postgres observations fallback", len(rows))
             except Exception as e:
-                logger.error("Failed to query Langfuse Postgres database for model costs: %s", e)
+                # Langfuse not set up on this machine (its `observations` table is absent). Disable the
+                # fallback so we don't keep re-running + re-logging a query that will always fail.
+                msg = str(e).lower()
+                if "does not exist" in msg or "undefinedtable" in type(e).__name__.lower():
+                    _LANGFUSE_PG_UNAVAILABLE = True
+                    logger.info(
+                        "Langfuse `observations` table not found — model-cost lookups disabled "
+                        "(Langfuse isn't set up). This is expected without Langfuse; no action needed."
+                    )
+                else:
+                    logger.debug("Failed to query Langfuse Postgres database for model costs: %s", e)
 
     # Aggregate costs
     costs_by_id = {}

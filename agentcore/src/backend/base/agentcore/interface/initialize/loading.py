@@ -58,8 +58,15 @@ def _get_builtin_source_code(vertex: LangGraphVertex) -> str | None:
                 for cached_name, comp_data in components.items():
                     if not isinstance(comp_data, dict):
                         continue
-                    # Match by class name (e.g. "HumanApproval") or display name
-                    if cached_name == comp_name or cached_name == display_name:
+                    # Match by class name (e.g. "HumanApproval") or display name — either the cache
+                    # KEY, or the entry's own display_name (built-ins whose node type/prefix differs
+                    # from the class name, e.g. IDP nodes: type "DocumentUpload" ⇒ class
+                    # "IDPDocumentUpload", display "Document Upload").
+                    if (
+                        cached_name == comp_name
+                        or cached_name == display_name
+                        or comp_data.get("display_name") == display_name
+                    ):
                         template = comp_data.get("template", {})
                         code_field = template.get("code", {})
                         if isinstance(code_field, dict) and code_field.get("value"):
@@ -109,12 +116,21 @@ def instantiate_class(
 
     custom_params = get_params(vertex.params)
 
-    code = custom_params.pop("code")
+    # A built-in node need not carry its own code — it's refreshed from disk below (a drag-template
+    # saved without code, e.g. an IDP node, is valid). Tolerate a missing key instead of KeyError.
+    code = custom_params.pop("code", None)
 
     # For built-in components, always use the latest source from disk
     refreshed_code = _get_builtin_source_code(vertex)
     if refreshed_code is not None:
         code = refreshed_code
+
+    if not code:
+        msg = (
+            f"Component '{getattr(vertex, 'display_name', vertex.id)}' has no code and could not be "
+            f"resolved from the component registry."
+        )
+        raise ValueError(msg)
 
     class_object: type[ExecutableNode | Node] = eval_custom_component_code(code)
     custom_component: ExecutableNode | Node = class_object(
@@ -170,19 +186,18 @@ def convert_params_to_sets(params):
 
 
 def convert_kwargs(params):
-    # Loop through items to avoid repeated lookups
-    items_to_remove = []
+    # A *_kwargs / *config* field MAY hold a JSON string (e.g. model_kwargs='{"a":1}') — parse those
+    # into a dict. But a plain-string field that merely contains "config" in its name (e.g.
+    # config_name="Invoice") is NOT JSON: leave its value untouched rather than dropping the param,
+    # which used to silently blank out things like the AI Field Extractor's Field Configuration.
     for key, value in params.items():
         if ("kwargs" in key or "config" in key) and isinstance(value, str):
-            try:
-                params[key] = orjson.loads(value)
-            except orjson.JSONDecodeError:
-                items_to_remove.append(key)
-
-    # Remove invalid keys outside the loop to avoid modifying dict during iteration
-    for key in items_to_remove:
-        params.pop(key, None)
-
+            stripped = value.strip()
+            if stripped[:1] in ("{", "["):  # only attempt JSON when it actually looks like JSON
+                try:
+                    params[key] = orjson.loads(stripped)
+                except orjson.JSONDecodeError:
+                    pass  # not valid JSON after all — keep the original string value
     return params
 
 

@@ -19,6 +19,11 @@ except Exception:
     # of crashing the whole module import.
     PYZBAR_AVAILABLE = False
 
+# This module does no OpenCV-based local detection — barcodes/QR use pyzbar (above) and
+# signatures/checkboxes/stamps/logos are found by a vision LLM. Exposed as a stable flag so
+# callers/tests can branch on it; always False since there is no cv2 code path here.
+OPENCV_AVAILABLE = False
+
 
 # Element types the vision LLM is asked to find. QR / barcodes are handled by the
 # deterministic pyzbar decoder (below), NOT the model.

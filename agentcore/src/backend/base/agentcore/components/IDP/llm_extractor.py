@@ -7,9 +7,10 @@ from typing import Any
 from loguru import logger
 
 from agentcore.custom.custom_node.node import Node
-from agentcore.io import DataInput, DropdownInput, HandleInput, MessageTextInput, MultilineInput, MultiselectInput, Output
+from agentcore.io import DataInput, DropdownInput, HandleInput, MessageTextInput, MultiselectInput, Output
 from agentcore.schema.data import Data
 from agentcore.schema.message import Message
+from agentcore.services.idp.graph_native.payload import carry
 
 
 class IDPLLMExtractor(Node):
@@ -38,22 +39,13 @@ class IDPLLMExtractor(Node):
         DropdownInput(
             name="extraction_mode",
             display_name="Extraction Mode",
-            # Extraction in the builder is config-driven: pick a saved Field Configuration
-            # (text or vision). The freeform dynamic-prompt mode is intentionally NOT offered
-            # here — author fields on the Field Configurations page instead. The backend still
-            # supports dynamic_prompt at runtime (legacy agents + config generation), so this
-            # only hides it from the canvas, it does not remove the capability.
+            # Config-driven only: pick a saved Field Configuration. field_configuration honors Input
+            # Mode (text layer for digital docs, page images for image/scanned docs); multimodal_config
+            # always reads the page images with a vision model. Author fields on the Field
+            # Configurations page.
             options=["field_configuration", "multimodal_config"],
             value="field_configuration",
-            info="field_configuration: extract using a saved text schema. multimodal_config: extract using a saved schema with a vision model.",
-        ),
-        MultilineInput(
-            name="prompt",
-            display_name="Extraction Prompt",
-            value="",
-            advanced=True,
-            info="Legacy/advanced: freeform prompt used only by the backend dynamic_prompt path. "
-            "Not used by the config-driven builder modes.",
+            info="field_configuration: extract using a saved schema (text, or vision when there's no text layer). multimodal_config: always read the page images with a vision model.",
         ),
         MessageTextInput(
             name="config_name",
@@ -89,22 +81,14 @@ class IDPLLMExtractor(Node):
     # ── build config (field visibility + dropdown population) ─────────────────
 
     def update_build_config(self, build_config: dict, field_value: str, field_name: str | None = None) -> dict:
-        if field_name == "extraction_mode":
-            is_prompt = field_value in ("dynamic_prompt", "multimodal_prompt")
-            build_config["prompt"]["show"] = is_prompt
-            build_config["config_name"]["show"] = not is_prompt
-            build_config["config_names"]["show"] = not is_prompt
-
-            if not is_prompt:
-                names = self._fetch_config_names()
+        # Both modes (field_configuration, multimodal_config) are config-driven — keep the config
+        # pickers' options fresh.
+        if field_name in ("extraction_mode", "config_name", "config_names"):
+            names = self._fetch_config_names()
+            if "config_name" in build_config:
                 build_config["config_name"]["options"] = names
+            if "config_names" in build_config:
                 build_config["config_names"]["options"] = names
-
-        if field_name in ("config_name", "config_names"):
-            current_options = self._fetch_config_names()
-            build_config["config_name"]["options"] = current_options
-            build_config["config_names"]["options"] = current_options
-
         return build_config
 
     def _fetch_config_names(self) -> list[str]:
@@ -128,66 +112,6 @@ class IDPLLMExtractor(Node):
             logger.warning(f"[AIFieldExtractor] Could not fetch field configs: {exc}")
             return []
 
-    def _resolve_document_path(self, src: Any) -> Path | None:
-        if not src:
-            return None
-
-        # Check attributes / dict fields
-        candidates: list[str] = []
-
-        if isinstance(src, str):
-            candidates.append(src)
-        elif isinstance(src, dict):
-            for key in ("file_path", "path", "file", "text", "source"):
-                val = src.get(key)
-                if val and isinstance(val, str):
-                    candidates.append(val)
-        else:
-            # Check message files list
-            files = getattr(src, "files", None)
-            if files and isinstance(files, list):
-                for f in files:
-                    if isinstance(f, str):
-                        candidates.append(f)
-                    elif hasattr(f, "path"):
-                        candidates.append(str(f.path))
-            
-            # Check .data dict
-            data_dict = getattr(src, "data", None)
-            if data_dict and isinstance(data_dict, dict):
-                for key in ("file_path", "path", "file", "text", "source"):
-                    val = data_dict.get(key)
-                    if val and isinstance(val, str) and val.strip():
-                        candidates.append(val.strip())
-
-            # Check .text attribute
-            text_val = getattr(src, "text", None)
-            if text_val and isinstance(text_val, str) and text_val.strip():
-                # Only treat text_val as path if it looks like a path/file
-                t_val = text_val.strip()
-                if any(t_val.lower().endswith(ext) for ext in [".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp", ".xlsx", ".xls", ".docx"]):
-                    candidates.append(t_val)
-
-            # Check .path attribute
-            path_val = getattr(src, "path", None)
-            if path_val is not None:
-                path_str = str(path_val).strip()
-                if path_str and path_str != "None":
-                    candidates.append(path_str)
-
-        for candidate in candidates:
-            candidate = candidate.strip()
-            if not candidate or candidate == "None":
-                continue
-            try:
-                p = Path(candidate)
-                if p.exists() and p.is_file():
-                    return p
-            except Exception:
-                pass
-        return None
-
-    # ── extraction ────────────────────────────────────────────────────────────
 
     async def _resolve_config_name_from_classification(self) -> str | None:
         """When config_names multi-select is used and classification metadata is present,
@@ -197,14 +121,20 @@ class IDPLLMExtractor(Node):
         if not config_names:
             return None
 
-        src = self.document
-        classification = {}
-        if isinstance(src, Message):
-            classification = (src.additional_kwargs or {}).get("classification", {})
+        from agentcore.services.idp.graph_native.payload import get_payload
 
+        src = self.document
+        # A Document Classifier node carries the classification in the IDP payload; fall back to a
+        # top-level additional_kwargs for compatibility.
+        payload = get_payload(src)
+        classification = payload.get("classification") or (
+            (src.additional_kwargs or {}).get("classification", {}) if isinstance(src, Message) else {}
+        )
         classified_type = (classification.get("type") or "").strip().lower()
         if not classified_type or classified_type == "unknown":
-            return None
+            # No classifier upstream. With ONE selected config there's nothing to route — just use it.
+            # With several, we can't disambiguate without a classification, so skip.
+            return config_names[0] if len(config_names) == 1 else None
 
         try:
             from agentcore.services.deps import session_scope
@@ -228,19 +158,80 @@ class IDPLLMExtractor(Node):
 
         return None  # no match
 
+    def _decide_route(self, text: str) -> str:
+        """Text vs vision, honoring the node's Input Mode (auto/text/vision/text_vision).
+
+        - ``text``: OCR/native text only (even if empty — the user's explicit choice).
+        - ``vision`` / ``text_vision``: read the page images with a vision model.
+        - ``auto`` (default): use the text layer when it exists (digital doc, or an upstream OCR node
+          produced text); otherwise there's nothing to read as text (an image / scanned doc with no
+          OCR node), so read the page images — exactly what the Input Mode tooltip promises.
+        """
+        mode = str(getattr(self, "input_mode", "") or "auto").strip().lower()
+        has_text = bool(text and text.strip())
+        if mode == "text":
+            return "text"
+        if mode in ("vision", "text_vision"):
+            return "vision"
+        return "text" if has_text else "vision"
+
+    async def _extract_via_vision(self, src: Any, prompt_or_config_id, session=None) -> dict:
+        """Extract straight from the page images (no OCR text) — for image / scanned documents wired
+        without an OCR node. Loads the document bytes from storage, renders them, and runs the vision
+        extractor with either a field-configuration id or a free-text prompt."""
+        import os
+        import tempfile
+
+        from agentcore.services.idp.extraction import extract_multimodal
+        from agentcore.services.idp.graph_native.payload import get_payload, load_bytes
+
+        payload = get_payload(src)
+        file_bytes = await load_bytes(payload)
+        if not file_bytes:
+            raise ValueError("No document bytes available for vision extraction.")
+        suffix = "." + str(payload.get("file_type") or "pdf").lstrip(".")
+        fd, tmp = tempfile.mkstemp(suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(file_bytes)
+            self.status = "extracting via vision (no OCR text)"
+            return await extract_multimodal(
+                file_path=tmp,
+                prompt_or_config_id=prompt_or_config_id,
+                llm_model=self.llm,
+                session=session,
+            )
+        finally:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
     async def _mark_skipped(self, classified_type: str) -> Data:
-        """Persist 'skipped' status on the source document and return empty Data."""
+        """Persist 'skipped' status + a human-readable REASON on the document, and return empty Data.
+
+        The reason is stored on ``doc.error_message`` so the Playground can show WHY it was skipped."""
         src = self.document
+        # Explain WHY, distinguishing the two skip causes so the user can fix the flow.
+        config_names = list(self.config_names) if self.config_names else []
+        if (not classified_type or classified_type.strip().lower() in ("", "unknown")) and len(config_names) > 1:
+            reason = (
+                "Multiple field configurations are selected but there is no Document Classifier node to "
+                "route between them. Add a Document Classifier, or select a single field configuration."
+            )
+        else:
+            reason = f"No selected field configuration matches the document type '{classified_type}'."
+
         try:
             from agentcore.services.deps import session_scope
             from agentcore.services.database.models.idp.documents import IdpDocument
+            from agentcore.services.idp.graph_native.payload import get_payload
             from uuid import UUID
 
-            doc_id_raw = None
-            if isinstance(src, Message):
-                doc_id_raw = (src.additional_kwargs or {}).get("document_id") or (
-                    getattr(src, "metadata", {}) or {}
-                ).get("document_id")
+            # document_id rides in the IDP payload (additional_kwargs["idp"]).
+            doc_id_raw = get_payload(src).get("document_id") or (
+                (src.additional_kwargs or {}).get("document_id") if isinstance(src, Message) else None
+            )
 
             if doc_id_raw:
                 doc_id = UUID(str(doc_id_raw))
@@ -248,27 +239,51 @@ class IDPLLMExtractor(Node):
                     doc = await session.get(IdpDocument, doc_id)
                     if doc:
                         doc.status = "skipped"
+                        doc.error_message = reason
                         session.add(doc)
                         await session.commit()
         except Exception as exc:
             logger.debug(f"[AIFieldExtractor] Could not mark document as skipped: {exc}")
 
-        self.status = f"Skipped: no field config for classified type '{classified_type}'"
+        logger.warning(f"[AIFieldExtractor] document skipped: {reason}")
+        self.status = f"Skipped — {reason}"
         return Data(data={})
 
     async def extract(self) -> Data:
         src = self.document
         text = src.text if isinstance(src, Message) else str(src)
 
+        # A Field Configuration is mandatory (enforced at publish time on the canvas).
+        config_names: list[str] = list(self.config_names) if self.config_names else []
+        single_config = str(getattr(self, "config_name", "") or "").strip()
+        logger.info(
+            f"[AIFieldExtractor] mode={self.extraction_mode!r} config_name={single_config!r} "
+            f"config_names={config_names!r}"
+        )
+        # Neither the single field nor the multi field is set → clear, actionable error (not a cryptic
+        # "config 'None' not found"). The single 'Field Configuration' is enough; the multi field is
+        # only needed for multi-type routing.
+        if not single_config and not config_names:
+            self.status = "No Field Configuration selected."
+            return carry(
+                src,
+                text="",
+                extracted={"error": "No Field Configuration selected — pick one in the AI Field Extractor."},
+            )
+
         # Multi-config routing: if config_names is populated, resolve the right config
         # based on the upstream classification or skip if no match.
-        config_names: list[str] = list(self.config_names) if self.config_names else []
         if config_names and self.extraction_mode == "field_configuration":
-            classification = {}
-            if isinstance(src, Message):
-                classification = (src.additional_kwargs or {}).get("classification", {})
+            from agentcore.services.idp.graph_native.payload import get_payload
+
+            classification = get_payload(src).get("classification") or (
+                (src.additional_kwargs or {}).get("classification", {}) if isinstance(src, Message) else {}
+            )
             classified_type = (classification.get("type") or "unknown").strip()
 
+            # Optional Document Classifier: when ABSENT, a single selected config is used directly;
+            # when PRESENT, its type routes to the matching config. Only multiple configs with NO
+            # classifier can't be disambiguated → skip.
             matched_config = await self._resolve_config_name_from_classification()
             if matched_config is None:
                 return await self._mark_skipped(classified_type)
@@ -277,27 +292,13 @@ class IDPLLMExtractor(Node):
         else:
             self._override_config_name = None
 
-        # Config-based modes build their own prompt inside extract_named_config / extract_multimodal
-        # using the general template + DB field prompts — no pre-build needed here.
-        if self.extraction_mode not in ("field_configuration", "multimodal_config"):
-            prompt = (self.prompt or "").strip()
-            if not prompt:
-                prompt = "Extract all key fields from this document. Return as structured JSON."
-        else:
-            prompt = ""  # unused in config modes
-
+        # The extractor is config-driven (Field Configurations). Both modes build their prompt/schema
+        # inside extract_named_config / extract_multimodal from the config — no pre-build needed here.
         try:
-            if self.extraction_mode == "dynamic_prompt":
-                if not self.llm:
-                    raw = f"[No model connected — prompt would be: {prompt[:200]}...]"
-                    extracted = {"error": "No model connected"}
-                else:
-                    from agentcore.services.idp.extraction import extract_dynamic
-                    extracted = await extract_dynamic(ocr_text=text, prompt=prompt, llm_model=self.llm)
-                    raw = json.dumps(extracted, indent=2)
-
-            elif self.extraction_mode == "field_configuration":
-                effective_config_name = self._override_config_name or self.config_name
+            if self.extraction_mode == "field_configuration":
+                effective_config_name = (
+                    self._override_config_name or single_config or (config_names[0] if config_names else None)
+                )
                 if not self.llm:
                     raw = f"[No model connected — config would be: {effective_config_name}]"
                     extracted = {"error": "No model connected"}
@@ -319,104 +320,59 @@ class IDPLLMExtractor(Node):
                         if not config:
                             raise ValueError(f"Active field configuration '{effective_config_name}' not found.")
 
-                        extracted = await extract_named_config(
-                            session=session,
-                            ocr_text=text,
-                            field_config_id=config.id,
-                            llm_model=self.llm
-                        )
+                        # Honor Input Mode: text path when there's a text layer (or explicit text mode),
+                        # else read the page images with the vision model (image/scanned docs) — otherwise
+                        # all fields come back null.
+                        if self._decide_route(text) == "text":
+                            extracted = await extract_named_config(
+                                session=session,
+                                ocr_text=text,
+                                field_config_id=config.id,
+                                llm_model=self.llm,
+                            )
+                        else:
+                            extracted = await self._extract_via_vision(src, config.id, session)
                         raw = json.dumps(extracted, indent=2)
 
-            elif self.extraction_mode in ("multimodal_prompt", "multimodal_config"):
-                file_path = self._resolve_document_path(src)
-                if not file_path:
-                    raise ValueError("Could not resolve document file path for multimodal extraction.")
-
+            elif self.extraction_mode == "multimodal_config":
+                # Always vision: read the page images with a saved field configuration.
+                effective_config_name = (
+                    self._override_config_name or single_config or (config_names[0] if config_names else None)
+                )
                 if not self.llm:
-                    raw = f"[No model connected — multimodal prompt/config would be processed]"
+                    raw = f"[No model connected — vision config would be: {effective_config_name}]"
                     extracted = {"error": "No model connected"}
                 else:
-                    from agentcore.services.idp.extraction import extract_multimodal
+                    from agentcore.services.deps import session_scope
+                    from agentcore.services.database.models.idp.config import IdpFieldConfiguration
+                    from sqlmodel import select
 
-                    if self.extraction_mode == "multimodal_prompt":
-                        extracted = await extract_multimodal(
-                            file_path=file_path,
-                            prompt_or_config_id=prompt,
-                            llm_model=self.llm
-                        )
-                        raw = json.dumps(extracted, indent=2)
-                    else:
-                        from agentcore.services.deps import session_scope
-                        from agentcore.services.database.models.idp.config import IdpFieldConfiguration
-                        from sqlmodel import select
-
-                        async with session_scope() as session:
-                            config = (await session.exec(
-                                select(IdpFieldConfiguration)
-                                .where(
-                                    IdpFieldConfiguration.name == self.config_name,
-                                    IdpFieldConfiguration.deleted_at.is_(None)
-                                )
-                            )).first()
-
-                            if not config:
-                                raise ValueError(f"Active field configuration '{self.config_name}' not found.")
-
-                            extracted = await extract_multimodal(
-                                file_path=file_path,
-                                prompt_or_config_id=config.id,
-                                llm_model=self.llm,
-                                session=session
+                    async with session_scope() as session:
+                        config = (await session.exec(
+                            select(IdpFieldConfiguration)
+                            .where(
+                                IdpFieldConfiguration.name == effective_config_name,
+                                IdpFieldConfiguration.deleted_at.is_(None),
                             )
-                            raw = json.dumps(extracted, indent=2)
+                        )).first()
+                        if not config:
+                            raise ValueError(f"Active field configuration '{effective_config_name}' not found.")
+                        # Storage-based vision (native docs live in storage, not on a local path).
+                        extracted = await self._extract_via_vision(src, config.id, session)
+                        raw = json.dumps(extracted, indent=2)
 
             headers_count = len(extracted.get("headers", {})) if isinstance(extracted, dict) else 0
             line_items_count = len(extracted.get("line_items", [])) if isinstance(extracted, dict) else 0
             self.status = f"Extracted {headers_count} header(s) and {line_items_count} line item(s)"
-            return Data(data=extracted, text=raw)
+            # Carry the IDP working-set forward (document_id, job_id, extracted, …) in the payload so
+            # the terminal sink can persist. Read it with get_payload(...)["extracted"] — NOT .data
+            # (the engine strips additional_kwargs once .data is set, which would lose document_id).
+            return carry(src, text=raw, extracted=extracted)
         except Exception as exc:
             self.status = f"Error: {exc}"
             logger.error(f"[AIFieldExtractor] Extraction failed: {exc}")
-            return Data(data={"error": str(exc)}, text="")
+            return carry(src, text="", extracted={"error": str(exc)})
 
-    def _build_config_prompt(self, config_name: str) -> str:
-        try:
-            from sqlmodel import Session, select
-            from agentcore.services.deps import get_service
-            from agentcore.services.schema import ServiceType
-            from agentcore.services.database.models.idp.config import (
-                IdpFieldConfiguration, IdpFieldConfigHeader
-            )
-
-            db_service = get_service(ServiceType.DATABASE_SERVICE)
-            sync_engine = db_service.engine.sync_engine
-            with Session(sync_engine) as session:
-                config = session.exec(
-                    select(IdpFieldConfiguration)
-                    .where(
-                        IdpFieldConfiguration.name == config_name,
-                        IdpFieldConfiguration.deleted_at.is_(None),
-                    )
-                ).first()
-                if not config:
-                    return f"Extract all key fields from this document as JSON."
-
-                headers = session.exec(
-                    select(IdpFieldConfigHeader)
-                    .where(IdpFieldConfigHeader.config_id == config.id)
-                ).all()
-
-                if not headers:
-                    return f"Extract all key fields from this document as JSON."
-
-                field_list = ", ".join(h.field_name for h in headers)
-                return (
-                    f"Extract the following fields from this document and return as structured JSON: {field_list}. "
-                    f"For each field include its value and a confidence score (0–1)."
-                )
-        except Exception as exc:
-            logger.warning(f"[AIFieldExtractor] Config prompt build failed: {exc}")
-            return "Extract all key fields from this document as JSON."
 
     @staticmethod
     def _parse_json(raw: str) -> dict:
