@@ -60,6 +60,13 @@ from agentcore.services.idp.rules_engine import _to_number, evaluate_rules
 from agentcore.services.idp.idp_tracing import create_idp_trace, end_idp_trace, start_span, end_span
 
 
+def _graph_exec_enabled(idp_agent) -> bool:
+    import os
+    if os.getenv("IDP_GRAPH_EXECUTION", "false").strip().lower() == "true":
+        return True
+    return bool((getattr(idp_agent, "extra", None) or {}).get("graph_execution"))
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -995,6 +1002,23 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         # 1. extension gate
         if cfg.allowed_extensions and file_type not in cfg.allowed_extensions and cfg.skip_unmatched:
             raise PipelineError(f"file type '{file_type}' not allowed by this agent")
+
+        if _graph_exec_enabled(idp_agent):
+            # Graph-driven execution path (Phase 1). LAZY import to avoid the import cycle
+            # (graph_exec imports pipeline at module load).
+            from agentcore.services.idp.graph_exec import PipelineContext, plan_execution, run_graph_pipeline
+            _graph_data = getattr(base_agent, "data", None) or {}
+            plan = plan_execution(_graph_data)
+            if plan.errors:
+                raise PipelineError("; ".join(plan.errors))
+            gctx = PipelineContext(
+                session=session, document_id=document_id, doc=doc, job=job,
+                idp_agent=idp_agent, base_agent=base_agent, cfg=cfg, flow=flow,
+                storage=storage, agent_scope=agent_scope, trace_ctx=trace_ctx, t0=t0,
+                file_bytes=file_bytes, original_bytes=file_bytes, file_type=file_type,
+            )
+            await run_graph_pipeline(gctx, plan, _graph_data)
+            return
 
         # 2. detect digital/scanned (per page)
         logger.info(f"[pipeline] {document_id}: classifying document (digital/scanned)")
