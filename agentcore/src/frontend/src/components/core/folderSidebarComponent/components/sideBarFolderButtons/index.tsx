@@ -362,7 +362,6 @@ const SideBarFoldersButtonsComponent = ({
     "view_dashboard",
     "view_platform_configs",
     "view_help_support_page",
-    "view_approval_page",
     "view_packages_page",
   ]);
   const can = (permissionKey: string) =>
@@ -461,43 +460,65 @@ const SideBarFoldersButtonsComponent = ({
                 </SidebarMenuItem>
               )}
 
-              {/* ─ IDP ─ always visible to all authenticated users ─ */}
-              <SectionLabel label="IDP" />
+              {/* ─ IDP ─ root sees no IDP items (all gated); Observability lives under Governance ─ */}
+              {!isRootAdmin && <SectionLabel label="IDP" />}
 
-              <SidebarMenuItem>
-                <SidebarMenuButton size="md" isActive={pathname.startsWith("/field-configurations")} onClick={() => _navigate("/field-configurations")} className={navBtn}>
-                  <ForwardedIconComponent name="ClipboardList" className="h-4 w-4 flex-shrink-0" />
-                  {t("Field Configurations")}
-                </SidebarMenuButton>
-              </SidebarMenuItem>
+              {!isRootAdmin && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/field-configurations")} onClick={() => _navigate("/field-configurations")} className={navBtn}>
+                    <ForwardedIconComponent name="ClipboardList" className="h-4 w-4 flex-shrink-0" />
+                    {t("Field Configurations")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
 
-              <SidebarMenuItem>
-                <SidebarMenuButton size="md" isActive={pathname.startsWith("/processed-docs")} onClick={() => _navigate("/processed-docs")} className={navBtn}>
-                  <ForwardedIconComponent name="FileCheck" className="h-4 w-4 flex-shrink-0" />
-                  {t("Processed Docs")}
-                </SidebarMenuButton>
-              </SidebarMenuItem>
+              {!isRootAdmin && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/processed-docs")} onClick={() => _navigate("/processed-docs")} className={navBtn}>
+                    <ForwardedIconComponent name="FileCheck" className="h-4 w-4 flex-shrink-0" />
+                    {t("Processed Docs")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
 
-              <SidebarMenuItem>
-                <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-reports")} onClick={() => _navigate("/idp-reports")} className={navBtn}>
-                  <ForwardedIconComponent name="BarChart3" className="h-4 w-4 flex-shrink-0" />
-                  {t("Reports")}
-                </SidebarMenuButton>
-              </SidebarMenuItem>
+              {!isRootAdmin && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-upload")} onClick={() => _navigate("/idp-upload")} className={navBtn}>
+                    <ForwardedIconComponent name="UploadCloud" className="h-4 w-4 flex-shrink-0" />
+                    {t("Document Upload")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
 
-              <SidebarMenuItem>
-                <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-upload")} onClick={() => _navigate("/idp-upload")} className={navBtn}>
-                  <ForwardedIconComponent name="UploadCloud" className="h-4 w-4 flex-shrink-0" />
-                  {t("Document Upload")}
-                </SidebarMenuButton>
-              </SidebarMenuItem>
+              {/* ─ Governance ─ (Observability always renders here, so the header is unconditional) */}
+              <SectionLabel label="Governance" />
 
-              <SidebarMenuItem>
-                <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-logs")} onClick={() => _navigate("/idp-logs")} className={navBtn}>
-                  <ForwardedIconComponent name="ScrollText" className="h-4 w-4 flex-shrink-0" />
-                  {t("Logs")}
-                </SidebarMenuButton>
-              </SidebarMenuItem>
+              {can("view_approval_page") && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/approval")} onClick={() => _navigate("/approval")} className={navBtn}>
+                    <ForwardedIconComponent name="ClipboardCheck" className="h-4 w-4 flex-shrink-0" />
+                    {t("Review & Approval")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+
+              {!isRootAdmin && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-reports")} onClick={() => _navigate("/idp-reports")} className={navBtn}>
+                    <ForwardedIconComponent name="BarChart3" className="h-4 w-4 flex-shrink-0" />
+                    {t("Reports")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+
+              {!isRootAdmin && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/idp-logs")} onClick={() => _navigate("/idp-logs")} className={navBtn}>
+                    <ForwardedIconComponent name="ScrollText" className="h-4 w-4 flex-shrink-0" />
+                    {t("Logs")}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
 
               <SidebarMenuItem>
                 <SidebarMenuButton size="md" isActive={pathname.startsWith("/observability")} onClick={() => _navigate("/observability")} className={navBtn}>
@@ -506,16 +527,16 @@ const SideBarFoldersButtonsComponent = ({
                 </SidebarMenuButton>
               </SidebarMenuItem>
 
-              {/* ─ Governance ─ */}
-              {(can("view_approval_page") || can("view_published_agents") || can("view_models")) && (
-                <SectionLabel label="Governance" />
+              {/* ─ Platform ─ */}
+              {(can("view_control_panel") || can("view_connector_page") || can("view_packages_page") || can("view_release_management_page") || can("view_published_agents") || can("view_models")) && (
+                <SectionLabel label="Platform" />
               )}
 
-              {can("view_approval_page") && (
+              {can("view_control_panel") && (
                 <SidebarMenuItem>
-                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/approval")} onClick={() => _navigate("/approval")} className={navBtn}>
-                    <ForwardedIconComponent name="ClipboardCheck" className="h-4 w-4 flex-shrink-0" />
-                    {t("Review & Approval")}
+                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/workflows")} onClick={() => _navigate("/workflows")} className={navBtn}>
+                    <ForwardedIconComponent name="PlayCircle" className="h-4 w-4 flex-shrink-0" />
+                    {t("Agent Control Panel")}
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               )}
@@ -543,20 +564,6 @@ const SideBarFoldersButtonsComponent = ({
                   <SidebarMenuButton size="md" isActive={pathname.startsWith("/local-models")} onClick={() => _navigate("/local-models")} className={navBtn}>
                     <ForwardedIconComponent name="Server" className="h-4 w-4 flex-shrink-0" />
                     {t("Local & Self-Hosted Models")}
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              )}
-
-              {/* ─ Platform ─ */}
-              {(can("view_control_panel") || can("view_connector_page") || can("view_packages_page") || can("view_release_management_page")) && (
-                <SectionLabel label="Platform" />
-              )}
-
-              {can("view_control_panel") && (
-                <SidebarMenuItem>
-                  <SidebarMenuButton size="md" isActive={pathname.startsWith("/workflows")} onClick={() => _navigate("/workflows")} className={navBtn}>
-                    <ForwardedIconComponent name="PlayCircle" className="h-4 w-4 flex-shrink-0" />
-                    {t("Agent Control Panel")}
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               )}
