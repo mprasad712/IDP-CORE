@@ -75,6 +75,18 @@ class IDPScanCorrector(Node):
             self.status = f"could not load document ({e}) — passthrough"
             return carry(src)
 
+        # Capture the ORIGINAL file's native text layer BEFORE correction rasterizes the pages. A digital
+        # PDF routed through Scan Corrector must not lose its text — re-deriving it from the corrected
+        # (rasterized) file returns empty. (Codex #4) Kept only if there's no upstream OCR text.
+        original_native_text = ""
+        try:
+            from agentcore.services.idp import text_layer
+
+            _, _otoks = text_layer.extract_native_text(file_bytes, file_type)
+            original_native_text = " ".join(str(t.get("text", "")) for t in _otoks)
+        except Exception:  # noqa: BLE001
+            pass
+
         # ── real correction: de-skew then snap rotation on the page images ──
         notes = []
         try:
@@ -112,8 +124,10 @@ class IDPScanCorrector(Node):
         # downstream text node (Chunking → extractor → 0 fields). So keep upstream text when present;
         # only re-derive a native text layer when the source has none (Scan Corrector ran first).
         upstream_text = (src.text if isinstance(src, Message) else "") or ""
-        new_text = upstream_text
-        if not upstream_text.strip():
+        # Priority: upstream OCR text > the original file's native text layer (captured pre-correction)
+        # > text re-derived from the corrected file (empty for a rasterized scan → extractor uses vision).
+        new_text = upstream_text or original_native_text
+        if not new_text.strip():
             try:
                 from agentcore.services.idp import text_layer
 
