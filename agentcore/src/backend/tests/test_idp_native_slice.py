@@ -307,6 +307,98 @@ def _router_merge_graph():
     return {"nodes": [upload, detector, corrector, parser, out], "edges": edges, "viewport": {}}
 
 
+def _full_flow_graph():
+    """Approximates the user's canvas: Upload → Detector → (digital / scanned→Scan Corrector) →
+    Output Parser → Document Classifier → AI Field Extractor → Confidence Router → (high/low) →
+    Processed Docs Output. Two merge-after-router joins (Output Parser + Confidence Router→sink)."""
+    def n(nid, dn, tmpl=None, outs=None):
+        return _node(nid, dn, template=tmpl, outputs=outs)
+
+    def o(name, method, grouped=False):
+        d = {"name": name, "display_name": name, "types": ["Message"], "selected": "Message", "method": method}
+        if grouped:
+            d["group_outputs"] = True
+        return d
+
+    def e(src, sh, tgt, tf):
+        return {"source": src, "target": tgt,
+                "data": {"sourceHandle": {"name": sh, "id": src, "output_types": ["Message"]},
+                         "targetHandle": {"fieldName": tf, "id": tgt, "inputTypes": ["Message", "Data"]}}}
+
+    hi = {"type": "other", "name": "document", "input_types": ["Message"]}
+    nodes = [
+        n("DocumentUpload-a", "Document Upload", outs=[o("document", "load")]),
+        n("DocumentTypeDetector-d", "Document Type Detector",
+          {"document": hi, "min_text_length": {"type": "int", "name": "min_text_length", "value": 10}},
+          [o("digital_path", "digital_path", True), o("scanned_path", "scanned_path", True)]),
+        n("ScanCorrector-s", "Scan Corrector",
+          {"document": hi, "fix_skew": {"type": "bool", "name": "fix_skew", "value": False},
+           "fix_rotation": {"type": "bool", "name": "fix_rotation", "value": False}},
+          [o("corrected_document", "corrected_document")]),
+        n("OutputParser-p", "Output Parser",
+          {"branch_a": {"type": "other", "name": "branch_a", "input_types": ["Message", "Data"]},
+           "branch_b": {"type": "other", "name": "branch_b", "input_types": ["Message", "Data"]}},
+          [o("merged", "merge")]),
+        n("DocumentClassifier-c", "Document Classifier",
+          {"document": hi, "document_types": {"type": "other", "name": "document_types", "value": []}},
+          [o("classified_document", "classify")]),
+        n("DocumentExtractor-e", "AI Field Extractor",
+          {"extraction_mode": {"type": "str", "name": "extraction_mode", "value": "field_configuration"}, "document": hi},
+          [o("extracted_data", "extract")]),
+        n("ConfidenceRouter-r", "Confidence Router",
+          {"data": {"type": "other", "name": "data", "input_types": ["Message", "Data"]},
+           "threshold": {"type": "float", "name": "threshold", "value": 0.8}},
+          [o("high_confidence", "high_confidence", True), o("low_confidence", "low_confidence", True)]),
+        n("ProcessedDocsOutput-z", "Processed Docs Output",
+          {"data": {"type": "other", "name": "data", "input_types": ["Data", "Message"], "list": True}},
+          [o("result", "finalize")]),
+    ]
+    edges = [
+        e("DocumentUpload-a", "document", "DocumentTypeDetector-d", "document"),
+        e("DocumentTypeDetector-d", "digital_path", "OutputParser-p", "branch_a"),
+        e("DocumentTypeDetector-d", "scanned_path", "ScanCorrector-s", "document"),
+        e("ScanCorrector-s", "corrected_document", "OutputParser-p", "branch_b"),
+        e("OutputParser-p", "merged", "DocumentClassifier-c", "document"),
+        e("DocumentClassifier-c", "classified_document", "DocumentExtractor-e", "document"),
+        e("DocumentExtractor-e", "extracted_data", "ConfidenceRouter-r", "data"),
+        e("ConfidenceRouter-r", "high_confidence", "ProcessedDocsOutput-z", "data"),
+        e("ConfidenceRouter-r", "low_confidence", "ProcessedDocsOutput-z", "data"),
+    ]
+    return {"nodes": nodes, "edges": edges, "viewport": {}}
+
+
+@pytest.mark.anyio
+async def test_full_flow_topology_reaches_the_sink(monkeypatch):
+    """The user's full topology (router→merge→classifier→extractor→confidence-router→sink) must
+    structurally execute end-to-end — every node on the active (digital) path runs and the sink
+    finalizes. Two merge-after-router joins exercise the fix."""
+    from agentcore.services.database.models.idp.documents import IdpDocument
+    from agentcore.services.deps import session_scope
+    from agentcore.services.idp.graph_native.runner import run_native_graph
+
+    storage = T._MockStorage()
+    monkeypatch.setattr(pipeline, "get_storage_service", lambda: storage)
+    monkeypatch.setattr("agentcore.services.deps.get_storage_service", lambda: storage, raising=False)
+    T._patch_extraction(monkeypatch)
+
+    async with session_scope() as s:
+        agent_id, doc_id = await T._setup_document(s, graph=_full_flow_graph(), file_bytes=T._digital_pdf())
+
+    node_log: list = []
+    await run_native_graph(document_id=str(doc_id), agent_data=_full_flow_graph(),
+                           agent_id=str(agent_id), node_log_out=node_log)
+    ran = {e["name"] for e in node_log}
+
+    for required in ("Document Type Detector", "Output Parser", "Document Classifier",
+                     "AI Field Extractor", "Confidence Router", "Processed Docs Output"):
+        assert required in ran, f"{required} did not run — flow broke. ran={ran}"
+    assert "Scan Corrector" not in ran, f"scanned branch should be inactive for a digital doc: {ran}"
+
+    async with session_scope() as s:
+        doc = await s.get(IdpDocument, doc_id)
+        assert doc.status == "pending_review", f"sink must finalize: {doc.status}"
+
+
 @pytest.mark.anyio
 async def test_merge_after_router_runs_the_active_branch(monkeypatch):
     """A router's branches rejoin at a merge node (Output Parser) that continues to the sink. Stopping

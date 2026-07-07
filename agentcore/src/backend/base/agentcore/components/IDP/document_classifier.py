@@ -220,13 +220,14 @@ class IDPDocumentClassifier(Node):
         try:
             from agentcore.services.deps import session_scope
             from agentcore.services.database.models.idp.documents import IdpDocument
+            from agentcore.services.idp.graph_native.payload import effective_payload
             from uuid import UUID
 
-            doc_id_raw = None
-            if isinstance(src, Message):
-                doc_id_raw = (src.additional_kwargs or {}).get("document_id") or (
-                    getattr(src, "metadata", {}) or {}
-                ).get("document_id")
+            # document_id rides in the IDP payload (+ shared channel) — NOT top-level additional_kwargs,
+            # so read it there first (the old top-level read always skipped the DB write in native mode).
+            doc_id_raw = effective_payload(self, src).get("document_id") or (
+                (src.additional_kwargs or {}).get("document_id") if isinstance(src, Message) else None
+            )
 
             if not doc_id_raw:
                 return

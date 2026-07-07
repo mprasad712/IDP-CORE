@@ -1939,24 +1939,37 @@ class LangGraphAdapter:
                         continue
                 else:
                     continue
-            # Don't deactivate a JOIN still reachable via another ACTIVE branch. Otherwise stopping one
-            # router branch also kills a merge node (e.g. Output Parser) shared with the active branch,
-            # and everything downstream of it. A node stays alive if any predecessor other than the
-            # branch we're descending from is currently active. Skipped for cycle vertices, whose
-            # activation is owned by the loop routing function (not stop()/mark_branch).
-            if state == "INACTIVE" and child_id not in self.cycle_vertices:
-                other_active = False
-                for pred_id in self.predecessor_map.get(child_id, []):
-                    if pred_id == vertex_id:
-                        continue
-                    pred_v = self.get_vertex(pred_id)
-                    if pred_v is not None and pred_v.is_active():
-                        other_active = True
-                        break
-                if other_active:
-                    continue
+            # Don't deactivate a JOIN still reachable via another ACTIVE edge. Otherwise stopping one
+            # router branch kills a merge node shared with the active branch (and everything downstream):
+            #  - a merge of two different sources (Output Parser: digital-source + scanned-source), and
+            #  - a node BOTH of a router's outputs feed (Confidence Router high+low → same sink).
+            # Skipped for cycle vertices, whose activation is owned by the loop routing function.
+            if (
+                state == "INACTIVE"
+                and child_id not in self.cycle_vertices
+                and self._reachable_via_active_edge(child_id, vertex_id, output_name)
+            ):
+                continue
             self._mark_branch(child_id, state, visited)
         return visited
+
+    def _reachable_via_active_edge(self, child_id: str, from_vertex: str, stopped_output: str | None) -> bool:
+        """True if ``child_id`` still has an incoming edge from an ACTIVE source other than the branch
+        being deactivated — i.e. it is a join reachable via a live path. Edge-aware so it also handles a
+        node fed by two different outputs of the SAME router (only one is stopped)."""
+        for edge in getattr(self, "edges", []) or []:
+            if edge.get("target") != child_id:
+                continue
+            src = edge.get("source")
+            sh = edge.get("data", {}).get("sourceHandle", {})
+            handle = sh.get("name", "") if isinstance(sh, dict) else (str(sh) if sh else "")
+            # Skip the edge we are descending from (the branch being deactivated).
+            if src == from_vertex and (stopped_output is None or handle == stopped_output):
+                continue
+            src_v = self.get_vertex(src)
+            if src_v is not None and src_v.is_active():
+                return True
+        return False
     
     def mark_branch(self, vertex_id: str, state: str, output_name: str | None = None) -> None:
         """Marks a branch starting from vertex_id as ACTIVE or INACTIVE.

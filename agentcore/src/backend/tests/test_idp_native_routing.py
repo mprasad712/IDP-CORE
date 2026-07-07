@@ -187,6 +187,35 @@ def test_scan_corrector_actually_corrects_and_saves(monkeypatch):
     assert "scan_corrections" not in (getattr(out, "data", {}) or {})   # note in payload, not .data
 
 
+def test_classifier_tags_predicted_type_into_payload():
+    """The Document Classifier writes predicted_type into the IDP payload (routers resolve it) AND the
+    classification block (extractor multi-config routing) — the native-engine contract."""
+    from agentcore.components.IDP.document_classifier import IDPDocumentClassifier
+
+    out = IDPDocumentClassifier()._tag_message(
+        new_message(text="INVOICE #1", document_id="d"), "invoice", 0.95, "has invoice number")
+    assert get_payload(out).get("predicted_type") == "invoice"
+    assert out.additional_kwargs.get("classification", {}).get("type") == "invoice"
+
+
+def test_chunk_aggregator_merges_per_chunk_data():
+    """The Chunk Aggregator combines per-chunk EXTRACTION Data (keep-highest-confidence). NOTE: it must
+    be fed extracted Data — wiring Chunking → Aggregator directly (raw Message chunks) does not work."""
+    from agentcore.schema.data import Data
+
+    from agentcore.components.IDP.chunk_aggregator import IDPChunkAggregator
+
+    a = IDPChunkAggregator()
+    a.chunks_data = [
+        Data(data={"vendor": "ACME", "vendor_confidence": 0.8}),
+        Data(data={"vendor": "ACME Inc", "vendor_confidence": 0.95, "total": "100"}),
+    ]
+    a.dedup_strategy = "keep_highest_confidence"
+    agg = a.aggregated_data()
+    assert agg.data.get("vendor") == "ACME Inc"   # higher confidence wins
+    assert agg.data.get("total") == "100"
+
+
 def test_scan_corrector_output_flows_to_the_next_node(monkeypatch):
     """The corrected file the Scan Corrector writes is what the NEXT node reads — same contract as the
     Page Selector's sliced file. Proven end-to-end: the Scan Corrector's output payload points at the
