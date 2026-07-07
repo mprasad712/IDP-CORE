@@ -399,6 +399,89 @@ async def test_full_flow_topology_reaches_the_sink(monkeypatch):
         assert doc.status == "pending_review", f"sink must finalize: {doc.status}"
 
 
+def _validation_chain_graph():
+    """Extractor → Math Reconcile → Confidence Router → Rules/Conditions → Approval Gate → sink.
+    Each router's BOTH outputs feed the next node, so every node runs whichever branch fires — a stress
+    test of three routers in series (Confidence, Rules, Approval) plus Math Reconcile."""
+    def o(name, method, grouped=False):
+        d = {"name": name, "display_name": name, "types": ["Message"], "selected": "Message", "method": method}
+        if grouped:
+            d["group_outputs"] = True
+        return d
+
+    def e(src, sh, tgt, tf):
+        return {"source": src, "target": tgt,
+                "data": {"sourceHandle": {"name": sh, "id": src, "output_types": ["Message"]},
+                         "targetHandle": {"fieldName": tf, "id": tgt, "inputTypes": ["Message", "Data"]}}}
+
+    hi = {"type": "other", "name": "data", "input_types": ["Message", "Data"]}
+    nodes = [
+        _node("DocumentUpload-a", "Document Upload", outputs=[o("document", "load")]),
+        _node("DocumentExtractor-e", "AI Field Extractor",
+              template={"extraction_mode": {"type": "str", "name": "extraction_mode", "value": "field_configuration"},
+                        "document": {"type": "other", "name": "document", "input_types": ["Message"]}},
+              outputs=[o("extracted_data", "extract")]),
+        _node("MathReconcile-m", "Math Reconcile", template={"data": hi},
+              outputs=[o("validated_data", "reconcile")]),
+        _node("ConfidenceRouter-c", "Confidence Router",
+              template={"data": hi, "threshold": {"type": "float", "name": "threshold", "value": 0.8}},
+              outputs=[o("high_confidence", "high_confidence", True), o("low_confidence", "low_confidence", True)]),
+        _node("RulesConditions-r", "Rules / Conditions",
+              template={"data": hi, "logic_operator": {"type": "str", "name": "logic_operator", "value": "AND"},
+                        "conditions": {"type": "str", "name": "conditions", "value": "[]"}},
+              outputs=[o("passed", "passed", True), o("failed", "failed", True)]),
+        _node("ApprovalGate-g", "Approval Gate",
+              template={"data": hi, "approval_field": {"type": "str", "name": "approval_field", "value": "rule_action"},
+                        "approve_value": {"type": "str", "name": "approve_value", "value": "auto_approve"}},
+              outputs=[o("auto_approved", "auto_approved", True), o("pending_review", "pending_review", True)]),
+        _node("ProcessedDocsOutput-z", "Processed Docs Output",
+              template={"data": {"type": "other", "name": "data", "input_types": ["Data", "Message"], "list": True}},
+              outputs=[o("result", "finalize")]),
+    ]
+    edges = [
+        e("DocumentUpload-a", "document", "DocumentExtractor-e", "document"),
+        e("DocumentExtractor-e", "extracted_data", "MathReconcile-m", "data"),
+        e("MathReconcile-m", "validated_data", "ConfidenceRouter-c", "data"),
+        e("ConfidenceRouter-c", "high_confidence", "RulesConditions-r", "data"),
+        e("ConfidenceRouter-c", "low_confidence", "RulesConditions-r", "data"),
+        e("RulesConditions-r", "passed", "ApprovalGate-g", "data"),
+        e("RulesConditions-r", "failed", "ApprovalGate-g", "data"),
+        e("ApprovalGate-g", "auto_approved", "ProcessedDocsOutput-z", "data"),
+        e("ApprovalGate-g", "pending_review", "ProcessedDocsOutput-z", "data"),
+    ]
+    return {"nodes": nodes, "edges": edges, "viewport": {}}
+
+
+@pytest.mark.anyio
+async def test_validation_chain_runs_every_node(monkeypatch):
+    """Math Reconcile + Confidence Router + Rules/Conditions + Approval Gate in series must all execute
+    without error and reach the sink (three routers back-to-back)."""
+    from agentcore.services.database.models.idp.documents import IdpDocument
+    from agentcore.services.deps import session_scope
+    from agentcore.services.idp.graph_native.runner import run_native_graph
+
+    storage = T._MockStorage()
+    monkeypatch.setattr(pipeline, "get_storage_service", lambda: storage)
+    monkeypatch.setattr("agentcore.services.deps.get_storage_service", lambda: storage, raising=False)
+    T._patch_extraction(monkeypatch)
+
+    async with session_scope() as s:
+        agent_id, doc_id = await T._setup_document(s, graph=_validation_chain_graph(), file_bytes=T._digital_pdf())
+
+    node_log: list = []
+    await run_native_graph(document_id=str(doc_id), agent_data=_validation_chain_graph(),
+                           agent_id=str(agent_id), node_log_out=node_log)
+    ran = {e["name"] for e in node_log}
+
+    for required in ("AI Field Extractor", "Math Reconcile", "Confidence Router",
+                     "Rules / Conditions", "Approval Gate", "Processed Docs Output"):
+        assert required in ran, f"{required} did NOT run — chain broke. ran={ran}"
+
+    async with session_scope() as s:
+        doc = await s.get(IdpDocument, doc_id)
+        assert doc.status in ("pending_review", "auto_approved"), f"sink must finalize: {doc.status}"
+
+
 @pytest.mark.anyio
 async def test_merge_after_router_runs_the_active_branch(monkeypatch):
     """A router's branches rejoin at a merge node (Output Parser) that continues to the sink. Stopping
