@@ -372,6 +372,29 @@ def test_math_reconcile_unwraps_and_keeps_extraction(monkeypatch):
     assert "attempts" not in ex and "balanced" not in ex, f"wrapper leaked into extracted: {ex}"
 
 
+def test_prepare_drops_orphan_terminal_sink():
+    """A Processed Docs Output with NO incoming edge is an orphan sink — the engine would otherwise run
+    it as an entry point with no data. _prepare must drop it (and keep a properly-wired one)."""
+    from agentcore.services.idp.graph_native.runner import _prepare
+
+    agent_data = {
+        "nodes": [
+            {"id": "DocumentUpload-1", "data": {"node": {"display_name": "Document Upload", "template": {}}}},
+            {"id": "Extractor-1", "data": {"node": {"display_name": "AI Field Extractor"}}},
+            {"id": "Sink-wired", "data": {"node": {"display_name": "Processed Docs Output"}}},
+            {"id": "Sink-orphan", "data": {"node": {"display_name": "Processed Docs Output"}}},
+        ],
+        "edges": [
+            {"source": "DocumentUpload-1", "target": "Extractor-1"},
+            {"source": "Extractor-1", "target": "Sink-wired"},
+        ],
+    }
+    out = _prepare(agent_data, "doc-1")
+    ids = {n["id"] for n in out["nodes"]}
+    assert "Sink-orphan" not in ids, "orphan sink (no incoming edge) was not dropped"
+    assert {"DocumentUpload-1", "Extractor-1", "Sink-wired"} <= ids, "dropped a wired node"
+
+
 def test_output_parser_prefers_the_branch_with_text():
     """A router stops one branch but it still forwards a no-text message; the Output Parser must pick the
     branch that actually carries text (OCR/native), not blindly branch A."""

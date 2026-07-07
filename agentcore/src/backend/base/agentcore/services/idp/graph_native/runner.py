@@ -27,9 +27,25 @@ def _prepare(agent_data: dict, document_id: str) -> dict:
     registry exactly like a simple agent's components. This is purely the batch-document wiring.
     """
     data = copy.deepcopy(agent_data) if isinstance(agent_data, dict) else {"nodes": [], "edges": []}
+    edges = data.get("edges") or []
+    targets = {e.get("target") for e in edges if isinstance(e, dict)}
+
+    kept_nodes: list = []
+    dropped_ids: set = set()
     for node in data.get("nodes") or []:
         inner = ((node.get("data") or {}).get("node")) or {}
         dn = inner.get("display_name")
+        # Drop an ORPHAN terminal sink: a Processed Docs / Webhook Output with NO incoming edge can't
+        # persist anything (it has no data), yet the engine would treat it as an entry point and run it
+        # immediately ("No document_id — nothing to persist"). Skip it so a stray/half-wired second sink
+        # never runs as an input. A real sink is always the target of at least one edge.
+        if dn in _OUTPUT_NAMES and node.get("id") not in targets:
+            logger.info(
+                f"[idp-native] {document_id}: skipping orphan terminal sink '{dn}' "
+                f"({node.get('id')}) — it has no incoming edge, so it can't persist anything."
+            )
+            dropped_ids.add(node.get("id"))
+            continue
         if dn in _INPUT_NAMES:
             inner["is_input"] = True
             tmpl = inner.setdefault("template", {})
@@ -40,6 +56,14 @@ def _prepare(agent_data: dict, document_id: str) -> dict:
                 tmpl["document_id"] = {"type": "str", "name": "document_id", "value": document_id, "show": True}
         elif dn in _OUTPUT_NAMES:
             inner["is_output"] = True
+        kept_nodes.append(node)
+
+    data["nodes"] = kept_nodes
+    if dropped_ids:
+        data["edges"] = [
+            e for e in edges
+            if isinstance(e, dict) and e.get("source") not in dropped_ids and e.get("target") not in dropped_ids
+        ]
     return data
 
 
