@@ -338,6 +338,40 @@ def test_extractor_falls_back_to_vision_when_chunks_have_no_text(monkeypatch):
     assert total.get("value") == "600", f"vision extraction not merged into output: {get_payload(out)}"
 
 
+def test_math_reconcile_unwraps_and_keeps_extraction(monkeypatch):
+    """Math Reconcile must set the payload's `extracted` to the INNER extraction, not reconcile_math's
+    wrapper ({extracted, attempts, balanced, report}). And when the fix can't run (e.g. the re-prompt
+    hits a quota error) it must KEEP the original extraction — never drop it. That wrapper leak was the
+    '0 fields saved' bug whenever Math Reconcile was in the flow."""
+    import asyncio
+
+    from agentcore.components.IDP.math_reconcile import IDPMathReconcile
+
+    original = {
+        "headers": {"invoice_value": {"value": "540.00", "confidence": 0.75}},
+        "line_items": [{"columns": [{"column_name": "amount", "value": "100"}]}],
+    }
+
+    async def _fake_reconcile(extracted, llm, **kw):
+        # Mimic the service: it returns a WRAPPER; here the re-prompt failed so it's the un-fixed data.
+        return {"extracted": extracted, "attempts": 1, "balanced": False, "report": ["failed"], "_usage": None}
+
+    monkeypatch.setattr(
+        "agentcore.services.idp.math_reconcile.reconcile_math", _fake_reconcile, raising=False
+    )
+
+    mr = IDPMathReconcile()
+    mr.data = new_message(text="INVOICE", document_id="d", extracted=original)
+    mr.llm = object()
+    mr.tolerance = 0.01
+    mr.max_retries = 2
+    out = asyncio.run(mr.reconcile())
+    ex = get_payload(out).get("extracted", {})
+    # The sink reads extracted["headers"] — it must be the INNER extraction, not the wrapper.
+    assert ex.get("headers", {}).get("invoice_value", {}).get("value") == "540.00", f"lost extraction: {ex}"
+    assert "attempts" not in ex and "balanced" not in ex, f"wrapper leaked into extracted: {ex}"
+
+
 def test_output_parser_prefers_the_branch_with_text():
     """A router stops one branch but it still forwards a no-text message; the Output Parser must pick the
     branch that actually carries text (OCR/native), not blindly branch A."""

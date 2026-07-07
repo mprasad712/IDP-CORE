@@ -36,17 +36,27 @@ class IDPMathReconcile(Node):
 
         ocr_text = getattr(self.data, "text", None) or None
         try:
-            reconciled = await reconcile_math(
+            result = await reconcile_math(
                 extracted, self.llm,
                 max_attempts=int(self.max_retries or 2),
                 tolerance=float(self.tolerance or 0.01),
                 ocr_text=ocr_text if (ocr_text and ocr_text.strip()) else None,
             )
-            if isinstance(reconciled, dict):
-                reconciled.pop("_usage", None)
-            self.status = "reconciled"
-            return carry(self.data, extracted=reconciled if isinstance(reconciled, dict) else extracted)
+            # reconcile_math returns a WRAPPER: {"extracted": {...headers, line_items...}, "attempts",
+            # "balanced", "report", "_usage"}. Pull the INNER extraction out — the sink expects
+            # extracted = {headers, line_items}, NOT the wrapper (otherwise it finds no headers and saves
+            # 0). Fall back to the ORIGINAL extraction when the fix produced nothing usable (e.g. the
+            # re-prompt hit a quota / parse error) so Math Reconcile NEVER drops the extracted fields.
+            fixed = result.get("extracted") if isinstance(result, dict) else None
+            final = (
+                fixed
+                if (isinstance(fixed, dict) and (fixed.get("headers") or fixed.get("line_items")))
+                else extracted
+            )
+            balanced = bool(result.get("balanced")) if isinstance(result, dict) else False
+            self.status = "reconciled (balanced)" if balanced else "mismatch remains — kept extraction"
+            return carry(self.data, extracted=final)
         except Exception as exc:  # reconcile is best-effort — never fail the document
             logger.warning(f"[IDP native] math reconcile skipped: {exc}")
-            self.status = f"reconcile skipped ({exc})"
-            return carry(self.data)
+            self.status = f"reconcile skipped ({exc}) — kept extraction"
+            return carry(self.data, extracted=extracted)
