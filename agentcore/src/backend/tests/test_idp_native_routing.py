@@ -187,6 +187,270 @@ def test_scan_corrector_actually_corrects_and_saves(monkeypatch):
     assert "scan_corrections" not in (getattr(out, "data", {}) or {})   # note in payload, not .data
 
 
+def test_scan_corrector_preserves_upstream_ocr_text(monkeypatch):
+    """Regression: when Scan Corrector is wired AFTER an OCR node (PaddleOCR), the source Message
+    already carries real OCR text. Scan Corrector must PRESERVE it — re-deriving text from the
+    rasterized corrected image returns EMPTY, which would WIPE the OCR text and break every downstream
+    text node (Chunking → extractor → 0 chunks → 0 fields)."""
+    import asyncio
+    import io
+
+    from PIL import Image
+
+    from agentcore.components.IDP.scan_corrector import IDPScanCorrector
+
+    def _png():
+        b = io.BytesIO(); Image.new("RGB", (240, 140), "white").save(b, format="PNG"); return b.getvalue()
+
+    class _Store:
+        def __init__(self):
+            self.files = {}
+        async def get_file(self, agent_id, file_name):
+            return self.files[(agent_id, file_name)]
+        async def save_file(self, agent_id, file_name, data):
+            self.files[(agent_id, file_name)] = data
+
+    store = _Store()
+    store.files[("scope", "idp_img.png")] = _png()
+    monkeypatch.setattr("agentcore.services.deps.get_storage_service", lambda: store, raising=False)
+
+    ocr_text = "ACME CORP INVOICE #INV-1 TOTAL 600.00"  # what PaddleOCR produced upstream
+
+    async def _run():
+        sc = IDPScanCorrector()
+        sc.document = new_message(text=ocr_text, document_id="doc-img", agent_scope="scope",
+                                  file_name="idp_img.png", file_type="png")
+        sc.fix_skew = True; sc.skew_threshold = 0.5; sc.fix_rotation = True; sc.allowed_angles = "90,180,270"
+        return await sc.corrected_document()
+
+    out = asyncio.run(_run())
+    # The upstream OCR text survived — NOT wiped by re-deriving empty text from the rasterized file.
+    assert out.text == ocr_text, f"OCR text was wiped by Scan Corrector: {out.text!r}"
+    assert get_payload(out).get("document_id") == "doc-img"     # working-set still intact
+
+
+def test_long_doc_merge_dedups_overlapping_rows():
+    """Codex #2: overlapping chunks re-extract boundary rows; the merge must NOT double-count them."""
+    from agentcore.services.idp.long_doc import merge_chunk_extractions
+
+    def _row(item, amt):
+        return {"columns": [{"column_name": "item", "value": item},
+                            {"column_name": "amount", "value": amt}]}
+
+    chunk1 = {"headers": {}, "line_items": [_row("Widget", "100"), _row("Gadget", "200")]}
+    chunk2 = {"headers": {}, "line_items": [_row("Gadget", "200"), _row("Gizmo", "300")]}  # Gadget overlaps
+    merged = merge_chunk_extractions([chunk1, chunk2])
+    items = merged["line_items"]
+    assert len(items) == 3, f"overlapping row double-counted: {items}"   # Widget, Gadget, Gizmo — once each
+
+
+def test_opencv_orientation_distinguishes_90_from_270():
+    """Codex #5: the OpenCV fallback must tell 90° from 270°, not always return 90."""
+    import numpy as np
+
+    from agentcore.services.idp.doc_orientation import _predict_opencv
+
+    # Upright page: dark horizontal "text" bands in the TOP half, blank bottom → top-heavy.
+    up = np.full((120, 120, 3), 255, np.uint8)
+    for r in range(8, 56, 6):
+        up[r:r + 2, 10:110] = 0
+    # A page physically rotated 90° CW from upright (top points RIGHT) → detector should say 90.
+    assert _predict_opencv(np.rot90(up, -1)) == 90
+    # A page rotated 90° CCW (top points LEFT, i.e. 270° CW) → detector should say 270.
+    assert _predict_opencv(np.rot90(up, 1)) == 270
+
+
+def test_digital_confidence_can_reach_autoapprove():
+    """Codex #9: a high-confidence digital extraction (no OCR tokens) must be able to clear an
+    auto-approve threshold — the old 0.75 cap made auto-approve unreachable for digital docs."""
+    from agentcore.services.idp.extraction import _ocr_evidence
+
+    _loc, conf = _ocr_evidence("600.00", [], 0.97, vision_mode=False)
+    assert conf >= 0.8, f"digital confidence still capped too low for auto-approve: {conf}"
+
+
+def test_chunking_passes_through_when_no_text():
+    """No text to chunk (a scanned / image doc with no OCR text) → the Chunking Strategy emits ONE
+    passthrough chunk carrying the document handle, so the extractor can read it via vision (not an
+    empty list that extracts nothing)."""
+    from agentcore.components.IDP.chunking_strategy import IDPChunkingStrategy
+
+    cs = IDPChunkingStrategy()
+    cs.document = new_message(text="", document_id="d-img", agent_scope="scope",
+                              file_name="x.png", file_type="png")
+    cs.chunk_size_tokens = 4096
+    cs.overlap_tokens = 256
+    cs.chunking_method = "fixed_token"
+    cs.model_name = "gpt-4o"
+    out = cs.chunks()
+    assert len(out) == 1, f"expected 1 passthrough chunk, got {len(out)}"
+    assert get_payload(out[0]).get("document_id") == "d-img"   # document handle preserved
+
+
+def test_extractor_falls_back_to_vision_when_chunks_have_no_text(monkeypatch):
+    """A scanned/image doc yields a passthrough chunk with empty text; the AI Field Extractor must then
+    read the page IMAGES via vision instead of extracting nothing (paddleocr-not-installed case)."""
+    import asyncio
+    from uuid import uuid4
+
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+
+    class _Cfg:
+        def __init__(self):
+            self.id = uuid4()
+
+    class _Res:
+        def first(self):
+            return _Cfg()
+
+    class _Sess:
+        async def exec(self, s):
+            return _Res()
+        async def get(self, *a, **k):
+            return None
+
+    class _Scope:
+        async def __aenter__(self):
+            return _Sess()
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr("agentcore.services.deps.session_scope", lambda: _Scope(), raising=False)
+
+    called = {}
+
+    async def _fake_vision(self, src, cfg_id, session=None):
+        called["vision"] = True
+        return {"headers": {"total": {"value": "600", "confidence": 0.95}}, "line_items": []}
+
+    monkeypatch.setattr(IDPLLMExtractor, "_extract_via_vision", _fake_vision, raising=True)
+
+    ex = IDPLLMExtractor()
+    ex.extraction_mode = "field_configuration"
+    ex.config_name = "Invoice"
+    ex.config_names = []
+    ex.llm = object()  # truthy — a model is connected
+    chunk = new_message(text="", document_id="d-img", agent_scope="scope", file_name="x.png", file_type="png")
+
+    out = asyncio.run(ex._extract_chunks([chunk]))
+    assert called.get("vision") is True, "vision fallback was not used for a no-text chunk"
+    total = get_payload(out).get("extracted", {}).get("headers", {}).get("total", {})
+    assert total.get("value") == "600", f"vision extraction not merged into output: {get_payload(out)}"
+
+
+def test_math_reconcile_unwraps_and_keeps_extraction(monkeypatch):
+    """Math Reconcile must set the payload's `extracted` to the INNER extraction, not reconcile_math's
+    wrapper ({extracted, attempts, balanced, report}). And when the fix can't run (e.g. the re-prompt
+    hits a quota error) it must KEEP the original extraction — never drop it. That wrapper leak was the
+    '0 fields saved' bug whenever Math Reconcile was in the flow."""
+    import asyncio
+
+    from agentcore.components.IDP.math_reconcile import IDPMathReconcile
+
+    original = {
+        "headers": {"invoice_value": {"value": "540.00", "confidence": 0.75}},
+        "line_items": [{"columns": [{"column_name": "amount", "value": "100"}]}],
+    }
+
+    async def _fake_reconcile(extracted, llm, **kw):
+        # Mimic the service: it returns a WRAPPER; here the re-prompt failed so it's the un-fixed data.
+        return {"extracted": extracted, "attempts": 1, "balanced": False, "report": ["failed"], "_usage": None}
+
+    monkeypatch.setattr(
+        "agentcore.services.idp.math_reconcile.reconcile_math", _fake_reconcile, raising=False
+    )
+
+    mr = IDPMathReconcile()
+    mr.data = new_message(text="INVOICE", document_id="d", extracted=original)
+    mr.llm = object()
+    mr.tolerance = 0.01
+    mr.max_retries = 2
+    out = asyncio.run(mr.reconcile())
+    ex = get_payload(out).get("extracted", {})
+    # The sink reads extracted["headers"] — it must be the INNER extraction, not the wrapper.
+    assert ex.get("headers", {}).get("invoice_value", {}).get("value") == "540.00", f"lost extraction: {ex}"
+    assert "attempts" not in ex and "balanced" not in ex, f"wrapper leaked into extracted: {ex}"
+
+
+def test_confidence_router_stashes_score_for_downstream_rules():
+    """The Confidence Router must stash its computed score as overall_conf, so a downstream Rules node
+    (or Approval Gate) that checks 'confidence' resolves the SAME value — not the classifier's or None."""
+    from agentcore.components.IDP.confidence_router import IDPConfidenceRouter
+    from agentcore.services.idp.graph_native.payload import get_payload, resolve_field
+
+    extracted = {"headers": {"total": {"value": "100", "confidence": 0.9}}, "line_items": []}
+    cr = IDPConfidenceRouter()
+    cr.data = new_message(text="", document_id="d", extracted=extracted)
+    cr.confidence_field = "confidence"
+    cr.threshold = 0.6
+    out = cr.high_confidence()
+    assert get_payload(out).get("overall_conf") is not None, "router did not stash overall_conf"
+    assert float(resolve_field(out, "confidence")) >= 0.6, "downstream can't resolve the router's score"
+
+
+def test_overall_confidence_ignores_null_fields():
+    """The Confidence Router's overall confidence must count only POPULATED fields. Averaging in null
+    fields (value=None, confidence 0.0) drags the mean below the real score and mis-routes a good
+    extraction to Low — even though the displayed confidence (which excludes nulls) is well above."""
+    from agentcore.services.idp.graph_native.payload import overall_confidence
+
+    extracted = {
+        "headers": {
+            "invoice_number": {"value": "90015218", "confidence": 0.75},
+            "supplier_name": {"value": "IDES Holding AG", "confidence": 0.75},
+            "irn": {"value": None, "confidence": 0.0},        # absent field — must NOT count
+            "hsn_code": {"value": None, "confidence": 0.0},
+        },
+        "line_items": [{"columns": [
+            {"column_name": "amount", "value": "120.00", "confidence": 0.75},
+            {"column_name": "cgst_value", "value": None, "confidence": 0.0},
+        ]}],
+    }
+    conf = overall_confidence(new_message(text="", document_id="d", extracted=extracted))
+    assert conf is not None and conf >= 0.7, f"null fields dragged confidence down to {conf}"
+
+
+def test_prepare_drops_orphan_terminal_sink():
+    """A Processed Docs Output with NO incoming edge is an orphan sink — the engine would otherwise run
+    it as an entry point with no data. _prepare must drop it (and keep a properly-wired one)."""
+    from agentcore.services.idp.graph_native.runner import _prepare
+
+    agent_data = {
+        "nodes": [
+            {"id": "DocumentUpload-1", "data": {"node": {"display_name": "Document Upload", "template": {}}}},
+            {"id": "Extractor-1", "data": {"node": {"display_name": "AI Field Extractor"}}},
+            {"id": "Sink-wired", "data": {"node": {"display_name": "Processed Docs Output"}}},
+            {"id": "Sink-orphan", "data": {"node": {"display_name": "Processed Docs Output"}}},
+        ],
+        "edges": [
+            {"source": "DocumentUpload-1", "target": "Extractor-1"},
+            {"source": "Extractor-1", "target": "Sink-wired"},
+        ],
+    }
+    out = _prepare(agent_data, "doc-1")
+    ids = {n["id"] for n in out["nodes"]}
+    assert "Sink-orphan" not in ids, "orphan sink (no incoming edge) was not dropped"
+    assert {"DocumentUpload-1", "Extractor-1", "Sink-wired"} <= ids, "dropped a wired node"
+
+
+def test_output_parser_prefers_the_branch_with_text():
+    """A router stops one branch but it still forwards a no-text message; the Output Parser must pick the
+    branch that actually carries text (OCR/native), not blindly branch A."""
+    from agentcore.components.IDP.output_parser import IDPOutputParser
+
+    # Scanned case: branch A = stopped digital path (no text), branch B = active OCR path (text).
+    op = IDPOutputParser()
+    op.branch_a = new_message(text="", document_id="d")
+    op.branch_b = new_message(text="INVOICE TOTAL 600.00", document_id="d")
+    assert op.merge().text == "INVOICE TOTAL 600.00", "picked the no-text branch"
+
+    # Digital case: branch A = active native text, branch B = stopped (no text) → pick A.
+    op2 = IDPOutputParser()
+    op2.branch_a = new_message(text="NATIVE PDF TEXT", document_id="d")
+    op2.branch_b = new_message(text="", document_id="d")
+    assert op2.merge().text == "NATIVE PDF TEXT"
+
+
 def test_classifier_tags_predicted_type_into_payload():
     """The Document Classifier writes predicted_type into the IDP payload (routers resolve it) AND the
     classification block (extractor multi-config routing) — the native-engine contract."""

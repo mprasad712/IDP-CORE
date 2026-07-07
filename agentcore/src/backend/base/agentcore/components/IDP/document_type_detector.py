@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from loguru import logger
+
 from agentcore.custom.custom_node.node import Node
 from agentcore.io import BoolInput, HandleInput, IntInput, MessageTextInput, Output
 from agentcore.schema.message import Message
@@ -91,44 +93,72 @@ class IDPDocumentTypeDetector(Node):
         return ext in allowed
 
     def _is_digital(self) -> bool:
+        # Fallback only (used when the raw bytes can't be loaded to classify per page).
         src = self.document
-        text = ""
-        if isinstance(src, Message):
-            text = src.text or ""
-        else:
-            text = str(src)
-        return len(text.strip()) >= self.min_text_length
+        text = src.text if isinstance(src, Message) else str(src)
+        return len((text or "").strip()) >= self.min_text_length
+
+    async def _overall_kind(self) -> str:
+        """Classify the document as 'digital' / 'scanned' / 'mixed' by PER-PAGE text coverage rather than
+        the whole-doc text length. A mixed PDF — some digital pages, some image-only — is treated as
+        scanned so it takes the OCR path and its image-only pages aren't silently dropped. (Codex #6)"""
+        cached = getattr(self, "_kind_cache", None)
+        if cached is not None:
+            return cached
+
+        from agentcore.services.idp import text_layer
+        from agentcore.services.idp.graph_native.payload import effective_payload, load_bytes
+
+        kind = "digital" if self._is_digital() else "scanned"   # heuristic fallback
+        page_status: dict = {}
+        try:
+            payload = effective_payload(self, self.document)
+            file_type = str(payload.get("file_type") or self._get_extension() or "pdf").lower().lstrip(".")
+            file_bytes = await load_bytes(payload)
+            if file_bytes:
+                kind, page_status = text_layer.classify_document(
+                    file_bytes, file_type, min_text_length=int(self.min_text_length or 50)
+                )
+        except Exception as exc:  # noqa: BLE001 — never fail routing on a classify hiccup
+            logger.debug(f"[DocumentTypeDetector] per-page classify failed, using text heuristic: {exc}")
+
+        self._kind_cache = kind
+        self._page_status_cache = page_status
+        return kind
 
     def _tagged(self, label: str) -> Message:
-        # Carry the detected kind in the IDP payload (overall_kind) — NEVER in .data, which the engine
-        # strips (losing document_id mid-graph). Downstream reads it via resolve_field(src, "document_type").
+        # Carry the detected kind + per-page status in the IDP payload (overall_kind / page_status) —
+        # NEVER in .data, which the engine strips. Downstream reads overall_kind via
+        # resolve_field(src, "document_type"); an OCR node can OCR only the scanned pages.
         from agentcore.services.idp.graph_native.payload import carry
 
-        return carry(self.document, overall_kind=label)
+        page_status = getattr(self, "_page_status_cache", None) or {}
+        return carry(self.document, overall_kind=label, page_status=page_status or None)
 
     # ── outputs ───────────────────────────────────────────────────────────────
 
-    def digital_path(self) -> Message:
+    async def digital_path(self) -> Message:
         if not self._extension_allowed():
             self.status = f"Skipped — extension not allowed: .{self._get_extension()}"
             self.stop("digital_path")
             return self.document
 
-        digital = self._is_digital()
-        self.status = f"{'digital' if digital else 'scanned'}"
-
-        if digital:
+        kind = await self._overall_kind()
+        self.status = kind
+        # Only a fully-digital document takes the digital path; 'scanned' and 'mixed' go to OCR.
+        if kind == "digital":
             return self._tagged(self.digital_label or "digital")
         self.stop("digital_path")
         return self.document
 
-    def scanned_path(self) -> Message:
+    async def scanned_path(self) -> Message:
         if not self._extension_allowed():
             self.stop("scanned_path")
             return self.document
 
-        digital = self._is_digital()
-        if not digital:
+        kind = await self._overall_kind()
+        if kind != "digital":   # 'scanned' OR 'mixed' → OCR path (so image-only pages get read)
+            self.status = kind
             return self._tagged(self.scanned_label or "scanned")
         self.stop("scanned_path")
         return self.document

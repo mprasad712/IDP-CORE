@@ -48,6 +48,30 @@ export const usePostProcessDocument = () => {
   });
 };
 
+export interface CancelResult {
+  document_id: string;
+  cancelled: boolean;
+  status: string;
+}
+
+/** Cancel a running/queued IDP document process (the Stop button). */
+export const usePostCancelDocument = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation<CancelResult, Error, { document_id: string }>({
+    mutationFn: async ({ document_id }) => {
+      const res = await api.post(
+        `${getURL("IDP_DOCUMENTS")}/${document_id}/cancel`,
+        {},
+      );
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["useGetProcessedDocs"] });
+    },
+  });
+};
+
 /** Convenience: upload a single file then immediately process it. */
 export const useUploadAndProcess = () => {
   const upload = usePostDocumentUpload();

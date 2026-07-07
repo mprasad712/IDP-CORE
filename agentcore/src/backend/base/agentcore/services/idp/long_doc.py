@@ -212,6 +212,29 @@ def chunks_for_extraction(
     return chunks
 
 
+def _row_signature(row: object) -> tuple | None:
+    """A hashable signature of a line-item row's (column, value) pairs, used to de-duplicate rows that
+    two OVERLAPPING chunks both extracted. Returns None for an all-empty row (never dedup blanks)."""
+    if not isinstance(row, dict):
+        return None
+    pairs: list[tuple[str, str]] = []
+    cols = row.get("columns")
+    if isinstance(cols, list):
+        for col in cols:
+            if isinstance(col, dict):
+                v = col.get("value")
+                name = str(col.get("column_name") or col.get("name") or "")
+                pairs.append((name, str(v).strip().lower() if v is not None else ""))
+    else:
+        for k, v in row.items():
+            if k in ("row_index", "row_number"):
+                continue
+            val = v.get("value") if isinstance(v, dict) else v
+            pairs.append((str(k), str(val).strip().lower() if val is not None else ""))
+    pairs.sort()
+    return tuple(pairs) if any(v for _, v in pairs) else None
+
+
 def merge_chunk_extractions(results: list[dict], strategy: str = "keep_highest_confidence") -> dict:
     """Merge per-chunk extraction dicts into one ``{headers, line_items}`` result based on strategy.
 
@@ -223,6 +246,7 @@ def merge_chunk_extractions(results: list[dict], strategy: str = "keep_highest_c
     merged_headers: dict = {}
     merged_lines: list = []
     errors: list[str] = []
+    seen_rows: set = set()   # row signatures already merged — dedup overlapping-chunk rows (Codex #2)
 
     for res in results:
         if not isinstance(res, dict):
@@ -258,6 +282,11 @@ def merge_chunk_extractions(results: list[dict], strategy: str = "keep_highest_c
                         merged_headers[name] = field.copy()
 
         for row in res.get("line_items") or []:
+            sig = _row_signature(row)
+            if sig is not None:
+                if sig in seen_rows:
+                    continue  # an overlapping chunk already contributed this exact row — don't double-count
+                seen_rows.add(sig)
             merged_lines.append(row)
 
     # Re-index nested rows continuously; leave flat rows for the save-time normaliser.

@@ -54,16 +54,22 @@ class IDPConfidenceRouter(Node):
         return score
 
     def high_confidence(self) -> Data:
+        from agentcore.services.idp.graph_native.payload import carry
+
         score = self._get_score()
         self.status = f"confidence={score:.3f} threshold={self.threshold}"
         if score >= self.threshold:
-            return self.data
+            # Stash the computed score as overall_conf so a downstream Rules / Approval node resolves the
+            # SAME confidence value (not the classifier's, or None) when a rule checks 'confidence'.
+            return carry(self.data, overall_conf=round(float(score), 4))
         self.stop("high_confidence")
         return self.data
 
     def low_confidence(self) -> Data:
+        from agentcore.services.idp.graph_native.payload import carry
+
         score = self._get_score()
         if score < self.threshold:
-            return self.data
+            return carry(self.data, overall_conf=round(float(score), 4))
         self.stop("low_confidence")
         return self.data

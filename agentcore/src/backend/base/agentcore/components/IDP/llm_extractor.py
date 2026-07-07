@@ -175,6 +175,36 @@ class IDPLLMExtractor(Node):
             return "vision"
         return "text" if has_text else "vision"
 
+    async def _ensure_vision_capable(self) -> None:
+        """Guard the vision path: if we can determine the connected model is NOT vision-capable, fail with
+        a clear, actionable error instead of sending page images to a text-only model (which returns
+        garbage or a provider error). Unknown capability → proceed (never false-block a valid model).
+        (Codex #3)"""
+        llm = self.llm
+        rmid = getattr(llm, "registry_model_id", None)
+        if not rmid:
+            return
+        try:
+            from uuid import UUID
+
+            from agentcore.services.database.models.model_registry.model import ModelRegistry
+            from agentcore.services.deps import session_scope
+            from agentcore.services.idp.pipeline import _supports_vision
+
+            async with session_scope() as session:
+                reg = await session.get(ModelRegistry, UUID(str(rmid)))
+            if reg is not None and not _supports_vision(reg):
+                name = getattr(reg, "name", None) or getattr(llm, "model", None) or "the connected model"
+                raise ValueError(
+                    f"This document has no text layer, so it must be read as page images, but '{name}' is "
+                    f"not vision-capable. Connect a model marked 'Supports vision', or add a PaddleOCR node "
+                    f"so the text is extracted first."
+                )
+        except ValueError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — a resolution failure must not block a valid model
+            logger.debug(f"[AIFieldExtractor] vision-capability check skipped: {exc}")
+
     async def _extract_via_vision(self, src: Any, prompt_or_config_id, session=None) -> dict:
         """Extract straight from the page images (no OCR text) — for image / scanned documents wired
         without an OCR node. Loads the document bytes from storage, renders them, and runs the vision
@@ -185,6 +215,7 @@ class IDPLLMExtractor(Node):
         from agentcore.services.idp.extraction import extract_multimodal
         from agentcore.services.idp.graph_native.payload import effective_payload, load_bytes
 
+        await self._ensure_vision_capable()
         payload = effective_payload(self, src)
         file_bytes = await load_bytes(payload)
         if not file_bytes:
@@ -369,6 +400,7 @@ class IDPLLMExtractor(Node):
 
             headers_count = len(extracted.get("headers", {})) if isinstance(extracted, dict) else 0
             line_items_count = len(extracted.get("line_items", [])) if isinstance(extracted, dict) else 0
+            logger.info(f"[AIFieldExtractor] raw extraction JSON: {json.dumps(extracted, default=str)[:200]}")
             self.status = f"Extracted {headers_count} header(s) and {line_items_count} line item(s)"
             # Carry the IDP working-set forward (document_id, job_id, extracted, …) in the payload so
             # the terminal sink can persist. Read it with get_payload(...)["extracted"] — NOT .data
@@ -418,6 +450,7 @@ class IDPLLMExtractor(Node):
         from sqlmodel import select
 
         results: list[dict] = []
+        via_vision = False
         try:
             async with session_scope() as session:
                 config = (await session.exec(
@@ -429,17 +462,29 @@ class IDPLLMExtractor(Node):
                 if not config:
                     raise ValueError(f"Active field configuration '{effective}' not found.")
 
-                for ch in chunks:
-                    ctext = ch.text if isinstance(ch, Message) else str(ch)
-                    if not (ctext and ctext.strip()):
-                        continue
-                    try:
-                        ex = await extract_named_config(
-                            session=session, ocr_text=ctext, field_config_id=config.id, llm_model=self.llm)
-                        if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
-                            results.append(ex)
-                    except Exception as exc:  # noqa: BLE001 — one bad chunk shouldn't fail the whole doc
-                        logger.warning(f"[AIFieldExtractor] chunk extraction failed: {exc}")
+                # If NO chunk carries text (a scanned / image document with no OCR text — no OCR node, or
+                # PaddleOCR unavailable), read the page IMAGES with the vision model instead of extracting
+                # from empty text. Mirrors the single-doc auto path so the same flow works for scanned docs.
+                via_vision = not any(((ch.text if isinstance(ch, Message) else str(ch)) or "").strip() for ch in chunks)
+                if via_vision:
+                    self.status = "No text in chunks — extracting via vision"
+                    ex = await self._extract_via_vision(rep, config.id, session)
+                    logger.info(f"[AIFieldExtractor] vision raw extraction: {json.dumps(ex, default=str)[:200]}")
+                    if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
+                        results.append(ex)
+                else:
+                    for ch in chunks:
+                        ctext = ch.text if isinstance(ch, Message) else str(ch)
+                        if not (ctext and ctext.strip()):
+                            continue
+                        try:
+                            ex = await extract_named_config(
+                                session=session, ocr_text=ctext, field_config_id=config.id, llm_model=self.llm)
+                            logger.info(f"[AIFieldExtractor] chunk raw extraction: {json.dumps(ex, default=str)[:200]}")
+                            if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
+                                results.append(ex)
+                        except Exception as exc:  # noqa: BLE001 — one bad chunk shouldn't fail the whole doc
+                            logger.warning(f"[AIFieldExtractor] chunk extraction failed: {exc}")
         except Exception as exc:  # noqa: BLE001
             self.status = f"Error: {exc}"
             logger.error(f"[AIFieldExtractor] long-doc extraction failed: {exc}")
@@ -447,10 +492,12 @@ class IDPLLMExtractor(Node):
 
         merged = (long_doc.merge_chunk_extractions(results, strategy="keep_highest_confidence")
                   if results else {"headers": {}, "line_items": []})
+        logger.info(f"[AIFieldExtractor] merged extraction JSON: {json.dumps(merged, default=str)[:200]}")
         n_head = len(merged.get("headers", {}))
         n_li = len(merged.get("line_items", []))
-        self.status = f"Extracted from {len(chunks)} chunk(s) → merged {n_head} field(s), {n_li} line item(s)"
-        logger.info(f"[AIFieldExtractor] long-doc: {len(chunks)} chunk(s) → {n_head} field(s) after merge")
+        source = "vision (no OCR text)" if via_vision else f"{len(chunks)} chunk(s)"
+        self.status = f"Extracted via {source} → {n_head} field(s), {n_li} line item(s)"
+        logger.info(f"[AIFieldExtractor] extracted via {source} → {n_head} field(s), {n_li} line item(s)")
         return carry(rep, text=json.dumps(merged, indent=2), extracted=merged)
 
 
