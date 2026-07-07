@@ -17,6 +17,7 @@ split and classification are later tasks (hooks left below).
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
@@ -109,6 +110,20 @@ class FlowLog:
         evt.update(fields)
         self.events.append(evt)
         self.lines.append(f"[{ts[11:19]}] {status.upper():5} {name:14} {detail}")
+        # Rich export: fold the bounded io payloads (+ timing) into the downloadable flow.log
+        # text so an exported log shows the full per-step/per-node input & output — not just the
+        # one-line summary. The io dicts are already bounded by the callers/sampler, so this is safe.
+        io = fields.get("io")
+        if isinstance(io, dict):
+            for side in ("input", "output"):
+                payload = io.get(side)
+                if payload:
+                    self.lines.append(f"        {side}:")
+                    block = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+                    self.lines.extend(f"          {ln}" for ln in block.splitlines())
+        ms = fields.get("ms")
+        if ms is not None:
+            self.lines.append(f"        (took {ms} ms)")
 
     @property
     def steps_ok(self) -> list[str]:
@@ -916,14 +931,32 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         _email_io: dict = {}
         _prov = ""
         if doc.source == "mail_connector":
+            _filters = _sm.get("filters_applied") if isinstance(_sm.get("filters_applied"), dict) else {}
             _email_io = {
+                # WHERE the mail was read from (populated by the connector ingest; omitted if absent)
+                "connector_name": _sm.get("connector_name"),
+                "mailbox": _sm.get("mailbox_email") or _sm.get("account_email"),
+                "folder": _sm.get("mail_folder") or _sm.get("folder"),
+                "filters_applied": _filters or None,
+                # WHICH email/attachment was picked
                 "email_from": _sm.get("from"),
                 "email_subject": _sm.get("subject"),
+                "email_to": _sm.get("to"),
+                "email_cc": _sm.get("cc"),
+                "received": _sm.get("received"),
                 "attachment_name": _sm.get("attachment_name") or doc.original_filename,
             }
+            _email_io = {k: v for k, v in _email_io.items() if v is not None}
+            _mbx, _fld = _email_io.get("mailbox"), _email_io.get("folder")
+            _where = (
+                f" via {_sm.get('connector_name') or 'connector'}"
+                f"{f' mailbox {_mbx}' if _mbx else ''}{f' folder {_fld}' if _fld else ''}"
+            )
+            _filt = ", ".join(f"{k}={str(v)[:80]}" for k, v in _filters.items()) if _filters else ""
             _prov = (
-                f" — from email sent by {_sm.get('from') or '?'}"
+                f"{_where} — from email sent by {_sm.get('from') or '?'}"
                 f" (subject: '{_sm.get('subject') or ''}', attachment: '{_email_io['attachment_name']}')"
+                f"{f'; filters: {_filt}' if _filt else ''}"
             )
         flow.step(
             "load", "ok",

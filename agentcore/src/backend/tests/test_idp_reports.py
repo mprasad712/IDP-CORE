@@ -358,6 +358,8 @@ async def test_report_export_data_flat_default(setup_report_data):
     r = client.get("/api/v1/idp/reports/processed-docs/export-data", params={"format": "csv", "values": "final"})
     assert r.status_code == 200
     rows = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    assert rows[0][0] == "METADATA"               # section band above the column-header row
+    rows = rows[1:]                               # strip the band; rows[0] is now the column-header row
     hd = rows[0]
     # flat: a single column-header row with the full meta + union field columns; NO sectioned markers
     assert hd[:2] == ["File", "Document ID"] and "Agent" in hd
@@ -460,6 +462,20 @@ def test_source_cells_email_provenance():
 
 def _csv_rows(resp):
     return list(csv.reader(io.StringIO(resp.content.decode("utf-8-sig"))))
+
+
+def _band_and_rows(resp):
+    """The flat/config export-data CSV leads with a section band (row 0: METADATA | HEADER FIELDS |
+    TABLE ITEMS) above the column-header row. Returns ``(band_row, rows_from_header)`` and asserts
+    the band is present, so downstream ``rows[0]``==column-header assertions stay valid."""
+    rows = _csv_rows(resp)
+    assert rows and rows[0] and rows[0][0] == "METADATA", "flat export must start with the section band"
+    return rows[0], rows[1:]
+
+
+def _data_rows(resp):
+    """export-data rows from the column-header row onward (section band stripped + asserted)."""
+    return _band_and_rows(resp)[1]
 
 
 def _export(client, **params):
@@ -655,11 +671,11 @@ async def test_config_export_columns_and_value_modes(setup_config_export):
 
     # final / predicted / audited → one column per field, named exactly.
     for mode in ("final", "predicted", "audited"):
-        rows = _csv_rows(_export(client, format="csv", config_id=cid, values=mode))
+        rows = _data_rows(_export(client, format="csv", config_id=cid, values=mode))
         assert rows[0] == _META + ["vendor", "total", "item", "qty"], f"{mode} columns"
 
     # both → 4 sub-columns per field with the right suffixes.
-    both = _csv_rows(_export(client, format="csv", config_id=cid, values="both"))
+    both = _data_rows(_export(client, format="csv", config_id=cid, values="both"))
     expected = list(_META)
     for f in ("vendor", "total", "item", "qty"):
         expected += [f, f"{f} (audited)", f"{f} (reviewed)", f"{f} (conf)"]
@@ -670,16 +686,16 @@ async def test_config_export_columns_and_value_modes(setup_config_export):
         fi = rows[0].index("File")
         return next(r for r in rows[1:] if r[fi] == fname)
 
-    fin = _csv_rows(_export(client, format="csv", config_id=cid, values="final"))
+    fin = _data_rows(_export(client, format="csv", config_id=cid, values="final"))
     r = row_for(fin, "inv_a.pdf"); hd = fin[0]
     assert r[hd.index("vendor")] == "Acme Corp"   # final = reviewed value
     assert r[hd.index("total")] == "100"          # un-reviewed → predicted
 
-    pre = _csv_rows(_export(client, format="csv", config_id=cid, values="predicted"))
+    pre = _data_rows(_export(client, format="csv", config_id=cid, values="predicted"))
     r = row_for(pre, "inv_a.pdf"); hd = pre[0]
     assert r[hd.index("vendor")] == "Acme"        # predicted = extracted
 
-    aud = _csv_rows(_export(client, format="csv", config_id=cid, values="audited"))
+    aud = _data_rows(_export(client, format="csv", config_id=cid, values="audited"))
     r = row_for(aud, "inv_a.pdf"); hd = aud[0]
     assert r[hd.index("vendor")] == "Acme Corp"   # reviewed → human value
     assert r[hd.index("total")] == ""             # un-reviewed → BLANK in audited mode
@@ -693,6 +709,34 @@ async def test_config_export_columns_and_value_modes(setup_config_export):
 
 
 @pytest.mark.anyio
+async def test_config_export_section_band(setup_config_export):
+    """The flat/config export leads with a section band (METADATA | HEADER FIELDS | TABLE ITEMS)
+    above the column-header row. Each label sits at the START of its section; the band is the SAME
+    width as the header row (sheet stays rectangular). Verified in both 'final' and 'both' modes."""
+    global mock_user
+    data = setup_config_export
+    mock_user = data["user"]
+    app, client = _client()
+    cid = str(data["config_inv"])   # headers: vendor,total ; line columns: item,qty
+
+    for mode in ("final", "both"):
+        band, rows = _band_and_rows(_export(client, format="csv", config_id=cid, values=mode))
+        header = rows[0]
+        assert len(band) == len(header)                    # band spans the whole width (rectangular)
+        assert band[0] == "METADATA"
+        assert band[1:len(_META)] == [""] * (len(_META) - 1)   # only the first meta cell is labelled
+        assert band[len(_META)] == "HEADER FIELDS"         # header block starts right after the meta cols
+        assert header[len(_META)] == "vendor"              # …where the first header column begins
+        ti = band.index("TABLE ITEMS")
+        assert header[ti] == "item"                        # line block starts at the TABLE ITEMS label
+
+    # 'both' mode: each field occupies 4 sub-columns, so TABLE ITEMS starts 2×4 cols after the meta block.
+    band_both, _ = _band_and_rows(_export(client, format="csv", config_id=cid, values="both"))
+    assert band_both.index("TABLE ITEMS") == len(_META) + 2 * 4
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
 async def test_config_export_row_once_and_zero_lines(setup_config_export):
     """doc_a (2 line items) → 2 rows; meta+header on the FIRST row only, BLANK on the row below.
     doc_b (0 line items) → 1 row."""
@@ -700,7 +744,7 @@ async def test_config_export_row_once_and_zero_lines(setup_config_export):
     data = setup_config_export
     mock_user = data["user"]
     app, client = _client()
-    rows = _csv_rows(_export(client, format="csv", config_id=str(data["config_inv"]), values="final"))
+    rows = _data_rows(_export(client, format="csv", config_id=str(data["config_inv"]), values="final"))
     hd = rows[0]
     fi, vi, ii, qi = hd.index("File"), hd.index("vendor"), hd.index("item"), hd.index("qty")
     body = rows[1:]
@@ -739,7 +783,7 @@ async def test_config_export_doc_filter_union(setup_config_export):
     data = setup_config_export
     mock_user = data["user"]
     app, client = _client()
-    rows = _csv_rows(_export(client, format="csv", config_id=str(data["config_inv"]), values="final"))
+    rows = _data_rows(_export(client, format="csv", config_id=str(data["config_inv"]), values="final"))
     fi = rows[0].index("File")
     files = {r[fi] for r in rows[1:]}
     assert "inv_a.pdf" in files and "inv_b.pdf" in files  # agent named-config Invoice, no classification
@@ -749,7 +793,7 @@ async def test_config_export_doc_filter_union(setup_config_export):
     assert "inv_f.pdf" not in files        # agent=Invoice BUT classifier picked Other → excluded (classifier wins)
 
     # the override doc appears under the Other config, not Invoice
-    other = _csv_rows(_export(client, format="csv", config_id=str(data["config_other"]), values="final"))
+    other = _data_rows(_export(client, format="csv", config_id=str(data["config_other"]), values="final"))
     ofiles = {r[other[0].index("File")] for r in other[1:]}
     assert "inv_f.pdf" in ofiles           # classifier-selected Other
     assert "inv_a.pdf" not in ofiles       # Invoice-linked, not Other
@@ -763,7 +807,7 @@ async def test_config_export_zero_extraction_doc(setup_config_export):
     data = setup_config_export
     mock_user = data["user"]
     app, client = _client()
-    rows = _csv_rows(_export(client, format="csv", config_id=str(data["config_inv"]), values="final"))
+    rows = _data_rows(_export(client, format="csv", config_id=str(data["config_inv"]), values="final"))
     hd = rows[0]
     g_rows = [r for r in rows[1:] if r[hd.index("File")] == "inv_g.pdf"]
     assert len(g_rows) == 1                              # one row even with no extracted fields
@@ -780,7 +824,7 @@ async def test_config_export_name_collision(setup_config_export):
     data = setup_config_export
     mock_user = data["user"]
     app, client = _client()
-    rows = _csv_rows(_export(client, format="csv", config_id=str(data["config_collide"]), values="final"))
+    rows = _data_rows(_export(client, format="csv", config_id=str(data["config_collide"]), values="final"))
     hd = rows[0]
     assert hd.count("qty") == 2                       # two distinct positional 'qty' columns
     data_row = next(r for r in rows[1:] if r[hd.index("File")] == "inv_e.pdf")
@@ -805,8 +849,8 @@ async def test_config_export_formats_and_no_match(setup_config_export):
     # 'Other' config: no doc is named-config-linked to it AND has output... doc_c/doc_d agents use Other
     # but those docs ARE under Other-config agents → Other export returns doc_c & doc_d. Use the template
     # (global, accessible) which no doc links to → header-only.
-    tmpl = _csv_rows(_export(client, format="csv", config_id=str(data["template_cfg"]), values="final"))
-    assert len(tmpl) == 1                               # only the column header row
+    tmpl = _data_rows(_export(client, format="csv", config_id=str(data["template_cfg"]), values="final"))
+    assert len(tmpl) == 1                               # band stripped → only the column header row
     assert tmpl[0][:len(_META)] == _META
     app.dependency_overrides.clear()
 
@@ -862,7 +906,7 @@ async def test_config_export_row_cap(setup_config_export, monkeypatch):
     assert _export(client, format="csv", config_id=str(data["config_inv"])).status_code == 422
     # A config with zero linked docs (and zero cells) must NOT false-trip the cap.
     empty = _export(client, format="csv", config_id=str(data["template_cfg"]))
-    assert empty.status_code == 200 and len(_csv_rows(empty)) == 1  # header only
+    assert empty.status_code == 200 and len(_data_rows(empty)) == 1  # band stripped → header only
     app.dependency_overrides.clear()
 
 
@@ -894,8 +938,8 @@ async def test_flat_matrix_cells_matches_built_matrix():
             matrix = _config_matrix(doc_rows, grouped, {}, headers, line_cols, values)
             assert len({len(r) for r in matrix}) == 1, "matrix must be rectangular"
             assert _flat_matrix_cells(doc_rows, grouped, headers, line_cols, values) == len(matrix) * len(matrix[0])
-    # 1 header row + d1(2 lines) + d2(1) = 4 rows when line columns exist
-    assert len(_config_matrix(doc_rows, grouped, {}, ["vendor"], ["item"], "final")) == 4
+    # section band + header row + d1(2 lines) + d2(1) = 5 rows when line columns exist
+    assert len(_config_matrix(doc_rows, grouped, {}, ["vendor"], ["item"], "final")) == 5
 
 
 @pytest.mark.anyio
@@ -920,7 +964,7 @@ async def test_config_export_agent_column(setup_config_export):
     data = setup_config_export
     mock_user = data["user"]
     app, client = _client()
-    rows = _csv_rows(_export(client, format="csv", config_id=str(data["config_inv"]), values="final"))
+    rows = _data_rows(_export(client, format="csv", config_id=str(data["config_inv"]), values="final"))
     hd = rows[0]
     assert "Agent" in hd and "Agent ID" in hd
     r = next(rr for rr in rows[1:] if rr[hd.index("File")] == "inv_a.pdf")

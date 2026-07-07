@@ -244,6 +244,78 @@ async def _validate_resources_for_prod(snapshot: dict, session) -> None:
                 )
 
 
+async def _validate_idp_publish(snapshot: dict, session, env: str) -> None:
+    """Block PUBLISH of an IDP agent (either env) unless it has (1) at least one Field Configuration
+    selected on the AI Field Extractor, and (2) a selected LLM model that is ACTIVE and registered
+    for the TARGET environment (uat-only model -> only uat; prod-only -> only prod; uat+prod -> both).
+
+    Graceful 400s with a clear message. NO-OP for non-IDP agents, so regular agents publish exactly
+    as before. Validates the model RESOLVED from the graph directly (covers both the connected-LLM
+    node and the model-picked-on-the-extractor paths) — it does NOT change the existing PROD
+    resource scan, so nothing that works today breaks."""
+    from agentcore.services.idp.agent_config import (
+        _N_EXTRACTOR,
+        _field,
+        _find_node,
+        _resolve_model_id_from_graph,
+        agent_contains_idp_nodes,
+    )
+
+    if not agent_contains_idp_nodes(snapshot):
+        return  # not an IDP agent -> publish behaviour unchanged
+    env_l = (env or "").lower()
+    ENV = env_l.upper()
+
+    ext = _find_node(snapshot, _N_EXTRACTOR)
+    if ext is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot publish to {ENV}: an IDP agent must include an 'AI Field Extractor' node.",
+        )
+
+    # (1) Field Configuration required — single (config_name) OR multi-type (config_names).
+    cn = _field(ext, "config_name")
+    cns = _field(ext, "config_names")
+    has_multi = (len(cns) > 0) if isinstance(cns, (list, tuple)) else (
+        str(cns).strip() not in ("", "[]", "None") if cns else False
+    )
+    if not (cn and str(cn).strip()) and not has_multi:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot publish to {ENV}: select at least one Field Configuration in the AI Field Extractor before publishing.",
+        )
+
+    # (2) Language Model required, active, and registered for the target environment.
+    from agentcore.services.database.models.model_registry.model import ModelRegistry
+
+    model_id = _resolve_model_id_from_graph(snapshot)
+    if not model_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot publish to {ENV}: select a Language Model before publishing.",
+        )
+    model = await session.get(ModelRegistry, model_id)
+    if model is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot publish to {ENV}: the selected Language Model was not found in the registry.",
+        )
+    envs = [e.lower() for e in (model.environments or [model.environment])]
+    if env_l not in envs:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot publish to {ENV}: the selected model '{model.display_name}' is registered for "
+                f"{envs} only. Register it for {ENV} (or UAT+PROD) before publishing to {ENV}."
+            ),
+        )
+    if not model.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot publish to {ENV}: the selected model '{model.display_name}' is inactive.",
+        )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Request / Response Schemas
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2420,6 +2492,11 @@ async def publish_agent(
 
         # Capture org_id before any commits to avoid session expiry issues
         agent_org_id = agent.org_id
+
+        # IDP publish guard (BOTH envs): require a Field Configuration + a selected, active LLM
+        # registered for the target env. No-op for non-IDP agents. Runs on the finalized (post-
+        # promotion) snapshot, before any deployment row is created. Save is never affected.
+        await _validate_idp_publish(snapshot, session, env)
 
         if env == "uat":
             # ─── UAT: always direct deploy ───────────────────────

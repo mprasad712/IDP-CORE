@@ -120,6 +120,8 @@ async def run_native_graph(
     finally:
         # Capture each executed node's final status (best-effort, even on error). A vertex has a
         # built custom_component only if it actually ran, so this is the list of nodes that executed.
+        from agentcore.services.idp.graph_native.node_log import sample_io
+
         _executed = []
         for v in getattr(graph, "vertices", []) or []:
             comp = getattr(v, "custom_component", None)
@@ -133,6 +135,19 @@ async def run_native_graph(
                 "name": getattr(comp, "display_name", None) or getattr(v, "display_name", None) or getattr(v, "id", "node"),
                 "status": _status,
             }
+            # Rich, bounded per-node io sample ({input, output}) so the report/Processed Docs show what
+            # went into and out of each node. Best-effort — sample_io never raises.
+            _io = sample_io(v)
+            if _io:
+                entry["io"] = _io
+            # Per-node timing if the engine populated it (build_times, seconds → ms). Not always present;
+            # omit rather than invent a timer.
+            _bt = getattr(v, "build_times", None)
+            if _bt:
+                try:
+                    entry["ms"] = int(sum(_bt) / len(_bt) * 1000)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
             _executed.append(entry)
             if node_log_out is not None:
                 node_log_out.append(entry)

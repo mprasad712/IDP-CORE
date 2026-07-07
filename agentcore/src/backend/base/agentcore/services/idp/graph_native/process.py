@@ -59,7 +59,12 @@ async def run_native_for_document(session, doc, job, base_agent, flow, trace_ctx
         for entry in node_log:
             nm = entry.get("name") or "node"
             st = entry.get("status") or "ran"
-            flow.step(f"node:{nm}", "ok", st, node_id=entry.get("id"))
+            extra: dict = {}
+            if entry.get("io"):  # bounded {input, output} sample — sibling event field
+                extra["io"] = entry["io"]
+            if entry.get("ms"):  # per-node timing (ms) — sibling event field, NOT inside io
+                extra["ms"] = entry["ms"]
+            flow.step(f"node:{nm}", "ok", st, node_id=entry.get("id"), **extra)
         if event_manager is not None:
             try:
                 event_manager.on_end(data={})  # closes the SSE stream
@@ -118,6 +123,19 @@ async def run_native_for_document(session, doc, job, base_agent, flow, trace_ctx
     job.processing_time_ms = ms
     job.steps_completed = flow.steps_ok
     job.log = flow.events
+    _scope, _did = str(doc.agent_id), str(doc.id)  # capture before commit (avoid expired-attr reload)
     session.add(job)
     await session.commit()
-    logger.info(f"[idp-native] {doc.id}: completed on the generic engine in {ms} ms")
+    # Persist the human-readable rich flow.log artifact (per-step + per-node io) so /log/download
+    # works for native docs — mirrors the fixed pipeline; without this the export 404s.
+    try:
+        from agentcore.services.deps import get_storage_service
+
+        await get_storage_service().save_file(
+            agent_id=_scope,
+            file_name=f"flow_logs/{_did}/flow.log",
+            data=flow.render().encode("utf-8"),
+        )
+    except Exception as _e:  # never let artifact-write crash the run
+        logger.warning(f"[idp-native] {_did}: failed to persist flow.log artifact: {_e}")
+    logger.info(f"[idp-native] {_did}: completed on the generic engine in {ms} ms")
