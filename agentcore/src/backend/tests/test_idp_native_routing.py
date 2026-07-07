@@ -187,6 +187,48 @@ def test_scan_corrector_actually_corrects_and_saves(monkeypatch):
     assert "scan_corrections" not in (getattr(out, "data", {}) or {})   # note in payload, not .data
 
 
+def test_scan_corrector_preserves_upstream_ocr_text(monkeypatch):
+    """Regression: when Scan Corrector is wired AFTER an OCR node (PaddleOCR), the source Message
+    already carries real OCR text. Scan Corrector must PRESERVE it — re-deriving text from the
+    rasterized corrected image returns EMPTY, which would WIPE the OCR text and break every downstream
+    text node (Chunking → extractor → 0 chunks → 0 fields)."""
+    import asyncio
+    import io
+
+    from PIL import Image
+
+    from agentcore.components.IDP.scan_corrector import IDPScanCorrector
+
+    def _png():
+        b = io.BytesIO(); Image.new("RGB", (240, 140), "white").save(b, format="PNG"); return b.getvalue()
+
+    class _Store:
+        def __init__(self):
+            self.files = {}
+        async def get_file(self, agent_id, file_name):
+            return self.files[(agent_id, file_name)]
+        async def save_file(self, agent_id, file_name, data):
+            self.files[(agent_id, file_name)] = data
+
+    store = _Store()
+    store.files[("scope", "idp_img.png")] = _png()
+    monkeypatch.setattr("agentcore.services.deps.get_storage_service", lambda: store, raising=False)
+
+    ocr_text = "ACME CORP INVOICE #INV-1 TOTAL 600.00"  # what PaddleOCR produced upstream
+
+    async def _run():
+        sc = IDPScanCorrector()
+        sc.document = new_message(text=ocr_text, document_id="doc-img", agent_scope="scope",
+                                  file_name="idp_img.png", file_type="png")
+        sc.fix_skew = True; sc.skew_threshold = 0.5; sc.fix_rotation = True; sc.allowed_angles = "90,180,270"
+        return await sc.corrected_document()
+
+    out = asyncio.run(_run())
+    # The upstream OCR text survived — NOT wiped by re-deriving empty text from the rasterized file.
+    assert out.text == ocr_text, f"OCR text was wiped by Scan Corrector: {out.text!r}"
+    assert get_payload(out).get("document_id") == "doc-img"     # working-set still intact
+
+
 def test_classifier_tags_predicted_type_into_payload():
     """The Document Classifier writes predicted_type into the IDP payload (routers resolve it) AND the
     classification block (extractor multi-config routing) — the native-engine contract."""

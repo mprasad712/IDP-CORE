@@ -106,16 +106,21 @@ class IDPScanCorrector(Node):
             logger.warning(f"[ScanCorrector] {payload.get('document_id')}: {self.status}")
             return carry(src)
 
-        # Re-derive native text from the corrected file (correction rasterizes pages, so a corrected doc
-        # has no text layer → the extractor reads it via vision, which is right for a scanned document).
-        new_text = ""
-        try:
-            from agentcore.services.idp import text_layer
+        # Preserve any text an upstream OCR node already produced. Scan Corrector is designed to run
+        # BEFORE OCR, but if it's wired AFTER PaddleOCR the source already carries real OCR text — and
+        # re-deriving from the rasterized corrected file returns EMPTY and would WIPE it, breaking every
+        # downstream text node (Chunking → extractor → 0 fields). So keep upstream text when present;
+        # only re-derive a native text layer when the source has none (Scan Corrector ran first).
+        upstream_text = (src.text if isinstance(src, Message) else "") or ""
+        new_text = upstream_text
+        if not upstream_text.strip():
+            try:
+                from agentcore.services.idp import text_layer
 
-            _, tokens = text_layer.extract_native_text(file_bytes, out_ext)
-            new_text = " ".join(str(t.get("text", "")) for t in tokens)
-        except Exception:  # noqa: BLE001
-            pass
+                _, tokens = text_layer.extract_native_text(file_bytes, out_ext)
+                new_text = " ".join(str(t.get("text", "")) for t in tokens)
+            except Exception:  # noqa: BLE001
+                pass
 
         self.status = f"Corrected ({', '.join(notes)}) → {new_name}"
         logger.info(f"[ScanCorrector] {payload.get('document_id')}: {self.status}")
