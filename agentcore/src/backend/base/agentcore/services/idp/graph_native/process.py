@@ -41,6 +41,7 @@ async def run_native_for_document(session, doc, job, base_agent, flow, trace_ctx
     flow.step("engine", "ok", "IDP execution engine: native (generic graph_langgraph)")
 
     node_log: list = []
+    run_result: dict = {}
     try:
         await run_native_graph(
             document_id=str(doc.id),
@@ -51,6 +52,7 @@ async def run_native_for_document(session, doc, job, base_agent, flow, trace_ctx
             session_id=str(doc.id),
             event_manager=event_manager,
             node_log_out=node_log,
+            result_out=run_result,
         )
     finally:
         # Per-node log → flow steps (persisted to job.log / shown on the document's Log page).
@@ -75,10 +77,31 @@ async def run_native_for_document(session, doc, job, base_agent, flow, trace_ctx
         async with session_scope() as _s:
             fresh = await _s.get(IdpDocument, doc.id)
             if fresh is not None and fresh.status in _NON_TERMINAL:
+                # No sink finalized the doc — most often a router branch (High/Low, passed/failed, …)
+                # was left unwired to a Processed Docs Output. Before forcing a status, SAVE the
+                # extraction we harvested from the run so the fields are NOT lost to a wiring gap.
+                saved_n = 0
+                extracted = run_result.get("extracted")
+                if isinstance(extracted, dict) and (extracted.get("headers") or extracted.get("line_items")):
+                    try:
+                        from agentcore.services.idp.extraction import save_extraction_results
+
+                        rpayload = run_result.get("payload") or {}
+                        await save_extraction_results(
+                            session=_s,
+                            document_id=doc.id,
+                            job_id=job.id,
+                            extraction_result=extracted,
+                            ocr_tokens=rpayload.get("tokens") or [],
+                            vision_mode=bool(rpayload.get("route") == "vision"),
+                        )
+                        saved_n = len(extracted.get("headers", {}) or {})
+                    except Exception as e:  # saving is best-effort — still force a terminal status below
+                        logger.warning(f"[idp-native] {doc.id}: safety-net extraction save failed: {e}")
                 logger.warning(
                     f"[idp-native] {doc.id}: no sink finalized the doc (status={fresh.status}); "
-                    f"forcing 'pending_review' so the UI resolves. Check the flow wires a Processed "
-                    f"Docs Output and the extractor didn't skip."
+                    f"rescued {saved_n} field(s) from the channel + forcing 'pending_review'. Wire a "
+                    f"Processed Docs Output on the router branch the document actually takes."
                 )
                 fresh.status = "pending_review"
                 _s.add(fresh)

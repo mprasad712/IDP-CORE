@@ -53,11 +53,17 @@ async def run_native_graph(
     session_id: str | None = None,
     event_manager: Any = None,
     node_log_out: list | None = None,
+    result_out: dict | None = None,
 ) -> Any:
     """Build + run the IDP graph on the generic engine. Returns the engine's run outputs.
 
     If ``node_log_out`` is given, each executed node's ``{id, name, status}`` is appended to it (read
-    from the built components after the run) — the caller persists this as the per-node flow log."""
+    from the built components after the run) — the caller persists this as the per-node flow log.
+
+    If ``result_out`` is given, it is filled with ``{"payload": <merged working-set>, "extracted":
+    <best extraction seen>}`` so the caller can SAVE the extraction as a fallback when no sink
+    finalized the document (e.g. a router branch was left unwired) — a wiring gap then never silently
+    loses the extracted fields."""
     from agentcore.graph_langgraph import LangGraphAdapter
 
     did = str(document_id)
@@ -106,6 +112,24 @@ async def run_native_graph(
             _executed.append(entry)
             if node_log_out is not None:
                 node_log_out.append(entry)
+        # Harvest the best extraction seen across the built components + a merged working-set, so the
+        # caller's safety net can persist it if NO sink finalized the doc (a router branch left unwired).
+        if result_out is not None:
+            from agentcore.services.idp.graph_native.payload import get_payload
+
+            merged_payload: dict = {}
+            best_extracted = None
+            for v in getattr(graph, "vertices", []) or []:
+                br = getattr(v, "built_result", None)
+                for item in (br if isinstance(br, (list, tuple)) else [br]):
+                    p = get_payload(item)
+                    if p:
+                        merged_payload.update(p)
+                        ex = p.get("extracted")
+                        if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
+                            best_extracted = ex
+            result_out["payload"] = merged_payload
+            result_out["extracted"] = best_extracted
         # One clear server-log line listing which nodes ran + their status.
         if _executed:
             logger.info(
