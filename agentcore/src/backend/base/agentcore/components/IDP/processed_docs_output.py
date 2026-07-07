@@ -79,8 +79,17 @@ class IDPProcessedDocsOutput(Node):
                 ocr_tokens=payload.get("tokens") or [],
                 vision_mode=bool(payload.get("route") == "vision"),
             )
-            # Minimal finalize (the routing/rules nodes set the decision in later phases).
-            status = "pending_review"
+            # Honor the Approval Gate / router decision recorded in the working-set. The Approval Gate
+            # writes decision="auto_approved" / "pending_review" into the payload; without a gate in the
+            # flow, default to pending_review. All are valid IdpDocument statuses. (Codex #1: the sink
+            # used to hardcode "pending_review", so auto-approve never took effect.)
+            decision = str(payload.get("decision") or "").strip().lower()
+            if decision in ("auto_approved", "auto_approve", "approved"):
+                status = "auto_approved"
+            elif decision == "reviewed":
+                status = "reviewed"
+            else:
+                status = "pending_review"
             doc = await session.get(IdpDocument, doc_id)
             if doc is not None:
                 doc.status = status
