@@ -175,7 +175,14 @@ def create_node_function(vertex: LangGraphVertex, *, is_cycle_router: bool = Fal
             else:
                 relevant_preds = predecessors
 
-            missing = [p for p in relevant_preds if p not in vertices_results]
+            # Don't wait on a predecessor a router already deactivated — an INACTIVE predecessor never
+            # produces a result, so waiting for it would hang a merge node (e.g. Output Parser joining
+            # a router's branches) forever. Only wait for predecessors that will actually run.
+            def _pred_will_run(pid: str) -> bool:
+                pv = graph.get_vertex(pid)
+                return pv is None or pv.is_active()
+
+            missing = [p for p in relevant_preds if p not in vertices_results and _pred_will_run(p)]
             if missing:
                 logger.debug(
                     f"Vertex {vertex.id} ({vertex.display_name}) waiting for "

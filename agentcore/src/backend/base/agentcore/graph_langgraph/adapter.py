@@ -1939,6 +1939,22 @@ class LangGraphAdapter:
                         continue
                 else:
                     continue
+            # Don't deactivate a JOIN still reachable via another ACTIVE branch. Otherwise stopping one
+            # router branch also kills a merge node (e.g. Output Parser) shared with the active branch,
+            # and everything downstream of it. A node stays alive if any predecessor other than the
+            # branch we're descending from is currently active. Skipped for cycle vertices, whose
+            # activation is owned by the loop routing function (not stop()/mark_branch).
+            if state == "INACTIVE" and child_id not in self.cycle_vertices:
+                other_active = False
+                for pred_id in self.predecessor_map.get(child_id, []):
+                    if pred_id == vertex_id:
+                        continue
+                    pred_v = self.get_vertex(pred_id)
+                    if pred_v is not None and pred_v.is_active():
+                        other_active = True
+                        break
+                if other_active:
+                    continue
             self._mark_branch(child_id, state, visited)
         return visited
     

@@ -256,6 +256,91 @@ async def test_process_document_native_end_to_end(monkeypatch):
         assert len(node_steps) >= 2, f"expected per-node log steps: {job.log}"
 
 
+def _router_merge_graph():
+    """Document Upload → Document Type Detector → (digital → Output Parser.branch_a) /
+    (scanned → Scan Corrector → Output Parser.branch_b) → Output Parser → Processed Docs Output.
+    The router's two branches REJOIN at the Output Parser — the merge-after-router pattern."""
+    upload = _node(
+        "DocumentUpload-a", "Document Upload",
+        outputs=[{"name": "document", "display_name": "Document", "types": ["Message"], "selected": "Message", "method": "load"}],
+    )
+    detector = _node(
+        "DocumentTypeDetector-d", "Document Type Detector",
+        template={"document": {"type": "other", "name": "document", "input_types": ["Message"]},
+                  "min_text_length": {"type": "int", "name": "min_text_length", "value": 10}},
+        outputs=[
+            {"name": "digital_path", "display_name": "Digital", "types": ["Message"], "selected": "Message", "method": "digital_path", "group_outputs": True},
+            {"name": "scanned_path", "display_name": "Scanned", "types": ["Message"], "selected": "Message", "method": "scanned_path", "group_outputs": True},
+        ],
+    )
+    corrector = _node(
+        "ScanCorrector-s", "Scan Corrector",
+        template={"document": {"type": "other", "name": "document", "input_types": ["Message"]},
+                  "fix_skew": {"type": "bool", "name": "fix_skew", "value": False},
+                  "fix_rotation": {"type": "bool", "name": "fix_rotation", "value": False}},
+        outputs=[{"name": "corrected_document", "display_name": "Corrected", "types": ["Message"], "selected": "Message", "method": "corrected_document"}],
+    )
+    parser = _node(
+        "OutputParser-p", "Output Parser",
+        template={"branch_a": {"type": "other", "name": "branch_a", "input_types": ["Message", "Data"]},
+                  "branch_b": {"type": "other", "name": "branch_b", "input_types": ["Message", "Data"]}},
+        outputs=[{"name": "merged", "display_name": "Merged", "types": ["Message"], "selected": "Message", "method": "merge"}],
+    )
+    out = _node(
+        "ProcessedDocsOutput-z", "Processed Docs Output",
+        template={"data": {"type": "other", "name": "data", "input_types": ["Data", "Message"], "list": True}},
+        outputs=[{"name": "result", "display_name": "Result", "types": ["Data"], "selected": "Data", "method": "finalize"}],
+    )
+
+    def _edge(src, sh, tgt, tf):
+        return {"source": src, "target": tgt,
+                "data": {"sourceHandle": {"name": sh, "id": src, "output_types": ["Message"]},
+                         "targetHandle": {"fieldName": tf, "id": tgt, "inputTypes": ["Message", "Data"]}}}
+
+    edges = [
+        _edge("DocumentUpload-a", "document", "DocumentTypeDetector-d", "document"),
+        _edge("DocumentTypeDetector-d", "digital_path", "OutputParser-p", "branch_a"),
+        _edge("DocumentTypeDetector-d", "scanned_path", "ScanCorrector-s", "document"),
+        _edge("ScanCorrector-s", "corrected_document", "OutputParser-p", "branch_b"),
+        _edge("OutputParser-p", "merged", "ProcessedDocsOutput-z", "data"),
+    ]
+    return {"nodes": [upload, detector, corrector, parser, out], "edges": edges, "viewport": {}}
+
+
+@pytest.mark.anyio
+async def test_merge_after_router_runs_the_active_branch(monkeypatch):
+    """A router's branches rejoin at a merge node (Output Parser) that continues to the sink. Stopping
+    the not-taken branch must NOT deactivate the shared merge + sink. Regression for the flow where a
+    digital doc routed 'digital' but the AI Extractor / Output Parser / Processed Docs never ran because
+    the 'scanned' stop() cascaded through the shared downstream."""
+    from agentcore.services.database.models.idp.documents import IdpDocument
+    from agentcore.services.deps import session_scope
+    from agentcore.services.idp.graph_native.runner import run_native_graph
+
+    storage = T._MockStorage()
+    monkeypatch.setattr(pipeline, "get_storage_service", lambda: storage)
+    monkeypatch.setattr("agentcore.services.deps.get_storage_service", lambda: storage, raising=False)
+    T._patch_extraction(monkeypatch)
+
+    async with session_scope() as s:
+        agent_id, doc_id = await T._setup_document(s, graph=_router_merge_graph(), file_bytes=T._digital_pdf())
+
+    node_log: list = []
+    await run_native_graph(document_id=str(doc_id), agent_data=_router_merge_graph(),
+                           agent_id=str(agent_id), node_log_out=node_log)
+    ran = {e["name"] for e in node_log}
+
+    # The digital doc routes 'digital' → Scan Corrector (scanned branch) must NOT run …
+    assert "Scan Corrector" not in ran, f"scanned branch should be inactive: {ran}"
+    # … but the merge node and the sink DO run (they'd be deactivated before the fix).
+    assert "Output Parser" in ran, f"merge-after-router must run on the active branch: {ran}"
+    assert "Processed Docs Output" in ran, f"sink after the merge must run: {ran}"
+
+    async with session_scope() as s:
+        doc = await s.get(IdpDocument, doc_id)
+        assert doc.status == "pending_review", f"the sink must finalize the doc: {doc.status}"
+
+
 @pytest.mark.anyio
 async def test_shared_idp_channel_accumulates_through_the_engine(monkeypatch):
     """The idp_working_set state is maintained THROUGH the LangGraph engine, not around it.
