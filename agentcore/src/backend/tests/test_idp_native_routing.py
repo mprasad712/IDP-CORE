@@ -372,6 +372,22 @@ def test_math_reconcile_unwraps_and_keeps_extraction(monkeypatch):
     assert "attempts" not in ex and "balanced" not in ex, f"wrapper leaked into extracted: {ex}"
 
 
+def test_confidence_router_stashes_score_for_downstream_rules():
+    """The Confidence Router must stash its computed score as overall_conf, so a downstream Rules node
+    (or Approval Gate) that checks 'confidence' resolves the SAME value — not the classifier's or None."""
+    from agentcore.components.IDP.confidence_router import IDPConfidenceRouter
+    from agentcore.services.idp.graph_native.payload import get_payload, resolve_field
+
+    extracted = {"headers": {"total": {"value": "100", "confidence": 0.9}}, "line_items": []}
+    cr = IDPConfidenceRouter()
+    cr.data = new_message(text="", document_id="d", extracted=extracted)
+    cr.confidence_field = "confidence"
+    cr.threshold = 0.6
+    out = cr.high_confidence()
+    assert get_payload(out).get("overall_conf") is not None, "router did not stash overall_conf"
+    assert float(resolve_field(out, "confidence")) >= 0.6, "downstream can't resolve the router's score"
+
+
 def test_overall_confidence_ignores_null_fields():
     """The Confidence Router's overall confidence must count only POPULATED fields. Averaging in null
     fields (value=None, confidence 0.0) drags the mean below the real score and mis-routes a good
