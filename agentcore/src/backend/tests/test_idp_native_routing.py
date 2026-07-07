@@ -198,6 +198,82 @@ def test_classifier_tags_predicted_type_into_payload():
     assert out.additional_kwargs.get("classification", {}).get("type") == "invoice"
 
 
+def test_classifier_survives_structured_output_none():
+    """_invoke_llm must never return None — a model's structured-output call can yield None, and
+    classify() would then crash the whole run on result.predicted_type. It falls through to plain JSON
+    parsing, or 'unknown'."""
+    import asyncio
+
+    from agentcore.components.IDP.document_classifier import IDPDocumentClassifier
+
+    class _StructNone:
+        async def ainvoke(self, m):
+            return None
+
+    class _LLM:
+        def with_structured_output(self, s):
+            return _StructNone()
+        async def ainvoke(self, m):
+            class _R:
+                content = '{"predicted_type":"invoice","confidence":0.9}'
+            return _R()
+
+    r = asyncio.run(IDPDocumentClassifier()._invoke_llm(_LLM(), []))
+    assert r is not None and r.predicted_type == "invoice"   # fell through to plain JSON, no crash
+
+
+def test_extractor_extracts_each_chunk_and_merges(monkeypatch):
+    """Long-doc: a LIST of chunks (from the Chunking Strategy) makes the AI Field Extractor extract each
+    chunk with the Field Config and MERGE the per-chunk JSONs — so the Chunk Aggregator node isn't
+    needed and the user tunes chunk size on the Chunking node."""
+    import asyncio
+    from uuid import uuid4
+
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+
+    class _Cfg:
+        def __init__(self):
+            self.id = uuid4()
+
+    class _Res:
+        def first(self):
+            return _Cfg()
+
+    class _Sess:
+        async def exec(self, s):
+            return _Res()
+        async def get(self, *a, **k):
+            return None
+
+    class _Scope:
+        async def __aenter__(self):
+            return _Sess()
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr("agentcore.services.deps.session_scope", lambda: _Scope(), raising=False)
+
+    async def _fake(session, ocr_text, field_config_id, llm_model):
+        if "100" in ocr_text:
+            return {"headers": {"total": {"value": "100", "confidence": 0.9}}, "line_items": []}
+        if "ACME" in ocr_text:
+            return {"headers": {"vendor": {"value": "ACME", "confidence": 0.8}}, "line_items": []}
+        return {"headers": {}, "line_items": []}
+
+    monkeypatch.setattr("agentcore.services.idp.extraction.extract_named_config", _fake, raising=False)
+
+    ex = IDPLLMExtractor()
+    ex.config_name = "Invoice"; ex.config_names = []; ex.extraction_mode = "field_configuration"
+    ex.llm = object(); ex.input_mode = "text"
+    ex.document = [new_message(text="chunk one total 100", document_id="d"),
+                   new_message(text="chunk two vendor ACME", document_id="d")]
+
+    out = asyncio.run(ex.extract())
+    p = get_payload(out)
+    assert set(p.get("extracted", {}).get("headers", {})) == {"total", "vendor"}   # both chunks merged
+    assert p.get("document_id") == "d"
+
+
 def test_chunk_aggregator_merges_per_chunk_data():
     """The Chunk Aggregator combines per-chunk EXTRACTION Data (keep-highest-confidence). NOTE: it must
     be fed extracted Data — wiring Chunking → Aggregator directly (raw Message chunks) does not work."""
