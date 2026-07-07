@@ -223,8 +223,22 @@ def _predict_paddlex(image: np.ndarray) -> int | None:
 
 # ── tier 3: OpenCV heuristic ──────────────────────────────────────────────────
 
+def _top_heaviness(bin_img: np.ndarray) -> float:
+    """Signed measure of how much ink sits toward the TOP of an image: +1 all-top, -1 all-bottom, 0
+    balanced. Documents carry more content near the top (title/header) than the bottom, so of two
+    180°-apart upright candidates the correct one is the more top-heavy."""
+    if bin_img.ndim != 2 or bin_img.shape[0] < 4:
+        return 0.0
+    row_ink = np.sum(bin_img, axis=1).astype(np.float64)
+    total = float(row_ink.sum())
+    if total == 0.0:
+        return 0.0
+    weights = np.linspace(1.0, -1.0, bin_img.shape[0])
+    return float(np.dot(row_ink, weights) / total)
+
+
 def _predict_opencv(image: np.ndarray) -> int:
-    """Projection-profile heuristic. Reliable for 90°/270°; defaults to 0° for 0°/180°."""
+    """Projection-profile heuristic. Detects 90°/270° (sideways); defaults to 0° for 0°/180°."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
 
@@ -232,9 +246,19 @@ def _predict_opencv(image: np.ndarray) -> int:
     v_var = float(np.var(np.sum(binary, axis=0).astype(np.float64)))
     logger.info("[Orientation] OpenCV heuristic h_var={:.0f} v_var={:.0f}", h_var, v_var)
 
-    # Strongly vertical text density → document is sideways
+    # Strongly vertical text density → the document is sideways (90° or 270°). A projection profile
+    # can't tell 90 from 270 (they are mirror images), so disambiguate with a page-level prior: rotate
+    # the page upright for EACH candidate and keep the one that ends up more top-heavy. (Codex #5: the
+    # old code always returned 90, so 270° scans were corrected the wrong way.)
     if v_var > h_var * 1.5:
-        return 90
+        # rotate_image() treats the returned angle as the DETECTED orientation and applies the INVERSE:
+        #   90  detected → corrected with 90° CCW → upright candidate = np.rot90(binary, 1)
+        #   270 detected → corrected with 90° CW  → upright candidate = np.rot90(binary, -1)
+        upright_if_90 = np.rot90(binary, 1)
+        upright_if_270 = np.rot90(binary, -1)
+        angle = 90 if _top_heaviness(upright_if_90) >= _top_heaviness(upright_if_270) else 270
+        logger.info("[Orientation] OpenCV heuristic sideways → {}° (top-heaviness disambiguation)", angle)
+        return angle
     return 0  # 0 vs 180 requires the model; 0 is the safe default
 
 
