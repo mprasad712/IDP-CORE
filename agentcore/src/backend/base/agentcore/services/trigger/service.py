@@ -41,7 +41,10 @@ async def _get_storage_connector_config(connector_id: str) -> dict | None:
                 logger.error(f"TriggerService: failed to decrypt provider_config: {e}")
                 config = raw
 
-            return {"provider": row.provider, **config}
+            # ``connector_name`` is added last so the connector row's display name always wins over
+            # any same-named key that might exist in provider_config. It is a non-secret label used
+            # for document provenance/logging.
+            return {"provider": row.provider, **config, "connector_name": row.name}
     except Exception as e:
         logger.error(f"TriggerService: failed to load connector config {connector_id}: {e}", exc_info=True)
         return None
@@ -71,6 +74,74 @@ def _email_dedup_key(environment, message_id: str, att_token: str) -> str:
     then allows the per-env copies to coexist.)
     """
     return f"{(environment or '').strip().lower()}:{message_id}:{att_token}"
+
+
+# Substring markers (case-insensitive) for filter keys whose VALUE must never be written into a
+# document's provenance/source_metadata. Defense in depth: the filters dict should never contain a
+# credential, but if a decrypted access/refresh token, client secret, api key or password ever
+# slips in, ``build_connector_provenance`` drops the whole entry regardless of its value.
+_PROVENANCE_SECRET_MARKERS = (
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "api_key",
+    "password",
+    "secret",
+    "token",
+)
+
+
+def _is_provenance_secret_key(key: str) -> bool:
+    """True iff ``key`` looks like a credential (matches any secret marker, case-insensitive)."""
+    k = (key or "").lower()
+    return any(marker in k for marker in _PROVENANCE_SECRET_MARKERS)
+
+
+def build_connector_provenance(
+    connector_name: str | None,
+    mailbox: str | None,
+    folder: str | None,
+    filters: dict | None,
+) -> dict:
+    """Build a sanitized email-connector provenance dict for a document's ``source_metadata``.
+
+    Records WHERE a mail-ingested document came from (connector, mailbox, folder) and WHICH
+    non-default filters selected it — for rich, auditable logging. Purely functional: no I/O, no
+    secrets. Returns a clean dict with only the PRESENT keys:
+
+      - ``connector_name``  — the connector's display name
+      - ``mailbox_email``   — the polled mailbox address
+      - ``mail_folder``     — the folder polled (e.g. ``"inbox"``)
+      - ``filters_applied`` — only the ACTIVE filters: non-empty string values, and boolean filters
+        only when ``True``. Any secret-looking key is dropped (see ``_is_provenance_secret_key``).
+
+    None/empty top-level values are omitted so the dict stays clean, and a secret can NEVER reach
+    the output — any secret-marked filter key is dropped whatever its value.
+    """
+    provenance: dict = {}
+    if connector_name:
+        provenance["connector_name"] = connector_name
+    if mailbox:
+        provenance["mailbox_email"] = mailbox
+    if folder:
+        provenance["mail_folder"] = folder
+
+    filters_applied: dict = {}
+    for key, value in (filters or {}).items():
+        if _is_provenance_secret_key(str(key)):
+            continue  # never record a credential, whatever its value
+        if isinstance(value, bool):
+            if value:  # a boolean filter is "applied" only when explicitly enabled
+                filters_applied[key] = True
+            continue
+        if value is None or value == "":
+            continue  # drop unset / empty filters
+        # clip a long user-supplied filter value (e.g. a body query) so provenance stays bounded
+        filters_applied[key] = value[:200] if isinstance(value, str) and len(value) > 200 else value
+
+    if filters_applied:
+        provenance["filters_applied"] = filters_applied
+    return provenance
 
 
 # Backstop on how many Graph @odata.nextLink pages we follow for one email's attachments. Set far
@@ -1720,7 +1791,25 @@ class TriggerService(Service):
                                     f"{str(msg.get('id', ''))[:24]}; will retry next poll"
                                 )
                             else:
-                                ok = await self._ingest_email_to_idp(agent_id, connector_id, msg, raw_atts, environment)
+                                # Sanitized provenance for rich logging: WHERE this doc was read from
+                                # (connector/mailbox/folder) + WHICH active filters selected it. Never
+                                # includes tokens/secrets (helper redacts secret-marked keys).
+                                provenance = build_connector_provenance(
+                                    connector_cfg.get("connector_name"),
+                                    account_email or (acct.get("email") if acct else ""),
+                                    mail_folder,
+                                    {
+                                        "sender": filter_sender,
+                                        "subject": filter_subject,
+                                        "body": filter_body,
+                                        "to": filter_to,
+                                        "cc": filter_cc,
+                                        "importance": filter_importance if filter_importance != "all" else "",
+                                        "has_attachments": filter_has_attachments,
+                                        "unread_only": unread_only,
+                                    },
+                                )
+                                ok = await self._ingest_email_to_idp(agent_id, connector_id, msg, raw_atts, environment, provenance=provenance)
                         except Exception:
                             logger.exception(
                                 f"Email monitor {task_id}: IDP ingest failed for message "
@@ -2051,7 +2140,7 @@ class TriggerService(Service):
             logger.warning(f"Email monitor {task_id}: raw attachments error for {message_id[:20]}...: {e}")
             return None  # fetch failed → caller retries (do not mark seen)
 
-    async def _ingest_email_to_idp(self, base_agent_id, connector_id: str, email_msg: dict, raw_attachments: list[dict], environment: str = "") -> bool:
+    async def _ingest_email_to_idp(self, base_agent_id, connector_id: str, email_msg: dict, raw_attachments: list[dict], environment: str = "", provenance: dict | None = None) -> bool:
         """Create one IdpDocument per file attachment and enqueue the existing IDP pipeline.
 
         Mirrors ``api/idp/documents.py::upload_documents`` (agent resolve/auto-create → storage
@@ -2185,7 +2274,10 @@ class TriggerService(Service):
                         checksum=hashlib.sha256(data).hexdigest(),
                         source="mail_connector",
                         connector_id=conn_uuid,
-                        source_metadata={**base_meta, "attachment_name": name, "dedup_key": dedup_key},
+                        # ``provenance`` (connector_name/mailbox_email/mail_folder/filters_applied) is
+                        # already sanitized by ``build_connector_provenance`` (no secrets). attachment_name
+                        # and dedup_key are set LAST so provenance can never override them.
+                        source_metadata={**base_meta, **(provenance or {}), "attachment_name": name, "dedup_key": dedup_key},
                         status="queued",
                         uploaded_by=None,
                     )
@@ -2981,7 +3073,20 @@ class TriggerService(Service):
 
                 if ingest_mode == "idp_pipeline":
                     normalized = self._normalize_gmail_message(full_msg)
-                    ok = await self._ingest_email_to_idp(agent_id, connector_id, normalized, raw_atts, environment)
+                    # Sanitized provenance for rich logging (Gmail path). Same shape as the Outlook
+                    # path; only the filters Gmail actually supports are recorded.
+                    provenance = build_connector_provenance(
+                        connector_cfg.get("connector_name"),
+                        account_email or (acct.get("email") if acct else ""),
+                        folder,
+                        {
+                            "sender": config.get("filter_sender", ""),
+                            "subject": config.get("filter_subject", ""),
+                            "unread_only": bool(config.get("unread_only")),
+                            "has_attachments": True,
+                        },
+                    )
+                    ok = await self._ingest_email_to_idp(agent_id, connector_id, normalized, raw_atts, environment, provenance=provenance)
                     if ok:
                         processed_ids.append(msg_id)
             except Exception:
