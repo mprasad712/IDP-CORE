@@ -134,9 +134,10 @@ class IDPChunkingStrategy(Node):
     # ── main method ───────────────────────────────────────────────────────────
 
     def chunks(self) -> list[Message]:
+        from agentcore.services.idp.graph_native.payload import carry
+
         src = self.document
         text = src.text if isinstance(src, Message) else str(src)
-        base_data = src.data if isinstance(src, Message) and src.data else {}
 
         method = self.chunking_method
         if method == "semantic":
@@ -149,10 +150,9 @@ class IDPChunkingStrategy(Node):
         total = len(chunk_texts)
         self.status = f"Produced {total} chunk(s) via {method}"
 
+        # Each chunk carries the FULL IDP payload (document_id, agent_scope, …) plus its own chunk
+        # metadata + text — via carry(), never a bare Message(data=…) which drops the working-set.
         return [
-            Message(
-                text=chunk_text,
-                data={**base_data, "chunk_index": idx, "total_chunks": total, "chunking_method": method},
-            )
+            carry(src, text=chunk_text, chunk_index=idx, total_chunks=total, chunking_method=method)
             for idx, chunk_text in enumerate(chunk_texts)
         ]

@@ -64,16 +64,23 @@ class IDPDocumentTypeDetector(Node):
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _get_extension(self) -> str:
+        # The file type rides in the IDP payload (file_type / file_name) — NOT in .data (which the
+        # engine strips). Read it there first; fall back to legacy .data/text only for non-IDP inputs.
+        from agentcore.services.idp.graph_native.payload import get_payload
+
+        payload = get_payload(self.document)
+        ft = str(payload.get("file_type") or "").lower().lstrip(".")
+        if ft:
+            return ft
+        name = str(payload.get("file_name") or "")
+        if "." in name:
+            return name.rsplit(".", 1)[-1].lower().strip()
         src = self.document
-        filename = ""
         if isinstance(src, Message):
-            # Try to find filename from data or text
             data = src.data or {}
-            filename = data.get("source_file", data.get("file_path", src.text or ""))
-        else:
-            filename = str(src)
-        if "." in filename:
-            return filename.rsplit(".", 1)[-1].lower().strip()
+            cand = str(data.get("source_file", data.get("file_path", src.text or "")))
+            if "." in cand:
+                return cand.rsplit(".", 1)[-1].lower().strip()
         return ""
 
     def _extension_allowed(self) -> bool:
@@ -93,13 +100,11 @@ class IDPDocumentTypeDetector(Node):
         return len(text.strip()) >= self.min_text_length
 
     def _tagged(self, label: str) -> Message:
-        src = self.document
-        if isinstance(src, Message):
-            if src.data is None:
-                src.data = {}
-            src.data["document_type"] = label
-            return src
-        return Message(text=str(src), data={"document_type": label})
+        # Carry the detected kind in the IDP payload (overall_kind) — NEVER in .data, which the engine
+        # strips (losing document_id mid-graph). Downstream reads it via resolve_field(src, "document_type").
+        from agentcore.services.idp.graph_native.payload import carry
+
+        return carry(self.document, overall_kind=label)
 
     # ── outputs ───────────────────────────────────────────────────────────────
 

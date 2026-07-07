@@ -66,3 +66,143 @@ async def load_bytes(payload: dict) -> bytes:
     from agentcore.services.deps import get_storage_service
 
     return await get_storage_service().get_file(payload.get("agent_scope", ""), payload.get("file_name", ""))
+
+
+# ── shared working-set (LangGraph ``idp_working_set`` channel) ─────────────────
+#
+# The native engine harvests every IDP node's output payload into a shared state channel and stashes a
+# per-vertex snapshot on the component before it builds. These helpers read that snapshot so a node can
+# see the document context globally — not only from its immediate input Message — which keeps
+# ``document_id`` alive even if an upstream node forgot to forward it.
+def get_shared_state(component: Any) -> dict:
+    """The accumulated shared IDP working-set for the node currently building, read from the snapshot
+    the engine stashes on the vertex (``vertex._idp_shared_snapshot``). Empty when not on the native
+    engine (e.g. unit tests) — callers then fall back to the input Message's own payload."""
+    vertex = getattr(component, "_vertex", None)
+    snap = getattr(vertex, "_idp_shared_snapshot", None)
+    return dict(snap) if isinstance(snap, dict) else {}
+
+
+def effective_payload(component: Any, src: Any) -> dict:
+    """The working-set a node should act on: the shared channel merged with the input Message's own
+    payload. The local Message wins for keys it carries (it is the latest hop); the shared channel
+    fills anything the immediate input didn't forward — so a node still sees ``document_id`` even if an
+    upstream node dropped it from the Message."""
+    local = get_payload(src)
+    shared = get_shared_state(component)
+    if not shared:
+        return local
+    return {**shared, **local}
+
+
+# ── field resolution for routing / condition / gate nodes ──────────────────────
+#
+# A router names a "field" (e.g. document_type, confidence, rule_action) but the value lives in the
+# IDP working-set under a canonical key. These aliases map the user-facing name to the payload keys to
+# try, in order, so a router reads the right place instead of ``getattr(Message, field)`` (always None).
+_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "document_type": ("overall_kind", "predicted_type", "document_type", "type"),
+    "type": ("predicted_type", "overall_kind", "type"),
+    "predicted_type": ("predicted_type", "overall_kind"),
+    "overall_kind": ("overall_kind",),
+    "confidence": ("overall_conf", "confidence"),
+    "overall_confidence": ("overall_conf", "confidence"),
+    "rule_action": ("rule_action", "decision"),
+    "decision": ("decision", "rule_action"),
+    "route_label": ("route_label",),
+}
+
+
+def _classification_of(src: Any) -> dict:
+    """The Document Classifier's block (``additional_kwargs['classification']`` = {type, confidence})."""
+    ak = getattr(src, "additional_kwargs", None)
+    cl = ak.get("classification") if isinstance(ak, dict) else None
+    return cl if isinstance(cl, dict) else {}
+
+
+def resolve_field(src: Any, field: str, component: Any = None) -> Any:
+    """Resolve a routing/condition field from an IDP ``Message``/``Data``/dict — checking, in order:
+    the IDP payload (with key aliases), the classification block, the extracted header values, then a
+    plain ``Data.data`` / dict / attribute. Returns ``None`` when unresolved.
+
+    Pass ``component=self`` so the shared working-set channel is merged in — then the field resolves
+    even if the immediate input Message didn't carry it. Centralizes 'where does each field live' so
+    routers stop reading the wrong place (the class of bug where a Confidence Router read
+    ``getattr(Message, 'confidence')`` — always ``None`` — and therefore always routed 'low')."""
+    field = (field or "").strip()
+    if not field:
+        return getattr(src, "text", "") if not isinstance(src, (dict, str)) else src
+
+    payload = effective_payload(component, src) if component is not None else get_payload(src)
+    classification = _classification_of(src)
+
+    # 1. Payload key(s), honoring aliases.
+    for key in _FIELD_ALIASES.get(field, (field,)):
+        if payload.get(key) not in (None, ""):
+            return payload[key]
+
+    # 2. Classification block (Document Classifier).
+    if classification:
+        if field in ("document_type", "type", "predicted_type") and classification.get("type") not in (None, ""):
+            return classification["type"]
+        if field in ("confidence", "overall_confidence") and classification.get("confidence") is not None:
+            return classification["confidence"]
+        if classification.get(field) not in (None, ""):
+            return classification[field]
+
+    # 3. Extracted header value: extracted = {headers: {name: {value, confidence}}}.
+    extracted = payload.get("extracted")
+    if isinstance(extracted, dict):
+        headers = extracted.get("headers")
+        if isinstance(headers, dict) and field in headers:
+            h = headers[field]
+            return h.get("value") if isinstance(h, dict) else h
+
+    # 4. Non-IDP fallbacks: Data.data / dict / attribute.
+    try:
+        from agentcore.schema.data import Data
+
+        if isinstance(src, Data) and isinstance(src.data, dict) and field in src.data:
+            return src.data[field]
+    except Exception:  # noqa: BLE001
+        pass
+    if isinstance(src, dict) and field in src:
+        return src[field]
+    return getattr(src, field, None)
+
+
+def overall_confidence(src: Any, component: Any = None) -> float | None:
+    """Overall extraction confidence for a Confidence Router: a payload ``overall_conf`` if present,
+    else the mean of the per-field confidences in the payload's ``extracted`` block (same basis as
+    ``save_extraction_results``). ``None`` when no confidence signal is available. Pass ``component``
+    to also consult the shared working-set channel."""
+    payload = effective_payload(component, src) if component is not None else get_payload(src)
+    if payload.get("overall_conf") is not None:
+        try:
+            return float(payload["overall_conf"])
+        except (TypeError, ValueError):
+            pass
+
+    extracted = payload.get("extracted")
+    confs: list[float] = []
+    if isinstance(extracted, dict):
+        headers = extracted.get("headers")
+        if isinstance(headers, dict):
+            for h in headers.values():
+                c = h.get("confidence") if isinstance(h, dict) else None
+                if c is not None:
+                    try:
+                        confs.append(float(c))
+                    except (TypeError, ValueError):
+                        pass
+        for row in extracted.get("line_items", []) or []:
+            for col in (row.get("columns", []) if isinstance(row, dict) else []):
+                c = col.get("confidence") if isinstance(col, dict) else None
+                if c is not None:
+                    try:
+                        confs.append(float(c))
+                    except (TypeError, ValueError):
+                        pass
+    if confs:
+        return sum(confs) / len(confs)
+    return None

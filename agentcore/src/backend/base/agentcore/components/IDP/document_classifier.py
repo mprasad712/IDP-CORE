@@ -242,13 +242,11 @@ class IDPDocumentClassifier(Node):
             logger.debug(f"[DocumentClassifier] Could not persist predicted_type: {exc}")
 
     def _tag_message(self, src: Any, predicted_type: str, confidence: float, reasoning: str) -> Message:
-        if isinstance(src, Message):
-            msg = copy.copy(src)
-            msg.additional_kwargs = dict(src.additional_kwargs or {})
-        else:
-            msg = Message(text=str(src))
-            msg.additional_kwargs = {}
+        from agentcore.services.idp.graph_native.payload import carry
 
+        # Put predicted_type in the IDP payload so routers resolve document_type via the shared channel,
+        # and keep the richer classification block on the Message for the extractor's multi-config routing.
+        msg = carry(src, predicted_type=predicted_type)
         msg.additional_kwargs["classification"] = {
             "type": predicted_type,
             "confidence": confidence,

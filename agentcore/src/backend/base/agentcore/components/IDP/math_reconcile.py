@@ -25,10 +25,10 @@ class IDPMathReconcile(Node):
     async def reconcile(self) -> Message:
         from loguru import logger
 
-        from agentcore.services.idp.graph_native.payload import carry, get_payload
+        from agentcore.services.idp.graph_native.payload import carry, effective_payload
         from agentcore.services.idp.math_reconcile import reconcile_math
 
-        payload = get_payload(self.data)
+        payload = effective_payload(self, self.data)
         extracted = payload.get("extracted")
         if not isinstance(extracted, dict) or not extracted.get("headers"):
             self.status = "nothing to reconcile"

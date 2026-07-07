@@ -42,6 +42,37 @@ def _clear_component_output_cache(vertex: Any) -> None:
         logger.opt(exception=True).debug(f"Failed to clear output cache on {getattr(vertex, 'id', '?')}")
 
 
+# Large/transient working-set keys kept OUT of the shared channel to avoid bloating every checkpoint
+# (they're still carried on the node-to-node Message for the sink that needs them).
+_IDP_CHANNEL_EXCLUDE = frozenset({"tokens", "page_images"})
+
+
+def _extract_idp_delta(result: Any) -> dict:
+    """Pull the IDP working-set block (``additional_kwargs['idp']``) off a node's output so it can be
+    merged into the shared ``idp_working_set`` state channel. Handles a bare Message, a list of them,
+    or a multi-output ``{name: Message}`` dict. Returns ``{}`` for non-IDP outputs (chat agents), so
+    this is a no-op outside IDP flows.
+    """
+    delta: dict = {}
+
+    def _grab(obj: Any) -> None:
+        ak = getattr(obj, "additional_kwargs", None)
+        if isinstance(ak, dict) and isinstance(ak.get("idp"), dict):
+            for k, v in ak["idp"].items():
+                if k not in _IDP_CHANNEL_EXCLUDE:
+                    delta[k] = v
+
+    if isinstance(result, dict):
+        for value in result.values():
+            _grab(value)
+    elif isinstance(result, (list, tuple)):
+        for value in result:
+            _grab(value)
+    else:
+        _grab(result)
+    return delta
+
+
 def create_node_function(vertex: LangGraphVertex, *, is_cycle_router: bool = False):
     """Convert an AgentCore Vertex to a LangGraph node function.
 
@@ -269,6 +300,12 @@ def create_node_function(vertex: LangGraphVertex, *, is_cycle_router: bool = Fal
                 # resolve worker vertex dependencies during its internal loop.
                 vertex.graph._current_lg_state = state
 
+                # Expose the accumulated shared IDP working-set to this vertex's component so it can
+                # read the document context globally (not only from its immediate input Message).
+                # Stored per-vertex (not on the shared graph) so parallel branches don't race; empty
+                # for chat agents. Read via payload.get_shared_state(component).
+                vertex._idp_shared_snapshot = dict(state.get("idp_working_set", {}))
+
                 await vertex.build(
                     user_id=state.get("user_id"),
                     inputs=inputs_dict,
@@ -352,6 +389,12 @@ def create_node_function(vertex: LangGraphVertex, *, is_cycle_router: bool = Fal
             }
             if vertex.outputs_logs:
                 updates["outputs_logs"] = {vertex.id: vertex.outputs_logs}
+
+            # Harvest this node's IDP working-set delta into the shared channel so downstream nodes
+            # see the document context even if a later node fails to forward it. No-op for chat.
+            _idp_delta = _extract_idp_delta(vertex.built_result)
+            if _idp_delta:
+                updates["idp_working_set"] = _idp_delta
 
             logger.debug(
                 f"[node_function] vertex={vertex.id} ({vertex.display_name}), "

@@ -135,6 +135,11 @@ dependencies = [
     # Windows wheels bundle it; on Linux/Docker install the `libzbar0` system package.
     "pyzbar>=0.1.9,<1.0.0",
     "onnxruntime>=1.17.0,<2.0.0",
+    # Reliable page-orientation detection for Fix Rotation (Scan Corrector). Runs the committed
+    # PP-LCNet_x1_0_doc_ori model in services/idp/models/ via native Paddle inference. If a
+    # doc_orientation.onnx is added later it takes priority (onnxruntime only); without paddle the
+    # detector degrades to a weaker OpenCV heuristic.
+    "paddlepaddle>=3.0.0",
     "toml>=0.10.2",
     "sqlparse",
     "matplotlib",

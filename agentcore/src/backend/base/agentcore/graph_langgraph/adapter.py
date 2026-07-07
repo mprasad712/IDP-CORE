@@ -876,6 +876,7 @@ class LangGraphAdapter:
                 "vertices_results": {},
                 "artifacts": {},
                 "outputs_logs": {},
+                "idp_working_set": {},
                 "current_vertex": "",
                 "completed_vertices": [],
                 "events": [],

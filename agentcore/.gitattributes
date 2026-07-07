@@ -35,3 +35,7 @@ Dockerfile text
 *.wav binary
 *.raw binary
 *.ttf binary
+# ML model weights — MUST stay byte-identical (never CRLF-convert) or the model won't load.
+*.pdiparams binary
+*.pdmodel binary
+*.onnx binary

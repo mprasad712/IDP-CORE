@@ -37,10 +37,12 @@ class IDPProcessedDocsOutput(Node):
         from agentcore.services.database.models.idp.documents import IdpDocument
         from agentcore.services.deps import session_scope
         from agentcore.services.idp.extraction import save_extraction_results
-        from agentcore.services.idp.graph_native.payload import get_payload
+        from agentcore.services.idp.graph_native.payload import get_payload, get_shared_state
 
         items = self.data if isinstance(self.data, list) else [self.data]
-        payload: dict = {}
+        # Start from the shared working-set channel so document_id / extracted survive even when the
+        # immediate inputs are bare Data(extracted) or a Message an upstream node stripped.
+        payload: dict = dict(get_shared_state(self))
         extracted: dict = {}
         for item in items:
             p = get_payload(item)
@@ -52,6 +54,12 @@ class IDPProcessedDocsOutput(Node):
             data_dict = getattr(item, "data", None)
             if isinstance(data_dict, dict) and (data_dict.get("headers") or data_dict.get("line_items")):
                 extracted = data_dict
+        # Fall back to the extracted block already in the working-set channel (harvested from the
+        # extractor) if none of the immediate inputs carried it.
+        if not extracted and isinstance(payload.get("extracted"), dict):
+            ex = payload["extracted"]
+            if ex.get("headers") or ex.get("line_items"):
+                extracted = ex
 
         doc_id_raw = payload.get("document_id")
         if not doc_id_raw:

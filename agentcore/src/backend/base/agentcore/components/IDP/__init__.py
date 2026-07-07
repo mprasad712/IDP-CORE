@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from agentcore.components.IDP.multi_branch_router import IDPMultiBranchRouter
     from agentcore.components.IDP.output_parser import IDPOutputParser
     from agentcore.components.IDP.page_selector import IDPPageSelector
+    from agentcore.components.IDP.rules_conditions import IDPRulesConditions
     from agentcore.components.IDP.scan_corrector import IDPScanCorrector
     from agentcore.components.IDP.webhook_output import IDPWebhookOutput
 
@@ -45,6 +46,7 @@ _dynamic_imports = {
     "IDPMultiBranchRouter": "multi_branch_router",
     "IDPOutputParser": "output_parser",
     "IDPPageSelector": "page_selector",
+    "IDPRulesConditions": "rules_conditions",
     "IDPScanCorrector": "scan_corrector",
     "IDPWebhookOutput": "webhook_output",
 }

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from agentcore.custom.custom_node.node import Node
 from agentcore.io import DataInput, DropdownInput, HandleInput, MessageTextInput, Output
-from agentcore.schema.data import Data
-from agentcore.schema.message import Message
 
 
 class IDPConditionNode(Node):
@@ -51,19 +49,20 @@ class IDPConditionNode(Node):
     ]
 
     def _resolve_field_value(self) -> str:
+        from agentcore.services.idp.graph_native.payload import resolve_field
+
         src = self.document
         field = (self.field or "").strip()
 
         if not field:
             return str(src) if src is not None else ""
 
-        if isinstance(src, Data):
-            return str(src.data.get(field, src.text or ""))
-        if isinstance(src, Message):
-            return str(getattr(src, field, src.text or ""))
-        if isinstance(src, dict):
-            return str(src.get(field, ""))
-        return str(getattr(src, field, ""))
+        # Resolve from the IDP payload (extracted fields, overall_kind, predicted_type, decision, …)
+        # incl. the shared channel — instead of getattr(Message, field), which is blind to the working-set.
+        val = resolve_field(src, field, component=self)
+        if val is None:
+            val = getattr(src, "text", "") if not isinstance(src, (dict, str)) else src
+        return str(val if val is not None else "")
 
     def _evaluate(self) -> bool:
         lhs = self._resolve_field_value()

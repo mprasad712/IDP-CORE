@@ -46,6 +46,13 @@ class AgentCoreState(TypedDict):
     artifacts: Annotated[dict[str, Any], _merge_dicts]
     outputs_logs: Annotated[dict[str, Any], _merge_dicts]
 
+    # Shared IDP working-set — a document's accumulating context (document_id, file_name, extracted,
+    # …) harvested from each IDP node's output Message and made globally visible to every downstream
+    # node, so the context survives even if an intermediate node forgets to forward it. Empty and
+    # unused for non-IDP (chat) agents, whose Messages never carry an ``idp`` block. _merge_dicts =
+    # last-writer-wins per key across the run (safe for parallel branches).
+    idp_working_set: Annotated[dict[str, Any], _merge_dicts]
+
     # Current execution context — last writer wins for parallel nodes
     current_vertex: Annotated[str, _last_value]
     completed_vertices: Annotated[list[str], add]

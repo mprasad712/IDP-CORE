@@ -20,11 +20,11 @@ class IDPPaddleOCR(Node):
     outputs = [Output(display_name="Text Blocks", name="text_blocks", method="ocr")]
 
     async def ocr(self) -> Message:
-        from agentcore.services.idp.graph_native.payload import carry, get_payload, load_bytes
+        from agentcore.services.idp.graph_native.payload import carry, effective_payload, load_bytes
         from agentcore.services.idp.ocr import run_paddle_ocr
         from agentcore.services.idp.restruct import build_merged_text
 
-        payload = get_payload(self.document)
+        payload = effective_payload(self, self.document)
         file_bytes = await load_bytes(payload)
         tokens = await run_paddle_ocr(file_bytes, payload.get("file_type", "pdf"), (self.language or "en"))
         text = build_merged_text(tokens)

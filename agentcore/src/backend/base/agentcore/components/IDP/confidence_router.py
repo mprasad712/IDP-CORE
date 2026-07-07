@@ -38,19 +38,20 @@ class IDPConfidenceRouter(Node):
     ]
 
     def _get_score(self) -> float:
-        field = (self.confidence_field or "confidence").strip()
-        src = self.data
-        raw = None
-        if isinstance(src, Data):
-            raw = src.data.get(field)
-        elif isinstance(src, dict):
-            raw = src.get(field)
-        else:
-            raw = getattr(src, field, None)
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            return 0.0
+        from agentcore.services.idp.graph_native.payload import overall_confidence, resolve_field
+
+        # Prefer the overall extraction confidence derived from the IDP payload's extracted fields
+        # (same mean-of-per-field basis as save_extraction_results). The extractor emits a Message
+        # whose confidence rides in additional_kwargs['idp'] — NOT as an attribute, so the old
+        # getattr(Message, 'confidence') always returned None and routed everything to 'low'.
+        score = overall_confidence(self.data, component=self)
+        if score is None:
+            raw = resolve_field(self.data, (self.confidence_field or "confidence").strip(), component=self)
+            try:
+                score = float(raw)
+            except (TypeError, ValueError):
+                score = 0.0
+        return score
 
     def high_confidence(self) -> Data:
         score = self._get_score()

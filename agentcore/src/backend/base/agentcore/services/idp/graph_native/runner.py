@@ -63,6 +63,12 @@ async def run_native_graph(
     did = str(document_id)
     prepared = _prepare(agent_data, did)
 
+    _node_names = [
+        ((((n.get("data") or {}).get("node")) or {}).get("display_name")) or n.get("id")
+        for n in (prepared.get("nodes") or [])
+    ]
+    logger.info(f"[idp-native] {did}: graph nodes ({len(_node_names)}): {_node_names}")
+
     graph = LangGraphAdapter.from_payload(
         prepared,
         str(agent_id),
@@ -82,14 +88,27 @@ async def run_native_graph(
             event_manager=event_manager,
         )
     finally:
-        # Capture each node's final status for the per-node log (best-effort, even on error).
-        if node_log_out is not None:
-            for v in getattr(graph, "vertices", []) or []:
-                comp = getattr(v, "custom_component", None)
-                if comp is None:
-                    continue
-                node_log_out.append({
-                    "id": getattr(v, "id", None),
-                    "name": getattr(comp, "display_name", None) or getattr(v, "display_name", None) or getattr(v, "id", "node"),
-                    "status": str(getattr(comp, "status", "") or "").strip(),
-                })
+        # Capture each executed node's final status (best-effort, even on error). A vertex has a
+        # built custom_component only if it actually ran, so this is the list of nodes that executed.
+        _executed = []
+        for v in getattr(graph, "vertices", []) or []:
+            comp = getattr(v, "custom_component", None)
+            if comp is None:
+                continue
+            _status = str(getattr(comp, "status", "") or "").strip().replace("\n", " ")
+            if len(_status) > 120:  # some nodes park large text (e.g. OCR) in .status — keep it short
+                _status = _status[:117] + "…"
+            entry = {
+                "id": getattr(v, "id", None),
+                "name": getattr(comp, "display_name", None) or getattr(v, "display_name", None) or getattr(v, "id", "node"),
+                "status": _status,
+            }
+            _executed.append(entry)
+            if node_log_out is not None:
+                node_log_out.append(entry)
+        # One clear server-log line listing which nodes ran + their status.
+        if _executed:
+            logger.info(
+                f"[idp-native] {did}: executed {len(_executed)} node(s): "
+                + " | ".join(f"{e['name']} → {(e['status'] or 'ok')[:60]}" for e in _executed)
+            )

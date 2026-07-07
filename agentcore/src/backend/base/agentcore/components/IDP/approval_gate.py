@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from agentcore.custom.custom_node.node import Node
 from agentcore.io import DataInput, MessageTextInput, Output
-from agentcore.schema.data import Data
 
 
 class IDPApprovalGate(Node):
@@ -38,32 +37,32 @@ class IDPApprovalGate(Node):
     ]
 
     def _is_approved(self) -> bool:
+        from agentcore.services.idp.graph_native.payload import resolve_field
+
         field = (self.approval_field or "rule_action").strip()
         expected = (self.approve_value or "auto_approve").strip()
-        src = self.data
-        if isinstance(src, Data):
-            actual = str(src.data.get(field, ""))
-        elif isinstance(src, dict):
-            actual = str(src.get(field, ""))
-        else:
-            actual = str(getattr(src, field, ""))
-        return actual == expected
+        # Resolve the rule outcome from the IDP payload + shared channel (Rules/Confidence Router write
+        # it into the working-set), not getattr(Message, field) which is blind to the working-set.
+        actual = resolve_field(self.data, field, component=self)
+        return str(actual if actual is not None else "") == expected
 
-    def auto_approved(self) -> Data:
+    def auto_approved(self):
+        from agentcore.services.idp.graph_native.payload import carry
+
         approved = self._is_approved()
         self.status = "auto_approved" if approved else "pending_review"
         if approved:
-            if isinstance(self.data, Data):
-                self.data.data["_approval_status"] = "auto_approved"
-            return self.data
+            # Record the decision in the payload (never .data — the engine strips it) so the sink can
+            # finalize the document as auto_approved.
+            return carry(self.data, decision="auto_approved")
         self.stop("auto_approved")
         return self.data
 
-    def pending_review(self) -> Data:
+    def pending_review(self):
+        from agentcore.services.idp.graph_native.payload import carry
+
         approved = self._is_approved()
         if not approved:
-            if isinstance(self.data, Data):
-                self.data.data["_approval_status"] = "pending_review"
-            return self.data
+            return carry(self.data, decision="pending_review")
         self.stop("pending_review")
         return self.data

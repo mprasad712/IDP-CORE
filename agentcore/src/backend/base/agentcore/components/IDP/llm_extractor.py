@@ -183,9 +183,9 @@ class IDPLLMExtractor(Node):
         import tempfile
 
         from agentcore.services.idp.extraction import extract_multimodal
-        from agentcore.services.idp.graph_native.payload import get_payload, load_bytes
+        from agentcore.services.idp.graph_native.payload import effective_payload, load_bytes
 
-        payload = get_payload(src)
+        payload = effective_payload(self, src)
         file_bytes = await load_bytes(payload)
         if not file_bytes:
             raise ValueError("No document bytes available for vision extraction.")
@@ -225,11 +225,11 @@ class IDPLLMExtractor(Node):
         try:
             from agentcore.services.deps import session_scope
             from agentcore.services.database.models.idp.documents import IdpDocument
-            from agentcore.services.idp.graph_native.payload import get_payload
+            from agentcore.services.idp.graph_native.payload import effective_payload
             from uuid import UUID
 
-            # document_id rides in the IDP payload (additional_kwargs["idp"]).
-            doc_id_raw = get_payload(src).get("document_id") or (
+            # document_id rides in the IDP payload (additional_kwargs["idp"]) + the shared channel.
+            doc_id_raw = effective_payload(self, src).get("document_id") or (
                 (src.additional_kwargs or {}).get("document_id") if isinstance(src, Message) else None
             )
 

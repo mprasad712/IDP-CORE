@@ -52,13 +52,16 @@ def test_deskew_image():
     assert corrected.shape == img_skewed.shape
 
 def test_detect_rotation_angle():
-    # Horizontal layout -> correction is 0 or 180 (180 only resolvable when OCR is available).
-    img_horiz = create_rotated_text_image(is_vertical=False)
-    assert detect_rotation_angle(img_horiz) in (0, 180)
+    # The public detector now prefers the real PP-LCNet doc-orientation model (ONNX / native Paddle)
+    # when present — it is trained on documents, not the synthetic bars below. The layout-based
+    # projection heuristic is the deterministic tier these synthetic shapes actually exercise, so
+    # assert it directly (the model path is covered by the mock-based delegation test below).
+    from agentcore.services.idp.doc_orientation import _predict_opencv
 
-    # Vertical layout -> correction is 90 or 270.
-    img_vert = create_rotated_text_image(is_vertical=True)
-    assert detect_rotation_angle(img_vert) in (90, 270)
+    # Horizontal layout -> 0 (the heuristic can't distinguish 0 vs 180 without OCR).
+    assert _predict_opencv(create_rotated_text_image(is_vertical=False)) in (0, 180)
+    # Vertical layout -> 90.
+    assert _predict_opencv(create_rotated_text_image(is_vertical=True)) in (90, 270)
 
 
 def test_detect_rotation_angle_delegates_to_orientation_model(monkeypatch):
@@ -98,7 +101,13 @@ async def test_detect_and_correct_skew_image():
     assert len(corrected_bytes) > 0
 
 @pytest.mark.anyio
-async def test_detect_and_correct_rotation_image():
+async def test_detect_and_correct_rotation_image(monkeypatch):
+    # Mock the orientation classifier so this exercises the correction PIPELINE (detect -> rotate ->
+    # encode) deterministically. The real PP-LCNet model is trained on documents, not these synthetic
+    # bars, and is validated on real documents elsewhere.
+    from agentcore.services.idp import pre_processing
+    monkeypatch.setattr(pre_processing, "detect_rotation_angle", lambda image: 90)
+
     img = create_rotated_text_image(is_vertical=True)
     _, encoded = cv2.imencode(".png", img)
     img_bytes = encoded.tobytes()

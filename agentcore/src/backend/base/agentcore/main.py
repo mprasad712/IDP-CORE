@@ -145,6 +145,28 @@ def get_lifespan(*, fix_migration=True, version=None):
             all_types_dict = await get_and_cache_all_types_dict(get_settings_service())
             logger.debug(f"Types cached in {asyncio.get_event_loop().time() - current_time:.2f}s")
 
+            # IDP capability check: the Page Selector needs LibreOffice (soffice) to paginate Office
+            # documents (.docx/.xlsx/.pptx…). Log its availability once at startup so operators can
+            # confirm Office slicing will work — PDF/image slicing never needs it. Absence is NOT
+            # fatal: those formats simply pass through unsliced.
+            try:
+                from agentcore.components.IDP.page_selector import _find_soffice
+
+                _soffice = _find_soffice()
+                if _soffice:
+                    logger.info(
+                        f"IDP Page Selector: LibreOffice found at '{_soffice}' — Office documents "
+                        "(.docx/.xlsx/.pptx…) can be sliced by page."
+                    )
+                else:
+                    logger.warning(
+                        "IDP Page Selector: LibreOffice NOT found — Office documents "
+                        "(.docx/.xlsx/.pptx…) will pass through UNSLICED (PDF/image slicing still "
+                        "works). Install LibreOffice and ensure 'soffice' is on PATH to enable it."
+                    )
+            except Exception as e:  # noqa: BLE001 — capability probe must never block startup
+                logger.debug(f"IDP LibreOffice capability check skipped: {e}")
+
             current_time = asyncio.get_event_loop().time()
             logger.debug("Starting telemetry service")
             telemetry_service.start()

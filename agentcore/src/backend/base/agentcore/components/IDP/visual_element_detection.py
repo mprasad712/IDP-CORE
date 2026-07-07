@@ -39,10 +39,10 @@ class IDPVisualElementDetection(Node):
         from loguru import logger
 
         from agentcore.services.deps import session_scope
-        from agentcore.services.idp.graph_native.payload import carry, get_payload, load_bytes
+        from agentcore.services.idp.graph_native.payload import carry, effective_payload, load_bytes
         from agentcore.services.idp.visual_detection import detect_and_persist
 
-        payload = get_payload(self.document)
+        payload = effective_payload(self, self.document)
         doc_id = payload.get("document_id")
         if not doc_id:
             self.status = "no document_id — detection skipped"

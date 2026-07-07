@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from agentcore.custom.custom_node.node import Node
 from agentcore.io import HandleInput, MessageTextInput, Output
-from agentcore.schema.data import Data
-from agentcore.schema.message import Message
 
 
 class IDPMultiBranchRouter(Node):
@@ -38,15 +36,12 @@ class IDPMultiBranchRouter(Node):
     ]
 
     def _get_field_value(self) -> str:
-        src = self.document
-        field = (self.route_field or "").strip()
-        if isinstance(src, Data):
-            return str(src.data.get(field, ""))
-        if isinstance(src, Message):
-            return str(getattr(src, field, ""))
-        if isinstance(src, dict):
-            return str(src.get(field, ""))
-        return str(getattr(src, field, ""))
+        # Resolve the route field (e.g. document_type) from the IDP payload + shared channel — the
+        # classifier writes the type there, not as a Message attribute. route_1..5 match against this.
+        from agentcore.services.idp.graph_native.payload import resolve_field
+
+        val = resolve_field(self.document, (self.route_field or "").strip(), component=self)
+        return str(val if val is not None else "")
 
     def _matched_route(self) -> int:
         """Returns 1-5 for a matched route, 0 for unmatched."""

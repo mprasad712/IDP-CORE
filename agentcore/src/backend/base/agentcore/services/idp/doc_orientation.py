@@ -43,6 +43,15 @@ _ort_tried: bool = False
 _paddlex_pipeline = None
 _paddlex_tried: bool = False
 
+# tier 1.5: native Paddle inference. Used when the ONNX model is absent but the Paddle inference model
+# files (models/PP-LCNet_x1_0_doc_ori/) + paddlepaddle are present. Reliable (unlike the OpenCV
+# heuristic) without the paddle2onnx export step, which fails on Windows.
+_PADDLE_MODEL_DIR = os.path.join(os.path.dirname(__file__), "models", "PP-LCNet_x1_0_doc_ori")
+_paddle_predictor = None
+_paddle_in_name: str = ""
+_paddle_out_name: str = ""
+_paddle_tried: bool = False
+
 
 # ── tier 1: ONNX ─────────────────────────────────────────────────────────────
 
@@ -109,6 +118,61 @@ def _predict_onnx(image: np.ndarray) -> int | None:
         return angle
     except Exception as exc:
         logger.warning("[Orientation] ONNX inference failed: {}", exc)
+        return None
+
+
+# ── tier 1.5: native Paddle inference (local model files) ─────────────────────
+
+def _load_paddle_predictor():
+    global _paddle_predictor, _paddle_tried, _paddle_in_name, _paddle_out_name
+    if _paddle_tried:
+        return _paddle_predictor
+    _paddle_tried = True
+    json_f = os.path.join(_PADDLE_MODEL_DIR, "inference.json")
+    params_f = os.path.join(_PADDLE_MODEL_DIR, "inference.pdiparams")
+    if not (os.path.exists(json_f) and os.path.exists(params_f)):
+        return None
+    try:
+        from paddle.inference import Config, create_predictor  # noqa: PLC0415
+
+        cfg = Config(json_f, params_f)
+        cfg.disable_gpu()
+        # NOTE: do NOT enable_memory_optim()/switch_ir_optim() — they make create_predictor fail on
+        # this PIR (.json) model ("Not find predictor_id 0 and pass_name memory_optimize_pass").
+        try:
+            cfg.disable_glog_info()
+        except Exception:  # noqa: BLE001
+            pass
+        pred = create_predictor(cfg)
+        _paddle_in_name = pred.get_input_names()[0]
+        _paddle_out_name = pred.get_output_names()[0]
+        _paddle_predictor = pred
+        logger.info("[Orientation] Paddle native inference model loaded ({})", _PADDLE_MODEL_DIR)
+    except Exception as exc:  # noqa: BLE001 — degrade to the next tier
+        logger.warning("[Orientation] Paddle native model unavailable: {}", exc)
+    return _paddle_predictor
+
+
+def _predict_paddle_native(image: np.ndarray) -> int | None:
+    """Reliable orientation via the local Paddle inference model (needs only paddlepaddle, no ONNX
+    conversion, no paddleocr/cv2 conflict). Same 224×224 ImageNet preprocessing as the ONNX path."""
+    pred = _load_paddle_predictor()
+    if pred is None:
+        return None
+    try:
+        h, w = _ort_input_hw
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        rgb = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_AREA)
+        x = ((rgb.astype(np.float32) / 255.0 - _MEAN) / _STD).transpose(2, 0, 1)[np.newaxis, :].copy()
+        in_handle = pred.get_input_handle(_paddle_in_name)
+        in_handle.copy_from_cpu(x)
+        pred.run()
+        logits = pred.get_output_handle(_paddle_out_name).copy_to_cpu()[0]
+        angle = _ANGLES[int(np.argmax(logits))]
+        logger.info("[Orientation] Paddle native -> angle={} deg", angle)
+        return angle
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Orientation] Paddle native inference failed: {}", exc)
         return None
 
 
@@ -186,6 +250,10 @@ def predict_orientation(image: np.ndarray) -> int:
         return 0
 
     result = _predict_onnx(image)
+    if result is not None:
+        return result
+
+    result = _predict_paddle_native(image)
     if result is not None:
         return result
 

@@ -254,3 +254,49 @@ async def test_process_document_native_end_to_end(monkeypatch):
         # per-node log persisted (one "node:<name>" step per executed node)
         node_steps = [e for e in (job.log or []) if str(e.get("step", "")).startswith("node:")]
         assert len(node_steps) >= 2, f"expected per-node log steps: {job.log}"
+
+
+@pytest.mark.anyio
+async def test_shared_idp_channel_accumulates_through_the_engine(monkeypatch):
+    """The idp_working_set state is maintained THROUGH the LangGraph engine, not around it.
+
+    WRITE path: every node's output is harvested into the shared channel via the returned state update
+    (reduced by _merge_dicts) — a spy on the real harvest shows Document Upload contributes document_id
+    and the AI Field Extractor contributes `extracted`, i.e. the channel accumulates across nodes as the
+    engine runs. READ path: the sink finalizes the document off that accumulated channel.
+    """
+    from agentcore.graph_langgraph import nodes as lgnodes
+    from agentcore.services.database.models.idp.documents import IdpDocument
+    from agentcore.services.deps import session_scope
+    from agentcore.services.idp.graph_native.runner import run_native_graph
+
+    storage = T._MockStorage()
+    monkeypatch.setattr(pipeline, "get_storage_service", lambda: storage)
+    monkeypatch.setattr("agentcore.services.deps.get_storage_service", lambda: storage, raising=False)
+    T._patch_extraction(monkeypatch)
+
+    # Spy on the REAL harvest (module-global, looked up per call inside node_function) to observe what
+    # each executed node contributes to the shared channel as the engine runs it.
+    harvested: list[dict] = []
+    _real_delta = lgnodes._extract_idp_delta
+
+    def _spy(result):
+        d = _real_delta(result)
+        if d:
+            harvested.append(d)
+        return d
+
+    monkeypatch.setattr(lgnodes, "_extract_idp_delta", _spy)
+
+    async with session_scope() as s:
+        agent_id, doc_id = await T._setup_document(s, graph=_slice3_graph(), file_bytes=T._digital_pdf())
+    await run_native_graph(document_id=str(doc_id), agent_data=_slice3_graph(), agent_id=str(agent_id))
+
+    # WRITE: the channel received contributions from MULTIPLE nodes across the run (not just one).
+    assert any("document_id" in d for d in harvested), f"Document Upload must harvest document_id: {harvested}"
+    assert any("extracted" in d for d in harvested), f"the extractor must harvest `extracted`: {harvested}"
+
+    # READ: the sink finalized the document off the accumulated channel.
+    async with session_scope() as s:
+        doc = await s.get(IdpDocument, doc_id)
+        assert doc.status == "pending_review", f"sink finalizes via the maintained state: {doc.status}"
