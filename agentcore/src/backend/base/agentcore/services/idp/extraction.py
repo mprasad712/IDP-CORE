@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
@@ -10,6 +11,13 @@ from loguru import logger
 from langchain_core.messages import SystemMessage, HumanMessage
 
 _LLM_TIMEOUT = 120  # seconds — fail fast rather than hang forever
+# Cap the number of page images sent to a vision model in ONE extraction request (Codex #8: an unbounded
+# scan would blow the provider's request-size limit and fail the whole doc). Configurable; a Page
+# Selector upstream is the precise control over which pages are read.
+try:
+    _MAX_VISION_PAGES = max(1, int(os.getenv("IDP_MAX_VISION_PAGES", "20") or "20"))
+except (TypeError, ValueError):
+    _MAX_VISION_PAGES = 20
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from agentcore.services.database.models.idp.config import (
@@ -616,13 +624,23 @@ def render_document_images(
     except Exception as e:
         raise ValueError(f"cannot render vision images: the PDF could not be opened ({e})") from e
     out: List[tuple] = []
+    capped = False
     try:
         for i in range(len(doc)):
             if selected_pages is not None and (i + 1) not in selected_pages:
                 continue
+            if len(out) >= _MAX_VISION_PAGES:
+                capped = True
+                break
             out.append((doc[i].get_pixmap(dpi=150).tobytes("png"), "image/png"))
     finally:
         doc.close()
+    if capped:
+        logger.warning(
+            f"vision extraction: document has more than {_MAX_VISION_PAGES} rendered page(s); only the "
+            f"first {_MAX_VISION_PAGES} are sent to the model (avoids the request size limit). Add a Page "
+            f"Selector to choose pages, or raise IDP_MAX_VISION_PAGES."
+        )
     return out
 
 
@@ -1003,10 +1021,11 @@ def _ocr_evidence(
         # directly — so trust its own per-field confidence (clamped to [0,1] in case it over-reports).
         if vision_mode:
             return None, round(max(0.0, min(1.0, llm_conf)), 3)
-        # Text path (unchanged): no OCR tokens (e.g. pure digital PDF without token export).
-        # Dampen the LLM score — it's still overconfident but better than 0. max(0.0,...) guards
-        # against a model reporting a negative confidence (would persist a negative score).
-        return None, round(max(0.0, min(llm_conf * 0.80, 0.75)), 3)
+        # Text path: no OCR tokens (e.g. a digital PDF / native text with no token export). Apply a
+        # LIGHT dampening — text-only extraction isn't OCR-cross-checked — but do NOT cap below the
+        # usual auto-approve threshold, or a genuinely high-confidence digital doc could never
+        # auto-approve (Codex #9). max(0.0,...) guards a model reporting a negative confidence.
+        return None, round(max(0.0, min(llm_conf * 0.92, 0.92)), 3)
 
     # Pre-build the full document text for multi-token substring checks.
     all_text = " ".join(str(t.get("text", "")).strip() for t in ocr_tokens).lower()
