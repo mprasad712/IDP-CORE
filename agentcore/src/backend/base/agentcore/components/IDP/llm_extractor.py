@@ -175,6 +175,36 @@ class IDPLLMExtractor(Node):
             return "vision"
         return "text" if has_text else "vision"
 
+    async def _ensure_vision_capable(self) -> None:
+        """Guard the vision path: if we can determine the connected model is NOT vision-capable, fail with
+        a clear, actionable error instead of sending page images to a text-only model (which returns
+        garbage or a provider error). Unknown capability → proceed (never false-block a valid model).
+        (Codex #3)"""
+        llm = self.llm
+        rmid = getattr(llm, "registry_model_id", None)
+        if not rmid:
+            return
+        try:
+            from uuid import UUID
+
+            from agentcore.services.database.models.model_registry.model import ModelRegistry
+            from agentcore.services.deps import session_scope
+            from agentcore.services.idp.pipeline import _supports_vision
+
+            async with session_scope() as session:
+                reg = await session.get(ModelRegistry, UUID(str(rmid)))
+            if reg is not None and not _supports_vision(reg):
+                name = getattr(reg, "name", None) or getattr(llm, "model", None) or "the connected model"
+                raise ValueError(
+                    f"This document has no text layer, so it must be read as page images, but '{name}' is "
+                    f"not vision-capable. Connect a model marked 'Supports vision', or add a PaddleOCR node "
+                    f"so the text is extracted first."
+                )
+        except ValueError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — a resolution failure must not block a valid model
+            logger.debug(f"[AIFieldExtractor] vision-capability check skipped: {exc}")
+
     async def _extract_via_vision(self, src: Any, prompt_or_config_id, session=None) -> dict:
         """Extract straight from the page images (no OCR text) — for image / scanned documents wired
         without an OCR node. Loads the document bytes from storage, renders them, and runs the vision
@@ -185,6 +215,7 @@ class IDPLLMExtractor(Node):
         from agentcore.services.idp.extraction import extract_multimodal
         from agentcore.services.idp.graph_native.payload import effective_payload, load_bytes
 
+        await self._ensure_vision_capable()
         payload = effective_payload(self, src)
         file_bytes = await load_bytes(payload)
         if not file_bytes:
