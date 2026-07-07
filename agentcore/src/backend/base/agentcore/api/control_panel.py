@@ -1188,8 +1188,10 @@ async def promote_uat_to_prod(
             )
 
         # Validate all models and MCP servers are available for PROD
-        from agentcore.api.publish import _validate_resources_for_prod
+        from agentcore.api.publish import _validate_idp_publish, _validate_resources_for_prod
         await _validate_resources_for_prod((uat_dep.agent_snapshot or {}), session)
+        # IDP publish guard: Field Configuration + env-valid active LLM (graceful 400). No-op non-IDP.
+        await _validate_idp_publish((uat_dep.agent_snapshot or {}), session, "prod")
 
         new_record = AgentDeploymentProd(
             agent_id=uat_dep.agent_id,
