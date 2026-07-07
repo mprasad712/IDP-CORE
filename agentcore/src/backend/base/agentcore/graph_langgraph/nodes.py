@@ -403,6 +403,15 @@ def create_node_function(vertex: LangGraphVertex, *, is_cycle_router: bool = Fal
             if _idp_delta:
                 updates["idp_working_set"] = _idp_delta
 
+            # Per-node server log for IDP native runs: emit ONE line as each node finishes (in addition
+            # to the end-of-run summary), so the console shows the flow progressing node by node — the
+            # user watches this. Gated on the shared snapshot, which is only set on the IDP native
+            # engine → a complete no-op for chat agents.
+            if getattr(vertex, "_idp_shared_snapshot", None) is not None:
+                _comp = getattr(vertex, "custom_component", None)
+                _st = str(getattr(_comp, "status", "") or "").strip().replace("\n", " ")
+                logger.info(f"[idp-native] node {vertex.display_name} → {(_st or 'ok')[:100]}")
+
             logger.debug(
                 f"[node_function] vertex={vertex.id} ({vertex.display_name}), "
                 f"built_result type={type(vertex.built_result).__name__}, "
