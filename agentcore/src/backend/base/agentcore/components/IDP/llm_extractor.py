@@ -449,6 +449,7 @@ class IDPLLMExtractor(Node):
         from sqlmodel import select
 
         results: list[dict] = []
+        via_vision = False
         try:
             async with session_scope() as session:
                 config = (await session.exec(
@@ -463,7 +464,8 @@ class IDPLLMExtractor(Node):
                 # If NO chunk carries text (a scanned / image document with no OCR text — no OCR node, or
                 # PaddleOCR unavailable), read the page IMAGES with the vision model instead of extracting
                 # from empty text. Mirrors the single-doc auto path so the same flow works for scanned docs.
-                if not any(((ch.text if isinstance(ch, Message) else str(ch)) or "").strip() for ch in chunks):
+                via_vision = not any(((ch.text if isinstance(ch, Message) else str(ch)) or "").strip() for ch in chunks)
+                if via_vision:
                     self.status = "No text in chunks — extracting via vision"
                     ex = await self._extract_via_vision(rep, config.id, session)
                     if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
@@ -489,8 +491,9 @@ class IDPLLMExtractor(Node):
                   if results else {"headers": {}, "line_items": []})
         n_head = len(merged.get("headers", {}))
         n_li = len(merged.get("line_items", []))
-        self.status = f"Extracted from {len(chunks)} chunk(s) → merged {n_head} field(s), {n_li} line item(s)"
-        logger.info(f"[AIFieldExtractor] long-doc: {len(chunks)} chunk(s) → {n_head} field(s) after merge")
+        source = "vision (no OCR text)" if via_vision else f"{len(chunks)} chunk(s)"
+        self.status = f"Extracted via {source} → {n_head} field(s), {n_li} line item(s)"
+        logger.info(f"[AIFieldExtractor] extracted via {source} → {n_head} field(s), {n_li} line item(s)")
         return carry(rep, text=json.dumps(merged, indent=2), extracted=merged)
 
 
