@@ -148,8 +148,15 @@ class IDPChunkingStrategy(Node):
             chunk_texts = self._split_fixed_token(text)
 
         total = len(chunk_texts)
-        self.status = f"Produced {total} chunk(s) via {method}"
+        # No text to chunk (e.g. a scanned / image document with no OCR text — no OCR node, or PaddleOCR
+        # unavailable): pass the document THROUGH as a single chunk so the AI Field Extractor still gets
+        # the document handle and can read it via VISION, instead of receiving an empty list and
+        # extracting nothing.
+        if total == 0:
+            self.status = "No text to chunk — passing document through for vision extraction"
+            return [carry(src, chunk_index=0, total_chunks=1, chunking_method=method)]
 
+        self.status = f"Produced {total} chunk(s) via {method}"
         # Each chunk carries the FULL IDP payload (document_id, agent_scope, …) plus its own chunk
         # metadata + text — via carry(), never a bare Message(data=…) which drops the working-set.
         return [

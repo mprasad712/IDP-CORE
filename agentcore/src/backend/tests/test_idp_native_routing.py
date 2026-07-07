@@ -269,6 +269,75 @@ def test_digital_confidence_can_reach_autoapprove():
     assert conf >= 0.8, f"digital confidence still capped too low for auto-approve: {conf}"
 
 
+def test_chunking_passes_through_when_no_text():
+    """No text to chunk (a scanned / image doc with no OCR text) → the Chunking Strategy emits ONE
+    passthrough chunk carrying the document handle, so the extractor can read it via vision (not an
+    empty list that extracts nothing)."""
+    from agentcore.components.IDP.chunking_strategy import IDPChunkingStrategy
+
+    cs = IDPChunkingStrategy()
+    cs.document = new_message(text="", document_id="d-img", agent_scope="scope",
+                              file_name="x.png", file_type="png")
+    cs.chunk_size_tokens = 4096
+    cs.overlap_tokens = 256
+    cs.chunking_method = "fixed_token"
+    cs.model_name = "gpt-4o"
+    out = cs.chunks()
+    assert len(out) == 1, f"expected 1 passthrough chunk, got {len(out)}"
+    assert get_payload(out[0]).get("document_id") == "d-img"   # document handle preserved
+
+
+def test_extractor_falls_back_to_vision_when_chunks_have_no_text(monkeypatch):
+    """A scanned/image doc yields a passthrough chunk with empty text; the AI Field Extractor must then
+    read the page IMAGES via vision instead of extracting nothing (paddleocr-not-installed case)."""
+    import asyncio
+    from uuid import uuid4
+
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+
+    class _Cfg:
+        def __init__(self):
+            self.id = uuid4()
+
+    class _Res:
+        def first(self):
+            return _Cfg()
+
+    class _Sess:
+        async def exec(self, s):
+            return _Res()
+        async def get(self, *a, **k):
+            return None
+
+    class _Scope:
+        async def __aenter__(self):
+            return _Sess()
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr("agentcore.services.deps.session_scope", lambda: _Scope(), raising=False)
+
+    called = {}
+
+    async def _fake_vision(self, src, cfg_id, session=None):
+        called["vision"] = True
+        return {"headers": {"total": {"value": "600", "confidence": 0.95}}, "line_items": []}
+
+    monkeypatch.setattr(IDPLLMExtractor, "_extract_via_vision", _fake_vision, raising=True)
+
+    ex = IDPLLMExtractor()
+    ex.extraction_mode = "field_configuration"
+    ex.config_name = "Invoice"
+    ex.config_names = []
+    ex.llm = object()  # truthy — a model is connected
+    chunk = new_message(text="", document_id="d-img", agent_scope="scope", file_name="x.png", file_type="png")
+
+    out = asyncio.run(ex._extract_chunks([chunk]))
+    assert called.get("vision") is True, "vision fallback was not used for a no-text chunk"
+    total = get_payload(out).get("extracted", {}).get("headers", {}).get("total", {})
+    assert total.get("value") == "600", f"vision extraction not merged into output: {get_payload(out)}"
+
+
 def test_classifier_tags_predicted_type_into_payload():
     """The Document Classifier writes predicted_type into the IDP payload (routers resolve it) AND the
     classification block (extractor multi-config routing) — the native-engine contract."""

@@ -460,17 +460,26 @@ class IDPLLMExtractor(Node):
                 if not config:
                     raise ValueError(f"Active field configuration '{effective}' not found.")
 
-                for ch in chunks:
-                    ctext = ch.text if isinstance(ch, Message) else str(ch)
-                    if not (ctext and ctext.strip()):
-                        continue
-                    try:
-                        ex = await extract_named_config(
-                            session=session, ocr_text=ctext, field_config_id=config.id, llm_model=self.llm)
-                        if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
-                            results.append(ex)
-                    except Exception as exc:  # noqa: BLE001 — one bad chunk shouldn't fail the whole doc
-                        logger.warning(f"[AIFieldExtractor] chunk extraction failed: {exc}")
+                # If NO chunk carries text (a scanned / image document with no OCR text — no OCR node, or
+                # PaddleOCR unavailable), read the page IMAGES with the vision model instead of extracting
+                # from empty text. Mirrors the single-doc auto path so the same flow works for scanned docs.
+                if not any(((ch.text if isinstance(ch, Message) else str(ch)) or "").strip() for ch in chunks):
+                    self.status = "No text in chunks — extracting via vision"
+                    ex = await self._extract_via_vision(rep, config.id, session)
+                    if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
+                        results.append(ex)
+                else:
+                    for ch in chunks:
+                        ctext = ch.text if isinstance(ch, Message) else str(ch)
+                        if not (ctext and ctext.strip()):
+                            continue
+                        try:
+                            ex = await extract_named_config(
+                                session=session, ocr_text=ctext, field_config_id=config.id, llm_model=self.llm)
+                            if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
+                                results.append(ex)
+                        except Exception as exc:  # noqa: BLE001 — one bad chunk shouldn't fail the whole doc
+                            logger.warning(f"[AIFieldExtractor] chunk extraction failed: {exc}")
         except Exception as exc:  # noqa: BLE001
             self.status = f"Error: {exc}"
             logger.error(f"[AIFieldExtractor] long-doc extraction failed: {exc}")
