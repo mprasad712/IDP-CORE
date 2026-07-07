@@ -113,7 +113,7 @@ class IDPLLMExtractor(Node):
             return []
 
 
-    async def _resolve_config_name_from_classification(self) -> str | None:
+    async def _resolve_config_name_from_classification(self, src: Any = None) -> str | None:
         """When config_names multi-select is used and classification metadata is present,
         find which selected config's doc_type matches the classified type.
         Returns the config name to use, or None if no match (→ skip)."""
@@ -123,7 +123,7 @@ class IDPLLMExtractor(Node):
 
         from agentcore.services.idp.graph_native.payload import get_payload
 
-        src = self.document
+        src = src if src is not None else self.document
         # A Document Classifier node carries the classification in the IDP payload; fall back to a
         # top-level additional_kwargs for compatibility.
         payload = get_payload(src)
@@ -251,6 +251,12 @@ class IDPLLMExtractor(Node):
 
     async def extract(self) -> Data:
         src = self.document
+        # Long-document support: the Chunking Strategy node feeds a LIST of chunk Messages. Extract each
+        # chunk with the resolved Field Configuration and merge the per-chunk JSONs into one result — so
+        # the user tunes chunk size on the Chunking node and the extractor handles any document length.
+        if isinstance(src, (list, tuple)):
+            return await self._extract_chunks(list(src))
+
         text = src.text if isinstance(src, Message) else str(src)
 
         # A Field Configuration is mandatory (enforced at publish time on the canvas).
@@ -372,6 +378,80 @@ class IDPLLMExtractor(Node):
             self.status = f"Error: {exc}"
             logger.error(f"[AIFieldExtractor] Extraction failed: {exc}")
             return carry(src, text="", extracted={"error": str(exc)})
+
+    async def _extract_chunks(self, chunks: list) -> Data:
+        """Long-document path: extract each chunk (from the Chunking Strategy) with the resolved Field
+        Configuration, then merge the per-chunk JSONs into one result via long_doc.merge_chunk_extractions
+        (keep-highest-confidence). The Chunk Aggregator node is NOT needed — the merge happens here."""
+        from agentcore.services.idp.graph_native.payload import carry
+
+        chunks = [c for c in chunks if c is not None]
+        if not chunks:
+            return carry(self.document if not isinstance(self.document, (list, tuple)) else None,
+                         text="", extracted={"error": "no chunks to extract"})
+        rep = chunks[0]  # representative chunk — carries the shared payload + classification block
+
+        # Resolve the Field Configuration ONCE (single or classifier-routed), same rules as a single doc.
+        config_names: list[str] = list(self.config_names) if self.config_names else []
+        single_config = str(getattr(self, "config_name", "") or "").strip()
+        if not single_config and not config_names:
+            self.status = "No Field Configuration selected."
+            return carry(rep, text="", extracted={"error": "No Field Configuration selected."})
+
+        self._override_config_name = None
+        if config_names and self.extraction_mode == "field_configuration":
+            matched = await self._resolve_config_name_from_classification(rep)
+            if matched is None:
+                self.status = "Skipped — no field configuration matches the classified type."
+                return carry(rep, text="", extracted={})
+            self._override_config_name = matched
+        effective = self._override_config_name or single_config or (config_names[0] if config_names else None)
+
+        if not self.llm:
+            self.status = "No model connected."
+            return carry(rep, text="", extracted={"error": "No model connected"})
+
+        from agentcore.services.deps import session_scope
+        from agentcore.services.database.models.idp.config import IdpFieldConfiguration
+        from agentcore.services.idp import long_doc
+        from agentcore.services.idp.extraction import extract_named_config
+        from sqlmodel import select
+
+        results: list[dict] = []
+        try:
+            async with session_scope() as session:
+                config = (await session.exec(
+                    select(IdpFieldConfiguration).where(
+                        IdpFieldConfiguration.name == effective,
+                        IdpFieldConfiguration.deleted_at.is_(None),
+                    )
+                )).first()
+                if not config:
+                    raise ValueError(f"Active field configuration '{effective}' not found.")
+
+                for ch in chunks:
+                    ctext = ch.text if isinstance(ch, Message) else str(ch)
+                    if not (ctext and ctext.strip()):
+                        continue
+                    try:
+                        ex = await extract_named_config(
+                            session=session, ocr_text=ctext, field_config_id=config.id, llm_model=self.llm)
+                        if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
+                            results.append(ex)
+                    except Exception as exc:  # noqa: BLE001 — one bad chunk shouldn't fail the whole doc
+                        logger.warning(f"[AIFieldExtractor] chunk extraction failed: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            self.status = f"Error: {exc}"
+            logger.error(f"[AIFieldExtractor] long-doc extraction failed: {exc}")
+            return carry(rep, text="", extracted={"error": str(exc)})
+
+        merged = (long_doc.merge_chunk_extractions(results, strategy="keep_highest_confidence")
+                  if results else {"headers": {}, "line_items": []})
+        n_head = len(merged.get("headers", {}))
+        n_li = len(merged.get("line_items", []))
+        self.status = f"Extracted from {len(chunks)} chunk(s) → merged {n_head} field(s), {n_li} line item(s)"
+        logger.info(f"[AIFieldExtractor] long-doc: {len(chunks)} chunk(s) → {n_head} field(s) after merge")
+        return carry(rep, text=json.dumps(merged, indent=2), extracted=merged)
 
 
     @staticmethod
