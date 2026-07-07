@@ -321,6 +321,23 @@ def _config_columns(ordered_headers: list[str], ordered_line_cols: list[str], va
     return cols
 
 
+def _config_band_row(ordered_headers: list[str], ordered_line_cols: list[str], values: str) -> list[str]:
+    """Section band shown ABOVE the column-header row: one label at the START of each section
+    (``METADATA`` · ``HEADER FIELDS`` · ``TABLE ITEMS``), blank across the rest of that section's
+    span. Segment widths mirror ``_config_columns`` exactly (a field spans 4 sub-columns in ``both``
+    mode, else 1), so the band is the SAME width as the column row — the flat matrix stays
+    rectangular. A section with no columns (e.g. no line items) is omitted entirely."""
+    def _seg(label: str, names: list[str]) -> list[str]:
+        w = sum(len(_value_col_labels(n, values)) for n in names)
+        return [label, *([""] * (w - 1))] if w else []
+
+    return [
+        "METADATA", *([""] * (len(_META_COLS) - 1)),
+        *_seg("HEADER FIELDS", ordered_headers),
+        *_seg("TABLE ITEMS", ordered_line_cols),
+    ]
+
+
 def _config_matrix(doc_rows, grouped: dict, review_map: dict, ordered_headers: list[str], ordered_line_cols: list[str], values: str) -> list[list]:
     """Positional matrix: one fixed column header row, then rows for EACH document (``doc_rows`` =
     the authoritative per-doc list, so a doc with zero extracted fields still appears). ``grouped``
@@ -328,7 +345,11 @@ def _config_matrix(doc_rows, grouped: dict, review_map: dict, ordered_headers: l
     appear on its FIRST line-item row only and are BLANK on the rows below (line items stack under
     the file). A doc with no line items — or no line columns — yields one row. Positional (not
     dict-keyed) because a header field_name and a line column_name can collide."""
-    matrix: list[list] = [_config_columns(ordered_headers, ordered_line_cols, values)]
+    # Row 0 = section band (METADATA | HEADER FIELDS | TABLE ITEMS); row 1 = column-header row.
+    matrix: list[list] = [
+        _config_band_row(ordered_headers, ordered_line_cols, values),
+        _config_columns(ordered_headers, ordered_line_cols, values),
+    ]
     for dm in doc_rows:
         did = str(dm.document_id)
         rv = review_map.get(did)
@@ -365,7 +386,7 @@ def _flat_matrix_cells(doc_rows, grouped: dict, ordered_headers: list[str], orde
     oversized flat export (422) BEFORE materialising a giant sparse matrix in memory, since the
     union layout's WIDTH is unbounded (every distinct field name becomes a column)."""
     n_cols = len(_config_columns(ordered_headers, ordered_line_cols, values))
-    n_rows = 1  # the column-header row
+    n_rows = 2  # the section band + the column-header row
     for dm in doc_rows:
         lines = (grouped.get(str(dm.document_id)) or {}).get("lines") or {}
         n_rows += len(lines) if (ordered_line_cols and lines) else 1
@@ -610,7 +631,10 @@ async def export_processed_docs_data(
         # CONFIG-DRIVEN layout. Load + access-check first so even an org-isolated user (no scope)
         # still gets a well-formed header-only file.
         ordered_headers, ordered_line_cols, cfg_name = await _load_config_columns(session, current_user, config_id)
-        matrix = [_config_columns(ordered_headers, ordered_line_cols, values)]
+        matrix = [
+            _config_band_row(ordered_headers, ordered_line_cols, values),
+            _config_columns(ordered_headers, ordered_line_cols, values),
+        ]
         if is_root or org_ids:
             hstmt = build_header_export_query(is_root, org_ids, filters, config_id=config_id)
             lstmt = build_line_export_query(is_root, org_ids, filters, config_id=config_id)
@@ -666,7 +690,7 @@ async def export_processed_docs_data(
     # Default FLAT layout over ALL in-range docs; columns = the UNION of every doc's fields
     # (mixed doc types leave the other types' columns blank), same per-document row shape.
     if not (is_root or org_ids):
-        matrix = [_config_columns([], [], values)]  # header-only (just the meta columns)
+        matrix = [_config_band_row([], [], values), _config_columns([], [], values)]  # band + header-only
         data, media, ext = serialize_matrix(matrix, fmt, sheet_name="All Data")
         return _attachment(data, media, f"processed_docs_data.{ext}")
     hstmt = build_header_export_query(is_root, org_ids, filters)
