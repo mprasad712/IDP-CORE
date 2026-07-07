@@ -34,6 +34,24 @@ class IDPOutputParser(Node):
     ]
 
     def merge(self):
-        result = self.branch_a if self.branch_a is not None else self.branch_b
-        self.status = "Merged branch A" if self.branch_a is not None else "Merged branch B"
+        a, b = self.branch_a, self.branch_b
+
+        def _has_text(m) -> bool:
+            t = getattr(m, "text", None)
+            return bool(t and str(t).strip())
+
+        # A router (e.g. Document Type Detector) activates exactly ONE branch and STOPS the other — but
+        # the stopped branch can still forward the pre-routing message, which on the scanned path has NO
+        # OCR text yet. Blindly preferring branch A then drops the OCR/native text (the classifier +
+        # chunker see nothing). So prefer the branch that actually carries text — the branch that truly
+        # ran — and only fall back to presence order when neither has text.
+        if a is not None and _has_text(a):
+            result, which = a, "A"
+        elif b is not None and _has_text(b):
+            result, which = b, "B"
+        elif a is not None:
+            result, which = a, "A"
+        else:
+            result, which = b, "B"
+        self.status = f"Merged branch {which}"
         return result

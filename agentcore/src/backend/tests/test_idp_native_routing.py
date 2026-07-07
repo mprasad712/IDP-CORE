@@ -338,6 +338,24 @@ def test_extractor_falls_back_to_vision_when_chunks_have_no_text(monkeypatch):
     assert total.get("value") == "600", f"vision extraction not merged into output: {get_payload(out)}"
 
 
+def test_output_parser_prefers_the_branch_with_text():
+    """A router stops one branch but it still forwards a no-text message; the Output Parser must pick the
+    branch that actually carries text (OCR/native), not blindly branch A."""
+    from agentcore.components.IDP.output_parser import IDPOutputParser
+
+    # Scanned case: branch A = stopped digital path (no text), branch B = active OCR path (text).
+    op = IDPOutputParser()
+    op.branch_a = new_message(text="", document_id="d")
+    op.branch_b = new_message(text="INVOICE TOTAL 600.00", document_id="d")
+    assert op.merge().text == "INVOICE TOTAL 600.00", "picked the no-text branch"
+
+    # Digital case: branch A = active native text, branch B = stopped (no text) → pick A.
+    op2 = IDPOutputParser()
+    op2.branch_a = new_message(text="NATIVE PDF TEXT", document_id="d")
+    op2.branch_b = new_message(text="", document_id="d")
+    assert op2.merge().text == "NATIVE PDF TEXT"
+
+
 def test_classifier_tags_predicted_type_into_payload():
     """The Document Classifier writes predicted_type into the IDP payload (routers resolve it) AND the
     classification block (extractor multi-config routing) — the native-engine contract."""
