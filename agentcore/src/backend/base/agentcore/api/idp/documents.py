@@ -19,7 +19,7 @@ from agentcore.services.database.models.idp.config import IdpAgent
 from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
 from agentcore.services.database.models.user_organization_membership.model import UserOrganizationMembership
 from agentcore.services.deps import get_storage_service, get_settings_service
-from agentcore.services.idp.pipeline import PipelineError, enqueue_document
+from agentcore.services.idp.pipeline import PipelineError, cancel_document, enqueue_document
 from agentcore.services.idp.scope import resolve_org_scope
 from agentcore.services.storage.service import StorageService
 
@@ -257,6 +257,24 @@ async def process_document_endpoint(
     if error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error)
     return {"job_id": job_id, "document_id": document_id, "status": "queued"}
+
+
+@router.post("/{document_id}/cancel", status_code=status.HTTP_200_OK)
+async def cancel_document_endpoint(
+    *, session: DbSession, current_user: CurrentActiveUser, document_id: UUID
+):
+    """Cancel a running/queued IDP processing job for the document (the Stop button)."""
+    doc = (await session.exec(select(IdpDocument).where(IdpDocument.id == document_id))).first()
+    if doc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+    if not await _can_access_document(session, current_user, doc):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+    cancelled = await cancel_document(session, document_id)
+    return {
+        "document_id": document_id,
+        "cancelled": cancelled,
+        "status": "cancelled" if cancelled else "no active job to cancel",
+    }
 
 
 @router.post("/process", status_code=status.HTTP_202_ACCEPTED)

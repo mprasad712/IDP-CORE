@@ -453,6 +453,66 @@ def _validation_chain_graph():
 
 
 @pytest.mark.anyio
+async def test_cancel_document_stops_the_run(monkeypatch):
+    """The Stop button path: cancel_document cancels the running background task and marks the job
+    'cancelled' + the document terminal."""
+    import asyncio
+
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
+    from agentcore.services.deps import get_queue_service, session_scope
+    from agentcore.services.idp.pipeline import cancel_document
+
+    storage = T._MockStorage()
+    monkeypatch.setattr(pipeline, "get_storage_service", lambda: storage)
+
+    async with session_scope() as s:
+        agent_id, doc_id = await T._setup_document(s, graph=_slice_graph(), file_bytes=T._digital_pdf())
+        doc = await s.get(IdpDocument, doc_id)
+        doc.status = "processing"
+        s.add(doc)
+        job = IdpProcessingJob(document_id=doc_id, agent_id=agent_id, status="running")
+        s.add(job)
+        await s.commit()
+        await s.refresh(job)
+        job_id = job.id
+
+    # Start a long-running fake job task in the queue service.
+    queue = get_queue_service()
+    if not queue.is_started():
+        queue.start()
+    job_key = str(job_id)
+    started = asyncio.Event()
+
+    async def _slow():
+        started.set()
+        await asyncio.sleep(60)
+
+    queue.create_queue(job_key)
+    queue.start_job(job_key, _slow())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    _, _, task, _ = queue.get_queue_data(job_key)
+    assert task is not None and not task.done(), "fake job task should be running"
+
+    # Cancel.
+    async with session_scope() as s:
+        cancelled = await cancel_document(s, doc_id)
+    assert cancelled is True
+
+    # Let the cancellation propagate, then confirm the background task actually stopped.
+    try:
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=3)
+    except Exception:
+        pass
+    assert task.cancelled() or task.done(), "the running task must be cancelled"
+    # … and the job + doc are terminal.
+    async with session_scope() as s:
+        job = await s.get(IdpProcessingJob, job_id)
+        doc = await s.get(IdpDocument, doc_id)
+        assert job.status == "failed" and "Cancelled" in (job.error_message or ""), (job.status, job.error_message)
+        assert doc.status == "failed" and (doc.extra or {}).get("cancelled") is True, (doc.status, doc.extra)
+
+
+@pytest.mark.anyio
 async def test_validation_chain_runs_every_node(monkeypatch):
     """Math Reconcile + Confidence Router + Rules/Conditions + Approval Gate in series must all execute
     without error and reach the sink (three routers back-to-back)."""

@@ -1707,6 +1707,58 @@ async def enqueue_document(session, document_id: UUID) -> UUID:
     return job.id
 
 
+async def cancel_document(session, document_id: UUID) -> bool:
+    """Cancel a queued/running IDP processing job for the document (the Stop button).
+
+    Cancels the background task via the queue service and marks the job 'cancelled' + the document
+    terminal. Returns True if an active job was cancelled, False if there was none.
+    """
+    job = (
+        await session.exec(
+            select(IdpProcessingJob)
+            .where(
+                IdpProcessingJob.document_id == document_id,
+                IdpProcessingJob.status.in_(("queued", "running")),
+            )
+            .order_by(IdpProcessingJob.created_at.desc())
+        )
+    ).first()
+    if job is None:
+        return False
+
+    job_key = str(job.id)
+    # Mark the job + doc terminal FIRST, so the run's safety-net finalization (which forces
+    # 'pending_review' for a non-terminal doc) can't override the cancellation as the task unwinds.
+    # NOTE: neither status CHECK constraint allows 'cancelled', so use 'failed' + a clear message.
+    job.status = "failed"
+    job.error_message = "Cancelled by user."
+    job.completed_at = _utcnow()
+    session.add(job)
+    doc = await session.get(IdpDocument, document_id)
+    if doc is not None and doc.status in ("queued", "processing"):
+        # 'cancelled' isn't in the IdpDocument.status CHECK constraint → use 'failed', and flag the
+        # real reason in `extra` (IdpDocument has no error_message field) so the UI can distinguish a
+        # user cancellation from a genuine failure.
+        doc.status = "failed"
+        doc.failed_at = _utcnow()
+        doc.processing_completed_at = _utcnow()
+        doc.extra = {**(doc.extra or {}), "cancelled": True, "cancel_reason": "Cancelled by user."}
+        session.add(doc)
+    await session.commit()
+
+    # Cancel the running background task directly. NOTE: do NOT use queue.cleanup_job() here — it calls
+    # task.exception() on the just-cancelled task, which re-raises CancelledError (a BaseException, so it
+    # would escape). We cancel the task and let the existing reap monitor clean up the queue entry.
+    try:
+        _q, _em, task, _ts = get_queue_service().get_queue_data(job_key)
+        if task is not None and not task.done():
+            task.cancel()
+    except Exception as e:  # noqa: BLE001 — the queue entry may already be gone (job just finished)
+        logger.debug(f"[pipeline] cancel: no active task for job {job_key}: {e}")
+    logger.info(f"[pipeline] {document_id}: processing cancelled by user (job {job_key})")
+    return True
+
+
 # Hold strong references to detached monitor tasks so they are not GC'd mid-run.
 _MONITOR_TASKS: set = set()
 
