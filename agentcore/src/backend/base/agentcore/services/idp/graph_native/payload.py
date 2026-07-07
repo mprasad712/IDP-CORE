@@ -189,7 +189,13 @@ def overall_confidence(src: Any, component: Any = None) -> float | None:
         headers = extracted.get("headers")
         if isinstance(headers, dict):
             for h in headers.values():
-                c = h.get("confidence") if isinstance(h, dict) else None
+                # Count ONLY populated fields. A field that's absent from the document comes back with a
+                # null value at confidence 0.0; averaging those in drags the mean far below the real
+                # score of what WAS extracted (and below what save_extraction_results / the UI display),
+                # which mis-routes a good extraction to Low. (Codex-style confidence mismatch.)
+                if not isinstance(h, dict) or h.get("value") in (None, ""):
+                    continue
+                c = h.get("confidence")
                 if c is not None:
                     try:
                         confs.append(float(c))
@@ -197,7 +203,9 @@ def overall_confidence(src: Any, component: Any = None) -> float | None:
                         pass
         for row in extracted.get("line_items", []) or []:
             for col in (row.get("columns", []) if isinstance(row, dict) else []):
-                c = col.get("confidence") if isinstance(col, dict) else None
+                if not isinstance(col, dict) or col.get("value") in (None, ""):
+                    continue
+                c = col.get("confidence")
                 if c is not None:
                     try:
                         confs.append(float(c))

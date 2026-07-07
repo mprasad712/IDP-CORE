@@ -372,6 +372,28 @@ def test_math_reconcile_unwraps_and_keeps_extraction(monkeypatch):
     assert "attempts" not in ex and "balanced" not in ex, f"wrapper leaked into extracted: {ex}"
 
 
+def test_overall_confidence_ignores_null_fields():
+    """The Confidence Router's overall confidence must count only POPULATED fields. Averaging in null
+    fields (value=None, confidence 0.0) drags the mean below the real score and mis-routes a good
+    extraction to Low — even though the displayed confidence (which excludes nulls) is well above."""
+    from agentcore.services.idp.graph_native.payload import overall_confidence
+
+    extracted = {
+        "headers": {
+            "invoice_number": {"value": "90015218", "confidence": 0.75},
+            "supplier_name": {"value": "IDES Holding AG", "confidence": 0.75},
+            "irn": {"value": None, "confidence": 0.0},        # absent field — must NOT count
+            "hsn_code": {"value": None, "confidence": 0.0},
+        },
+        "line_items": [{"columns": [
+            {"column_name": "amount", "value": "120.00", "confidence": 0.75},
+            {"column_name": "cgst_value", "value": None, "confidence": 0.0},
+        ]}],
+    }
+    conf = overall_confidence(new_message(text="", document_id="d", extracted=extracted))
+    assert conf is not None and conf >= 0.7, f"null fields dragged confidence down to {conf}"
+
+
 def test_prepare_drops_orphan_terminal_sink():
     """A Processed Docs Output with NO incoming edge is an orphan sink — the engine would otherwise run
     it as an entry point with no data. _prepare must drop it (and keep a properly-wired one)."""
