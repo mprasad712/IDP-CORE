@@ -229,6 +229,46 @@ def test_scan_corrector_preserves_upstream_ocr_text(monkeypatch):
     assert get_payload(out).get("document_id") == "doc-img"     # working-set still intact
 
 
+def test_long_doc_merge_dedups_overlapping_rows():
+    """Codex #2: overlapping chunks re-extract boundary rows; the merge must NOT double-count them."""
+    from agentcore.services.idp.long_doc import merge_chunk_extractions
+
+    def _row(item, amt):
+        return {"columns": [{"column_name": "item", "value": item},
+                            {"column_name": "amount", "value": amt}]}
+
+    chunk1 = {"headers": {}, "line_items": [_row("Widget", "100"), _row("Gadget", "200")]}
+    chunk2 = {"headers": {}, "line_items": [_row("Gadget", "200"), _row("Gizmo", "300")]}  # Gadget overlaps
+    merged = merge_chunk_extractions([chunk1, chunk2])
+    items = merged["line_items"]
+    assert len(items) == 3, f"overlapping row double-counted: {items}"   # Widget, Gadget, Gizmo — once each
+
+
+def test_opencv_orientation_distinguishes_90_from_270():
+    """Codex #5: the OpenCV fallback must tell 90° from 270°, not always return 90."""
+    import numpy as np
+
+    from agentcore.services.idp.doc_orientation import _predict_opencv
+
+    # Upright page: dark horizontal "text" bands in the TOP half, blank bottom → top-heavy.
+    up = np.full((120, 120, 3), 255, np.uint8)
+    for r in range(8, 56, 6):
+        up[r:r + 2, 10:110] = 0
+    # A page physically rotated 90° CW from upright (top points RIGHT) → detector should say 90.
+    assert _predict_opencv(np.rot90(up, -1)) == 90
+    # A page rotated 90° CCW (top points LEFT, i.e. 270° CW) → detector should say 270.
+    assert _predict_opencv(np.rot90(up, 1)) == 270
+
+
+def test_digital_confidence_can_reach_autoapprove():
+    """Codex #9: a high-confidence digital extraction (no OCR tokens) must be able to clear an
+    auto-approve threshold — the old 0.75 cap made auto-approve unreachable for digital docs."""
+    from agentcore.services.idp.extraction import _ocr_evidence
+
+    _loc, conf = _ocr_evidence("600.00", [], 0.97, vision_mode=False)
+    assert conf >= 0.8, f"digital confidence still capped too low for auto-approve: {conf}"
+
+
 def test_classifier_tags_predicted_type_into_payload():
     """The Document Classifier writes predicted_type into the IDP payload (routers resolve it) AND the
     classification block (extractor multi-config routing) — the native-engine contract."""
