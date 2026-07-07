@@ -4,7 +4,10 @@ import { Button } from "@/components/ui/button";
 import Loading from "@/components/ui/loading";
 import { api } from "@/controllers/API/api";
 import { getURL } from "@/controllers/API/helpers/constants";
-import { useUploadAndProcess } from "@/controllers/API/queries/idp/use-upload-and-process";
+import {
+  usePostCancelDocument,
+  useUploadAndProcess,
+} from "@/controllers/API/queries/idp/use-upload-and-process";
 import useAgentsManagerStore from "@/stores/agentsManagerStore";
 import useAgentStore from "@/stores/agentStore";
 import useAlertStore from "@/stores/alertStore";
@@ -133,7 +136,9 @@ const NoInputView: React.FC<NoInputViewProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { run: uploadAndProcess } = useUploadAndProcess();
+  const { mutateAsync: cancelDocument } = usePostCancelDocument();
   const setActiveRun = useIdpRunStore((s) => s.setActiveRun);
+  const clearActiveRun = useIdpRunStore((s) => s.clearActiveRun);
   // Persisted run history — survives closing the Playground and page reloads, so a result never
   // vanishes and the user can revisit any past document.
   const sessions = useIdpSessionStore((s) => s.sessions);
@@ -248,6 +253,24 @@ const NoInputView: React.FC<NoInputViewProps> = ({
       setErrorMsg(msg);
       setErrorData({ title: "Upload failed", list: [msg] });
     }
+  };
+
+  // Stop button: cancel the running backend process and return to the upload view. The backend run is
+  // a detached task — the cancel endpoint actually stops it (not just the UI). Best-effort: the UI
+  // resets even if the network call fails.
+  const handleStop = async () => {
+    const did = docId;
+    stopPolling();
+    attachedRef.current = null;
+    clearActiveRun();
+    if (did) {
+      upsertSession({ id: did, status: "error", error: "Cancelled by user." });
+      cancelDocument({ document_id: did }).catch(() => {
+        /* best-effort — the run may have just finished */
+      });
+    }
+    setState("idle");
+    setFile(null);
   };
 
   const reset = () => {
@@ -455,6 +478,20 @@ const NoInputView: React.FC<NoInputViewProps> = ({
               {file.name}
             </p>
           )}
+          <Button
+            variant="outline"
+            className="w-full text-sm"
+            data-testid="button-stop-idp"
+            disabled={!docId}
+            onClick={handleStop}
+          >
+            <IconComponent
+              name="Square"
+              className="mr-1.5 h-3.5 w-3.5"
+              strokeWidth={2}
+            />
+            Stop
+          </Button>
         </div>
       )}
 

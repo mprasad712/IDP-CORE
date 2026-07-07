@@ -2,7 +2,10 @@ import { useRef, useState } from "react";
 import IconComponent from "@/components/common/genericIconComponent";
 import { Button } from "@/components/ui/button";
 import { BuildStatus } from "@/constants/enums";
-import { useUploadAndProcess } from "@/controllers/API/queries/idp/use-upload-and-process";
+import {
+  usePostCancelDocument,
+  useUploadAndProcess,
+} from "@/controllers/API/queries/idp/use-upload-and-process";
 import useAgentsManagerStore from "@/stores/agentsManagerStore";
 import useAgentStore from "@/stores/agentStore";
 import useAlertStore from "@/stores/alertStore";
@@ -45,6 +48,7 @@ export default function IdpRunPanel() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const { run: uploadAndProcess, isPending } = useUploadAndProcess();
+  const { mutateAsync: cancelDocument } = usePostCancelDocument();
 
   // Light up the real canvas nodes from the native per-vertex SSE stream (the IDP nodes run through the
   // generic graph_langgraph engine) — survives Playground close, since this panel is mounted here.
@@ -76,6 +80,16 @@ export default function IdpRunPanel() {
     resetHighlight();
   };
 
+  // Stop the running document: cancel the detached backend task and clear the panel. Best-effort — the
+  // panel resets even if the cancel call fails (the run may have just finished).
+  const handleStop = () => {
+    const did = activeDocId;
+    clearActiveRun();
+    resetHighlight();
+    setFile(null);
+    if (did) cancelDocument({ document_id: did }).catch(() => {});
+  };
+
   if (!isIDPAgent) return null;
 
   const terminal = runDone;
@@ -88,8 +102,16 @@ export default function IdpRunPanel() {
         onClick={() => setOpen((v) => !v)}
       >
         <span className="flex items-center gap-2">
-          <IconComponent name="Play" className="h-4 w-4 text-primary" strokeWidth={2} />
-          {activeDocId ? "Document run" : "Run a document"}
+          {activeDocId && !terminal ? (
+            <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+          ) : (
+            <IconComponent name="Play" className="h-4 w-4 text-primary" strokeWidth={2} />
+          )}
+          {activeDocId
+            ? terminal
+              ? "Document run"
+              : "Agent running…"
+            : "Run a document"}
         </span>
         <IconComponent
           name={open ? "ChevronDown" : "ChevronUp"}
@@ -146,7 +168,7 @@ export default function IdpRunPanel() {
                 nodes={timelineNodes}
                 className="max-h-64 overflow-auto"
               />
-              {terminal && (
+              {terminal ? (
                 <Button
                   variant="outline"
                   size="sm"
@@ -154,6 +176,21 @@ export default function IdpRunPanel() {
                   onClick={reset}
                 >
                   Run another
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full text-xs"
+                  data-testid="button-stop-idp-canvas"
+                  onClick={handleStop}
+                >
+                  <IconComponent
+                    name="Square"
+                    className="mr-1.5 h-3 w-3"
+                    strokeWidth={2}
+                  />
+                  Stop
                 </Button>
               )}
             </>
