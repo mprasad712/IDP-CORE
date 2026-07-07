@@ -152,8 +152,10 @@ class IDPDocumentClassifier(Node):
 
         result = await self._invoke_llm(llm_model, messages)
 
-        predicted_type = result.predicted_type
-        confidence = max(0.0, min(1.0, float(result.confidence)))
+        # Defensive: never trust the model call to return a result object (structured output can yield
+        # None). getattr-with-default keeps the classifier from crashing the whole run.
+        predicted_type = getattr(result, "predicted_type", None) or "unknown"
+        confidence = max(0.0, min(1.0, float(getattr(result, "confidence", 0.0) or 0.0)))
         reasoning = getattr(result, "reasoning", None) or ""
 
         if confidence < float(self.confidence_threshold):
@@ -192,7 +194,11 @@ class IDPDocumentClassifier(Node):
         if hasattr(llm_model, "with_structured_output"):
             try:
                 structured = llm_model.with_structured_output(ClassificationResult)
-                return await structured.ainvoke(messages)
+                structured_result = await structured.ainvoke(messages)
+                if structured_result is not None:
+                    return structured_result
+                # Some models return None from structured output → fall through to plain JSON parsing.
+                logger.warning("[DocumentClassifier] Structured output returned None — falling back to plain invoke.")
             except Exception as exc:
                 logger.warning(f"[DocumentClassifier] Structured output failed, falling back: {exc}")
 

@@ -198,6 +198,30 @@ def test_classifier_tags_predicted_type_into_payload():
     assert out.additional_kwargs.get("classification", {}).get("type") == "invoice"
 
 
+def test_classifier_survives_structured_output_none():
+    """_invoke_llm must never return None — a model's structured-output call can yield None, and
+    classify() would then crash the whole run on result.predicted_type. It falls through to plain JSON
+    parsing, or 'unknown'."""
+    import asyncio
+
+    from agentcore.components.IDP.document_classifier import IDPDocumentClassifier
+
+    class _StructNone:
+        async def ainvoke(self, m):
+            return None
+
+    class _LLM:
+        def with_structured_output(self, s):
+            return _StructNone()
+        async def ainvoke(self, m):
+            class _R:
+                content = '{"predicted_type":"invoice","confidence":0.9}'
+            return _R()
+
+    r = asyncio.run(IDPDocumentClassifier()._invoke_llm(_LLM(), []))
+    assert r is not None and r.predicted_type == "invoice"   # fell through to plain JSON, no crash
+
+
 def test_extractor_extracts_each_chunk_and_merges(monkeypatch):
     """Long-doc: a LIST of chunks (from the Chunking Strategy) makes the AI Field Extractor extract each
     chunk with the Field Config and MERGE the per-chunk JSONs — so the Chunk Aggregator node isn't
