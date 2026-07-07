@@ -96,7 +96,7 @@ export default function IdpRunPanel() {
   const engineLabel = "native engine";
 
   return (
-    <div className="fixed bottom-4 left-4 z-30 w-72 overflow-hidden rounded-lg border border-border bg-background shadow-lg">
+    <div className="fixed bottom-4 left-4 z-50 w-72 overflow-hidden rounded-lg border border-border bg-background shadow-lg">
       <button
         className="flex w-full items-center justify-between gap-2 border-b border-border bg-muted/40 px-3 py-2 text-sm font-medium text-foreground"
         onClick={() => setOpen((v) => !v)}
