@@ -400,6 +400,7 @@ class IDPLLMExtractor(Node):
 
             headers_count = len(extracted.get("headers", {})) if isinstance(extracted, dict) else 0
             line_items_count = len(extracted.get("line_items", [])) if isinstance(extracted, dict) else 0
+            logger.info(f"[AIFieldExtractor] raw extraction JSON: {json.dumps(extracted, default=str)[:200]}")
             self.status = f"Extracted {headers_count} header(s) and {line_items_count} line item(s)"
             # Carry the IDP working-set forward (document_id, job_id, extracted, …) in the payload so
             # the terminal sink can persist. Read it with get_payload(...)["extracted"] — NOT .data
@@ -468,6 +469,7 @@ class IDPLLMExtractor(Node):
                 if via_vision:
                     self.status = "No text in chunks — extracting via vision"
                     ex = await self._extract_via_vision(rep, config.id, session)
+                    logger.info(f"[AIFieldExtractor] vision raw extraction: {json.dumps(ex, default=str)[:200]}")
                     if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
                         results.append(ex)
                 else:
@@ -478,6 +480,7 @@ class IDPLLMExtractor(Node):
                         try:
                             ex = await extract_named_config(
                                 session=session, ocr_text=ctext, field_config_id=config.id, llm_model=self.llm)
+                            logger.info(f"[AIFieldExtractor] chunk raw extraction: {json.dumps(ex, default=str)[:200]}")
                             if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
                                 results.append(ex)
                         except Exception as exc:  # noqa: BLE001 — one bad chunk shouldn't fail the whole doc
@@ -489,6 +492,7 @@ class IDPLLMExtractor(Node):
 
         merged = (long_doc.merge_chunk_extractions(results, strategy="keep_highest_confidence")
                   if results else {"headers": {}, "line_items": []})
+        logger.info(f"[AIFieldExtractor] merged extraction JSON: {json.dumps(merged, default=str)[:200]}")
         n_head = len(merged.get("headers", {}))
         n_li = len(merged.get("line_items", []))
         source = "vision (no OCR text)" if via_vision else f"{len(chunks)} chunk(s)"
