@@ -197,12 +197,11 @@ class IDPDocumentClassifier(Node):
     def _tag_message(self, src: Any, predicted_type: str, confidence: float, reasoning: str) -> Message:
         from agentcore.services.idp.graph_native.payload import carry
 
-        # Put predicted_type in the IDP payload so routers resolve document_type via the shared channel,
-        # and keep the richer classification block on the Message for the extractor's multi-config routing.
-        msg = carry(src, predicted_type=predicted_type)
-        msg.additional_kwargs["classification"] = {
-            "type": predicted_type,
-            "confidence": confidence,
-            "reasoning": reasoning,
-        }
-        return msg
+        # Put BOTH predicted_type and the full classification block into the IDP working-set payload so
+        # the native engine preserves + shares them to the extractor (top-level additional_kwargs is
+        # stripped between nodes).
+        return carry(
+            src,
+            predicted_type=predicted_type,
+            classification={"type": predicted_type, "confidence": confidence, "reasoning": reasoning},
+        )

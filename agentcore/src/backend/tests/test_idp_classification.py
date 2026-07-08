@@ -388,6 +388,9 @@ async def test_classify_via_llm_includes_descriptions_in_prompt():
                     captured["prompt"] = messages[0].content
                     return {"parsed": ClassificationResult(predicted_type="Invoice", confidence=0.9, candidates={}), "raw": None}
             return _S()
+
+        async def ainvoke(self, messages):
+            raise RuntimeError("should not reach plain path")
     await classify_via_llm(_CapturingLLM(), ["Invoice"], "some text", descriptions={"Invoice": "a commercial tax invoice"})
     assert "a commercial tax invoice" in captured["prompt"]
 
@@ -398,3 +401,17 @@ async def test_classify_via_llm_carries_reasoning_from_json():
     fenced = '```json\n{"predicted_type": "Invoice", "confidence": 0.7, "candidates": {}, "reasoning": "has GSTIN and totals"}\n```'
     result = await classify_via_llm(_FakeLLMPlainOnly(fenced), ["Invoice"], "x")
     assert result.reasoning == "has GSTIN and totals"
+
+
+def test_tag_message_puts_classification_in_idp_payload():
+    from agentcore.components.IDP.document_classifier import IDPDocumentClassifier
+    from agentcore.services.idp.graph_native.payload import get_payload
+    from agentcore.schema.message import Message
+
+    comp = IDPDocumentClassifier()
+    src = Message(text="TAX INVOICE", additional_kwargs={"idp": {"document_id": "d1"}})
+    out = comp._tag_message(src, "Invoice", 0.9, "matches invoice layout")
+    payload = get_payload(out)
+    assert payload.get("predicted_type") == "Invoice"
+    assert (payload.get("classification") or {}).get("type") == "Invoice"   # rides in idp, not top-level
+    assert payload.get("document_id") == "d1"                                # envelope preserved

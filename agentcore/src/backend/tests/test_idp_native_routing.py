@@ -452,14 +452,15 @@ def test_output_parser_prefers_the_branch_with_text():
 
 
 def test_classifier_tags_predicted_type_into_payload():
-    """The Document Classifier writes predicted_type into the IDP payload (routers resolve it) AND the
-    classification block (extractor multi-config routing) — the native-engine contract."""
+    """The Document Classifier writes predicted_type AND the full classification block into the IDP
+    payload (routers + extractor resolve them) — the native-engine contract.  Both ride inside
+    additional_kwargs['idp'] so they survive node-to-node in the native engine."""
     from agentcore.components.IDP.document_classifier import IDPDocumentClassifier
 
     out = IDPDocumentClassifier()._tag_message(
         new_message(text="INVOICE #1", document_id="d"), "invoice", 0.95, "has invoice number")
     assert get_payload(out).get("predicted_type") == "invoice"
-    assert out.additional_kwargs.get("classification", {}).get("type") == "invoice"
+    assert get_payload(out).get("classification", {}).get("type") == "invoice"
 
 
 def test_classifier_survives_structured_output_none():
