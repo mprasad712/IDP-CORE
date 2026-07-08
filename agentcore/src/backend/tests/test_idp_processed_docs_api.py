@@ -111,6 +111,88 @@ async def test_soft_deleted_doc_blocks_export_patch_review_approve():
 
 
 @pytest.mark.anyio
+async def test_processed_docs_list_exposes_split_parent_and_child():
+    """The list endpoint must return both a split parent and its child document.
+    parent_document_id must be populated on the child so the frontend can group them."""
+    from fastapi_pagination import Params
+    from agentcore.services.deps import session_scope
+    from agentcore.api.idp import processed_docs as pd
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.database.models.idp.config import IdpAgent
+    from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
+
+    parent_id = child_id = job_parent_id = job_child_id = None
+
+    async with session_scope() as s:
+        base = Agent(id=uuid4(), name="Split Group Test Agent", data={"nodes": []})
+        s.add(base)
+        await s.flush()
+
+        idp = IdpAgent(
+            id=uuid4(), agent_id=base.id,
+            extraction_mode="dynamic_prompting",
+            default_rule_action="pending_review",
+            extra={"has_processed_docs_output": "true"},
+        )
+        s.add(idp)
+        await s.flush()
+
+        parent = IdpDocument(
+            id=uuid4(), agent_id=idp.id, original_filename="bundle.pdf",
+            file_path=f"{idp.id}/bundle.pdf", file_type="pdf",
+            file_size_bytes=200, source="upload", status="split",
+        )
+        s.add(parent)
+        await s.flush()
+
+        child = IdpDocument(
+            id=uuid4(), agent_id=idp.id, original_filename="bundle_p1.pdf",
+            file_path=f"{idp.id}/bundle_p1.pdf", file_type="pdf",
+            file_size_bytes=80, source="upload", status="pending_review",
+            parent_document_id=parent.id,
+        )
+        s.add(child)
+
+        job_p = IdpProcessingJob(id=uuid4(), document_id=parent.id, agent_id=idp.id, status="completed")
+        job_c = IdpProcessingJob(id=uuid4(), document_id=child.id, agent_id=idp.id, status="completed")
+        s.add(job_p)
+        s.add(job_c)
+        await s.commit()
+
+        parent_id = parent.id
+        child_id = child.id
+        job_parent_id = job_p.id
+        job_child_id = job_c.id
+
+    try:
+        async with session_scope() as s:
+            result = await pd.list_processed_docs(
+                session=s,
+                current_user=_Root(),
+                params=Params(page=1, size=100),
+            )
+        item_map = {str(item.id): item for item in result.items}
+        assert str(parent_id) in item_map, "Split parent is missing from the list endpoint response"
+        assert str(child_id) in item_map, "Child document is missing from the list endpoint response"
+        assert item_map[str(parent_id)].status == "split"
+        assert item_map[str(child_id)].parent_document_id == parent_id
+    finally:
+        async with session_scope() as s:
+            for jid in (job_parent_id, job_child_id):
+                if jid:
+                    j = await s.get(IdpProcessingJob, jid)
+                    if j:
+                        await s.delete(j)
+            # delete child before parent (FK constraint on parent_document_id)
+            for did in (child_id, parent_id):
+                if did:
+                    d = await s.get(IdpDocument, did)
+                    if d:
+                        await s.delete(d)
+            await s.commit()
+
+
+@pytest.mark.anyio
 async def test_add_and_delete_line_item_row(monkeypatch):
     from agentcore.services.deps import session_scope
     from agentcore.api.idp import processed_docs as pd
