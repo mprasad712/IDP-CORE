@@ -437,7 +437,11 @@ def classify_via_rules(
                 predicted_type="unknown", confidence=0.0, candidates=scored,
                 reasoning="keyword match (no model): no candidate cleared the threshold",
             )
-        confidence = round(min(0.9, 0.5 + 0.4 * scored[best]), 4)
+        # Confidence is driven by the winning type's NAME-token match strength ONLY. Description tokens
+        # still influence ranking (via `scored`), but must NOT inflate a partial name match past the
+        # classifier's confidence gate (Codex [3]): full name match -> 0.9; half -> 0.7 (which falls
+        # below a typical 0.75 gate -> 'unknown').
+        confidence = round(min(0.9, 0.5 + 0.4 * name_hit_ratio[best]), 4)
         return ClassificationResult(
             predicted_type=best, confidence=confidence, candidates=scored,
             reasoning=f"keyword match (no model): '{best}' matched on name/description keywords",

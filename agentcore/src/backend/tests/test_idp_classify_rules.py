@@ -54,3 +54,12 @@ def test_rules_confidence_capped():
     # Heuristic confidence must never exceed the 0.9 cap (it's not a model-grade score).
     r = classify_via_rules(CANDIDATES, INVOICE_TEXT)
     assert r.confidence <= 0.9
+
+
+def test_rules_partial_name_match_stays_below_default_gate():
+    # Codex [3]: a doc that hits only HALF a multi-token name (+ description overlap) must NOT reach a
+    # model-grade confidence — it stays under the classifier's default 0.75 gate so it falls to 'unknown'
+    # (skip) rather than mis-routing to the wrong Field Configuration.
+    text = "quarterly report total amount summary vendor"  # has 'report', NOT 'medical'
+    r = classify_via_rules(["Medical Report"], text, descriptions={"Medical Report": "total amount vendor summary"})
+    assert r.confidence < 0.75

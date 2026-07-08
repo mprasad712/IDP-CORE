@@ -50,16 +50,18 @@ class IDPProcessedDocsOutput(Node):
         # on this local flag — not on the merged payload — to avoid acting on a shared-state
         # value that could (theoretically) bleed from a different document's run.
         local_terminal_decision: str = ""
+        local_skip_reason: str = ""
         for item in items:
             p = get_payload(item)
             if p:
                 payload = {**payload, **p}
                 if isinstance(p.get("extracted"), dict) and (p["extracted"].get("headers") or p["extracted"].get("line_items")):
                     extracted = p["extracted"]
-                # Capture terminal decision from LOCAL item payloads only.
+                # Capture terminal decision (+ its skip reason) from LOCAL item payloads only.
                 item_decision = str(p.get("decision") or "").strip().lower()
                 if item_decision in ("skipped", "dropped") and not local_terminal_decision:
                     local_terminal_decision = item_decision
+                    local_skip_reason = str(p.get("skip_reason") or "").strip()
             # Also accept a plain Data(extracted) output on the edge.
             data_dict = getattr(item, "data", None)
             if isinstance(data_dict, dict) and (data_dict.get("headers") or data_dict.get("line_items")):
@@ -103,6 +105,10 @@ class IDPProcessedDocsOutput(Node):
                 _finalized_statuses = ("skipped", "split", "failed", "reviewed", "auto_approved")
                 if doc is not None and doc.status not in _finalized_statuses:
                     doc.status = "skipped"
+                    # Preserve the skip REASON for the UI (a stale-read of `doc` here can otherwise
+                    # clobber the error_message that the extractor's _mark_skipped committed).
+                    if local_skip_reason:
+                        doc.error_message = local_skip_reason
                     session.add(doc)
                     await session.commit()
                 self.status = "Document skipped/dropped upstream — ProcessedDocsOutput left it unchanged."
