@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -112,6 +114,162 @@ def detect_document_boundaries(
             boundaries.append((start, end))
 
     return boundaries
+
+
+# ── hybrid multi-doc boundary detection (rules + optional LLM) ───────────────
+_PAGE_ONE_RE = re.compile(r"\bpage\s+0*1\b", re.IGNORECASE)
+_HEADER_KEYWORDS = (
+    "invoice", "delivery note", "purchase order", "statement", "receipt",
+    "aadhaar", "pan", "passport", "kyc", "agreement", "terms",
+)
+_LLM_TIMEOUT = 60  # seconds
+
+
+def _boundaries_from_page_texts(
+    page_texts: dict[int, str],
+    page_count: int,
+) -> tuple[list[tuple[int, int]], bool, bool]:
+    """Textual heuristic boundaries from per-page text.
+
+    Returns (0-based inclusive ranges, has_strong, has_header_hint).
+    Only RELIABLE signals — a blank separator page or a 'Page 1' reset — create a
+    boundary here (has_strong). A header keyword on a later page is a WEAK hint only:
+    it does NOT split (that would falsely cut a long single document whose sections
+    reuse keywords); it just sets has_header_hint so the hybrid layer escalates to
+    the LLM. Never raises.
+    """
+    max_pages = page_count if page_count and page_count > 0 else (max(page_texts.keys(), default=-1) + 1)
+    if max_pages <= 0:
+        return [], False, False
+
+    starts = [0]
+    has_strong = False
+    has_header_hint = False
+    for i in range(1, max_pages):
+        text = (page_texts.get(i) or "").strip()
+        if len(text) < 10:
+            continue  # blank page never STARTS a document
+        prev = (page_texts.get(i - 1) or "").strip()
+        is_prev_blank = len(prev) < 10
+        is_page_one = bool(_PAGE_ONE_RE.search(text))
+        first_lines = "\n".join(text.lower().split("\n")[:3])
+        is_header = any(k in first_lines for k in _HEADER_KEYWORDS)
+        if is_prev_blank or is_page_one:
+            starts.append(i)             # STRONG signal -> a real boundary
+            has_strong = True
+        elif is_header:
+            has_header_hint = True        # WEAK hint only -> do NOT split; escalate to LLM
+
+    starts = sorted(set(starts))
+    boundaries: list[tuple[int, int]] = []
+    for idx, start in enumerate(starts):
+        end = starts[idx + 1] - 1 if idx + 1 < len(starts) else max_pages - 1
+        # trim TRULY blank separator pages (empty after strip) from both ends —
+        # short-but-valid content pages (e.g. "x", "items") must NOT be trimmed
+        while end > start and not (page_texts.get(end) or "").strip():
+            end -= 1
+        while start < end and not (page_texts.get(start) or "").strip():
+            start += 1
+        if (page_texts.get(start) or "").strip() or start == end:
+            boundaries.append((start, end))
+    return (boundaries or [(0, max_pages - 1)]), has_strong, has_header_hint
+
+
+async def _boundaries_via_llm(
+    page_texts: dict[int, str],
+    page_images: list[tuple[bytes, str]],
+    llm_model,
+    page_count: int,
+) -> tuple[list[tuple[int, int]] | None, list[str] | None]:
+    """Ask the (optional, possibly vision-capable) LLM which pages START a new document AND each type.
+
+    Sends per-page text and, when available, page images. Returns (0-based inclusive ranges,
+    per-segment types) or (None, None) on failure. Never raises.
+    """
+    from langchain_core.messages import SystemMessage, HumanMessage
+    import base64
+
+    n = page_count if page_count and page_count > 0 else (max(page_texts.keys(), default=-1) + 1)
+    if n <= 1:
+        return [(0, max(0, n - 1))], None
+
+    sys_prompt = (
+        "You segment a multi-document PDF. Given each page's text (and image when provided), decide which "
+        "pages START a new document and the TYPE of each document (e.g. Invoice, Delivery Note, Aadhaar, "
+        "PAN, Medical Report, Terms). A bundle may contain several documents. Page 1 always starts the "
+        "first document. Respond ONLY with JSON: {\"segments\": [{\"start_page\": 1, \"type\": \"Invoice\"}, ...]} "
+        "(1-based page numbers, ascending, always including page 1; use \"unknown\" if unsure of a type)."
+    )
+    text_block = "\n".join(f"--- PAGE {i + 1} ---\n{(page_texts.get(i) or '')[:800]}" for i in range(n))
+    content: list = [{"type": "text", "text": text_block}]
+    for img_bytes, mime in (page_images or []):
+        b64 = base64.b64encode(img_bytes).decode("utf-8")
+        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+    messages = [SystemMessage(content=sys_prompt), HumanMessage(content=content)]
+
+    try:
+        response = await asyncio.wait_for(llm_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
+        raw = response.content if hasattr(response, "content") else str(response)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[split] LLM boundary detection failed: {exc}")
+        return None, None
+
+    try:
+        content_str = raw.strip()
+        if content_str.startswith("```"):
+            lines = content_str.split("\n")
+            if lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            content_str = "\n".join(lines).strip()
+        segments = json.loads(content_str).get("segments") or []
+        pairs: dict[int, str] = {}
+        for seg in segments:
+            s = max(0, int(seg.get("start_page", 1)) - 1)
+            if s < n:
+                pairs[s] = str(seg.get("type") or "unknown")
+        pairs.setdefault(0, "unknown")
+        starts = sorted(pairs.keys())
+        boundaries, types = [], []
+        for idx, s in enumerate(starts):
+            e = starts[idx + 1] - 1 if idx + 1 < len(starts) else n - 1
+            boundaries.append((s, e))
+            types.append(pairs[s])
+        return (boundaries or [(0, n - 1)]), (types or None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[split] LLM boundary parse failed: {exc}")
+        return None, None
+
+
+async def detect_boundaries_hybrid(
+    page_texts: dict[int, str],
+    page_images: list[tuple[bytes, str]],
+    llm_model,
+    page_count: int,
+) -> tuple[list[tuple[int, int]], list[str] | None]:
+    """Hybrid detection that works in ALL scenarios and never false-splits without confirmation.
+
+    Returns (boundaries, seg_types); seg_types (per-boundary type strings) is present only when
+    the LLM path ran, else None. Rules yield a boundary ONLY on strong signals (blank page /
+    'Page 1'); header hints escalate to the LLM when a model is connected; no model -> strong
+    splits only; LLM fail -> conservative. Never raises.
+    """
+    n = page_count if page_count and page_count > 0 else (max(page_texts.keys(), default=-1) + 1)
+    single = [(0, max(0, n - 1))]
+    boundaries, has_strong, has_header_hint = _boundaries_from_page_texts(page_texts, page_count)
+    confident = has_strong and len(boundaries) >= 2
+
+    if llm_model is None:
+        return (boundaries if confident else single), None
+    if confident:
+        return boundaries, None
+    if n <= 1:
+        return single, None
+    llm_boundaries, seg_types = await _boundaries_via_llm(page_texts, page_images, llm_model, page_count)
+    if llm_boundaries and len(llm_boundaries) >= 2:
+        return llm_boundaries, seg_types
+    return (boundaries if confident else single), None
 
 
 async def materialize_children(
