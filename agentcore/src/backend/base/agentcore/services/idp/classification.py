@@ -27,6 +27,7 @@ class ClassificationResult(BaseModel):
     predicted_type: str = Field(description="The matching document type from the provided list, or 'unknown'.")
     confidence: float = Field(description="Confidence score between 0.0 and 1.0.")
     candidates: Dict[str, float] = Field(description="Dictionary of top candidate types and their confidence scores.")
+    reasoning: str = Field(default="", description="A brief explanation of why this type was chosen.")
 
 
 async def classify_and_persist(
@@ -319,19 +320,24 @@ async def classify_and_persist(
     return res
 
 
-async def classify_via_llm(llm_model, doc_types: list[str], text: str, *, timeout: float = _LLM_TIMEOUT) -> ClassificationResult:
+async def classify_via_llm(llm_model, doc_types: list[str], text: str, *, descriptions: dict | None = None, timeout: float = _LLM_TIMEOUT) -> ClassificationResult:
     """Robust document classification from text — the SAME include_raw + timeout + fallback logic the
     fixed pipeline uses, factored out so the native DocumentClassifier node gets identical behaviour.
-    Never raises: returns ClassificationResult(unknown, 0.0, {}) on any failure."""
+    When ``descriptions`` (type -> description) is given, they enrich the prompt to disambiguate similar
+    types. Never raises: returns ClassificationResult(unknown, 0.0, {}) on any failure."""
     from langchain_core.messages import SystemMessage, HumanMessage
 
-    types_desc = ", ".join(doc_types)
+    if descriptions:
+        types_block = "\n".join(f"- {t}: {descriptions.get(t, t)}" for t in doc_types)
+    else:
+        types_block = ", ".join(doc_types)
     system_prompt = (
         "You are an expert Document Classifier.\n"
         "Classify the document text into exactly one of the following types:\n\n"
-        f"{types_desc}\n\n"
+        f"{types_block}\n\n"
         "If the document does not match any of these types, return 'unknown' as predicted_type.\n"
-        "Provide a confidence score (0.0 to 1.0) and include other top candidate types in the candidates dictionary."
+        "Provide a confidence score (0.0 to 1.0), a brief reasoning, and include other top candidate "
+        "types in the candidates dictionary."
     )
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=f"Document Text:\n{text[:4000]}")]
 
@@ -364,6 +370,7 @@ async def classify_via_llm(llm_model, doc_types: list[str], text: str, *, timeou
                 predicted_type=parsed.get("predicted_type", "unknown"),
                 confidence=float(parsed.get("confidence", 0.0)),
                 candidates=parsed.get("candidates", {}),
+                reasoning=parsed.get("reasoning", ""),
             )
         except Exception as exc:
             logger.error(f"[classify_via_llm] parsing failed: {exc}")

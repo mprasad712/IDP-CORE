@@ -355,3 +355,46 @@ async def test_classify_via_llm_sentinel_on_all_failures():
     result = await classify_via_llm(_FakeLLMPlainOnly("this is not json at all"), ["Invoice"], "some text")
     assert result.predicted_type == "unknown"
     assert result.confidence == 0.0
+
+
+@pytest.mark.anyio
+async def test_node_invoke_llm_delegates_to_robust_helper(monkeypatch):
+    from agentcore.components.IDP.document_classifier import IDPDocumentClassifier
+    from agentcore.services.idp.classification import ClassificationResult
+    seen = {}
+    async def fake(llm_model, doc_types, text, *, descriptions=None, timeout=None):
+        seen["descriptions"] = descriptions
+        return ClassificationResult(predicted_type="Invoice", confidence=0.9, candidates={"Invoice": 0.9})
+    monkeypatch.setattr("agentcore.services.idp.classification.classify_via_llm", fake, raising=True)
+    comp = IDPDocumentClassifier()
+    comp.document_types = ["Invoice", "Aadhaar Card"]
+    result = await comp._invoke_llm(object(), doc_types=["Invoice", "Aadhaar Card"], text="TAX INVOICE",
+                                    descriptions={"Invoice": "a tax invoice"})
+    assert result.predicted_type == "Invoice"
+    assert result.confidence == pytest.approx(0.9)
+    assert seen["descriptions"] == {"Invoice": "a tax invoice"}   # descriptions reach the helper
+
+
+@pytest.mark.anyio
+async def test_classify_via_llm_includes_descriptions_in_prompt():
+    from agentcore.services.idp.classification import classify_via_llm, ClassificationResult
+    captured = {}
+    class _CapturingLLM:
+        def with_structured_output(self, schema, include_raw=False):
+            if not include_raw:
+                raise TypeError("need include_raw")
+            class _S:
+                async def ainvoke(self, messages):
+                    captured["prompt"] = messages[0].content
+                    return {"parsed": ClassificationResult(predicted_type="Invoice", confidence=0.9, candidates={}), "raw": None}
+            return _S()
+    await classify_via_llm(_CapturingLLM(), ["Invoice"], "some text", descriptions={"Invoice": "a commercial tax invoice"})
+    assert "a commercial tax invoice" in captured["prompt"]
+
+
+@pytest.mark.anyio
+async def test_classify_via_llm_carries_reasoning_from_json():
+    from agentcore.services.idp.classification import classify_via_llm
+    fenced = '```json\n{"predicted_type": "Invoice", "confidence": 0.7, "candidates": {}, "reasoning": "has GSTIN and totals"}\n```'
+    result = await classify_via_llm(_FakeLLMPlainOnly(fenced), ["Invoice"], "x")
+    assert result.reasoning == "has GSTIN and totals"

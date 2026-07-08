@@ -95,11 +95,8 @@ class IDPDocumentClassifier(Node):
     # ── classify ─────────────────────────────────────────────────────────
 
     async def classify(self) -> Message:
-        from langchain_core.messages import HumanMessage, SystemMessage
         from agentcore.services.deps import session_scope
         from agentcore.services.database.models.idp.config import IdpFieldConfiguration
-        from agentcore.services.idp.classification import ClassificationResult
-        from sqlalchemy.sql import func
         from sqlmodel import select
 
         src = self.document
@@ -110,7 +107,7 @@ class IDPDocumentClassifier(Node):
             logger.warning("[DocumentClassifier] No document types selected — returning 'unknown'.")
             return self._tag_message(src, "unknown", 0.0, "No document types configured.")
 
-        # Build type list with descriptions from field configs
+        # Build type -> description map from field configs to enrich the classification prompt
         async with session_scope() as session:
             type_descriptions: dict[str, str] = {}
             for dt in selected_types:
@@ -123,34 +120,13 @@ class IDPDocumentClassifier(Node):
                     )
                     .limit(1)
                 )).first()
-                if config and config.description:
-                    type_descriptions[dt] = config.description
-                else:
-                    type_descriptions[dt] = dt
-
-        types_block = "\n".join(
-            f"- {dt}: {desc}" for dt, desc in type_descriptions.items()
-        )
-        system_prompt = (
-            "You are an expert Document Classifier.\n"
-            "Classify the document text into exactly one of the following types:\n\n"
-            f"{types_block}\n\n"
-            "If the document does not match any of these types, return 'unknown'.\n"
-            "Respond ONLY with valid JSON matching this schema:\n"
-            '{"predicted_type": "<type>", "confidence": <0.0-1.0>, "reasoning": "<brief explanation>"}'
-        )
-        user_prompt = f"Document Text:\n{text[:4000]}"
-
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt),
-        ]
+                type_descriptions[dt] = config.description if (config and config.description) else dt
 
         llm_model = self.llm
         if llm_model is None:
             llm_model = self._build_fallback_model()
 
-        result = await self._invoke_llm(llm_model, messages)
+        result = await self._invoke_llm(llm_model, doc_types=selected_types, text=text, descriptions=type_descriptions)
 
         # Defensive: never trust the model call to return a result object (structured output can yield
         # None). getattr-with-default keeps the classifier from crashing the whole run.
@@ -185,42 +161,12 @@ class IDPDocumentClassifier(Node):
             logger.warning(f"[DocumentClassifier] Could not build fallback model: {exc}")
             return None
 
-    async def _invoke_llm(self, llm_model, messages) -> "ClassificationResult":
-        from agentcore.services.idp.classification import ClassificationResult
+    async def _invoke_llm(self, llm_model, messages=None, *, doc_types=None, text: str = "", descriptions=None) -> "ClassificationResult":
+        from agentcore.services.idp.classification import ClassificationResult, classify_via_llm
 
         if llm_model is None:
             return ClassificationResult(predicted_type="unknown", confidence=0.0, candidates={})
-
-        if hasattr(llm_model, "with_structured_output"):
-            try:
-                structured = llm_model.with_structured_output(ClassificationResult)
-                structured_result = await structured.ainvoke(messages)
-                if structured_result is not None:
-                    return structured_result
-                # Some models return None from structured output → fall through to plain JSON parsing.
-                logger.warning("[DocumentClassifier] Structured output returned None — falling back to plain invoke.")
-            except Exception as exc:
-                logger.warning(f"[DocumentClassifier] Structured output failed, falling back: {exc}")
-
-        try:
-            response = await llm_model.ainvoke(messages)
-            content = response.content if hasattr(response, "content") else str(response)
-            content = content.strip()
-            if content.startswith("```"):
-                lines = content.split("\n")
-                lines = lines[1:] if lines[0].strip().startswith("```") else lines
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                content = "\n".join(lines).strip()
-            parsed = json.loads(content)
-            return ClassificationResult(
-                predicted_type=parsed.get("predicted_type", "unknown"),
-                confidence=float(parsed.get("confidence", 0.0)),
-                candidates=parsed.get("candidates", {}),
-            )
-        except Exception as exc:
-            logger.error(f"[DocumentClassifier] LLM invocation failed: {exc}")
-            return ClassificationResult(predicted_type="unknown", confidence=0.0, candidates={})
+        return await classify_via_llm(llm_model, doc_types or [], text, descriptions=descriptions)
 
     async def _persist_predicted_type(self, src: Any, predicted_type: str) -> None:
         try:
