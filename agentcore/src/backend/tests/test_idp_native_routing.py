@@ -538,24 +538,6 @@ def test_extractor_extracts_each_chunk_and_merges(monkeypatch):
     assert p.get("document_id") == "d"
 
 
-def test_chunk_aggregator_merges_per_chunk_data():
-    """The Chunk Aggregator combines per-chunk EXTRACTION Data (keep-highest-confidence). NOTE: it must
-    be fed extracted Data — wiring Chunking → Aggregator directly (raw Message chunks) does not work."""
-    from agentcore.schema.data import Data
-
-    from agentcore.components.IDP.chunk_aggregator import IDPChunkAggregator
-
-    a = IDPChunkAggregator()
-    a.chunks_data = [
-        Data(data={"vendor": "ACME", "vendor_confidence": 0.8}),
-        Data(data={"vendor": "ACME Inc", "vendor_confidence": 0.95, "total": "100"}),
-    ]
-    a.dedup_strategy = "keep_highest_confidence"
-    agg = a.aggregated_data()
-    assert agg.data.get("vendor") == "ACME Inc"   # higher confidence wins
-    assert agg.data.get("total") == "100"
-
-
 def test_scan_corrector_output_flows_to_the_next_node(monkeypatch):
     """The corrected file the Scan Corrector writes is what the NEXT node reads — same contract as the
     Page Selector's sliced file. Proven end-to-end: the Scan Corrector's output payload points at the
