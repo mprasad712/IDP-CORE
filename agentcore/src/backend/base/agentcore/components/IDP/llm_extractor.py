@@ -65,6 +65,19 @@ class IDPLLMExtractor(Node):
                 "are marked 'skipped'. Leave empty to use the single 'Field Configuration Name' above."
             ),
         ),
+        DropdownInput(
+            name="unmatched_action",
+            display_name="On unmatched type",
+            options=["skip", "extract_anyway", "drop"],
+            value="skip",
+            advanced=True,
+            info=(
+                "What to do when a document's classified type matches NONE of the selected Field "
+                "Configurations (e.g. a medical report in an invoice-only agent). 'skip' (default): mark it "
+                "Skipped for review. 'extract_anyway': force it through the first selected config. 'drop': "
+                "discard it (soft-deleted, hidden from Processed Docs). Requires a Document Classifier upstream."
+            ),
+        ),
         MessageTextInput(
             name="model_name",
             display_name="LLM Model",
@@ -130,10 +143,15 @@ class IDPLLMExtractor(Node):
         classification = payload.get("classification") or (
             (src.additional_kwargs or {}).get("classification", {}) if isinstance(src, Message) else {}
         )
+        classifier_ran = bool(classification.get("type"))
         classified_type = (classification.get("type") or "").strip().lower()
         if not classified_type or classified_type == "unknown":
-            # No classifier upstream. With ONE selected config there's nothing to route — just use it.
-            # With several, we can't disambiguate without a classification, so skip.
+            # A Document Classifier RAN and could not identify the type -> treat as no-match so the
+            # extractor's 'On unmatched type' action decides (skip/extract_anyway/drop), even for a single
+            # selected config. NO classifier upstream -> nothing to route on: a single config is used
+            # directly; several can't be disambiguated -> skip.
+            if classifier_ran:
+                return None
             return config_names[0] if len(config_names) == 1 else None
 
         try:
@@ -280,6 +298,46 @@ class IDPLLMExtractor(Node):
         self.status = f"Skipped — {reason}"
         return Data(data={})
 
+    async def _handle_unmatched(self, classified_type: str, config_names: list) -> "Data | None":
+        """Apply the 'On unmatched type' action when the classified type matches no selected config.
+        Returns terminal Data for 'skip'/'drop'; returns None for 'extract_anyway' (caller proceeds, with
+        self._override_config_name already set to the first selected config)."""
+        action = str(getattr(self, "unmatched_action", "skip") or "skip").strip()
+        if action == "extract_anyway":
+            self._override_config_name = config_names[0] if config_names else None
+            self.status = f"Unmatched type '{classified_type}' — extracting anyway with '{self._override_config_name}'."
+            return None
+        if action == "drop":
+            return await self._drop_document(classified_type)
+        return await self._mark_skipped(classified_type)   # 'skip' (default)
+
+    async def _drop_document(self, classified_type: str) -> Data:
+        """unmatched_action='drop': soft-delete the document (hidden from Processed Docs) + return empty Data."""
+        from datetime import datetime, timezone
+        src = self.document
+        try:
+            from agentcore.services.deps import session_scope
+            from agentcore.services.database.models.idp.documents import IdpDocument
+            from agentcore.services.idp.graph_native.payload import effective_payload
+            from uuid import UUID
+            doc_id_raw = effective_payload(self, src).get("document_id") or (
+                (src.additional_kwargs or {}).get("document_id") if isinstance(src, Message) else None
+            )
+            if doc_id_raw:
+                doc_id = UUID(str(doc_id_raw))
+                async with session_scope() as session:
+                    doc = await session.get(IdpDocument, doc_id)
+                    if doc:
+                        doc.deleted_at = datetime.now(timezone.utc)
+                        doc.status = "skipped"   # valid CheckConstraint status; deleted_at hides it from review
+                        doc.error_message = f"Dropped — unmatched type '{classified_type}' (On unmatched type = drop)."
+                        session.add(doc)
+                        await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[AIFieldExtractor] Could not drop document: {exc}")
+        self.status = f"Dropped — unmatched type '{classified_type}'."
+        return Data(data={})
+
     async def extract(self) -> Data:
         src = self.document
         # Long-document support: the Chunking Strategy node feeds a LIST of chunk Messages. Extract each
@@ -323,9 +381,14 @@ class IDPLLMExtractor(Node):
             # classifier can't be disambiguated → skip.
             matched_config = await self._resolve_config_name_from_classification()
             if matched_config is None:
-                return await self._mark_skipped(classified_type)
-            # Override single config_name with the matched one
-            self._override_config_name = matched_config
+                # classified type matches no selected config -> apply the 'On unmatched type' action
+                unmatched = await self._handle_unmatched(classified_type, config_names)
+                if unmatched is not None:
+                    return unmatched        # skip / drop -> terminal
+                # extract_anyway -> _handle_unmatched set self._override_config_name; fall through to extract
+            else:
+                # Override single config_name with the matched one
+                self._override_config_name = matched_config
         else:
             self._override_config_name = None
 

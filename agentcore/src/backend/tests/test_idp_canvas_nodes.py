@@ -451,3 +451,60 @@ def test_document_splitter_is_registered():
     comp = IDPDocumentSplitter()
     names = {o.name for o in comp.outputs}
     assert names == {"single_document", "split"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. AI Field Extractor — "On unmatched type" control (Task 4b)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.anyio
+async def test_extractor_classifier_unknown_single_config_returns_none():
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.message import Message
+    comp = IDPLLMExtractor()
+    comp.config_names = ["Invoice"]
+    comp.document = Message(text="x", additional_kwargs={"idp": {"classification": {"type": "unknown"}}})
+    assert await comp._resolve_config_name_from_classification() is None   # classifier ran, unknown -> no-match
+
+
+@pytest.mark.anyio
+async def test_extractor_no_classifier_single_config_uses_it():
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.message import Message
+    comp = IDPLLMExtractor()
+    comp.config_names = ["Invoice"]
+    comp.document = Message(text="x", additional_kwargs={"idp": {}})   # NO classifier
+    assert await comp._resolve_config_name_from_classification() == "Invoice"   # unchanged behavior
+
+
+@pytest.mark.anyio
+async def test_handle_unmatched_skip(monkeypatch):
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.data import Data
+    comp = IDPLLMExtractor(); comp.unmatched_action = "skip"
+    seen = {}
+    async def fake_skip(self, ct): seen["ct"] = ct; return Data(data={})
+    monkeypatch.setattr(IDPLLMExtractor, "_mark_skipped", fake_skip, raising=True)
+    out = await comp._handle_unmatched("medical report", ["Invoice"])
+    assert isinstance(out, Data) and seen["ct"] == "medical report"
+
+
+@pytest.mark.anyio
+async def test_handle_unmatched_extract_anyway():
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    comp = IDPLLMExtractor(); comp.unmatched_action = "extract_anyway"
+    out = await comp._handle_unmatched("medical report", ["Invoice"])
+    assert out is None                          # proceed to extraction
+    assert comp._override_config_name == "Invoice"
+
+
+@pytest.mark.anyio
+async def test_handle_unmatched_drop(monkeypatch):
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.data import Data
+    comp = IDPLLMExtractor(); comp.unmatched_action = "drop"
+    seen = {}
+    async def fake_drop(self, ct): seen["ct"] = ct; return Data(data={})
+    monkeypatch.setattr(IDPLLMExtractor, "_drop_document", fake_drop, raising=True)
+    out = await comp._handle_unmatched("medical report", ["Invoice"])
+    assert isinstance(out, Data) and seen["ct"] == "medical report"
