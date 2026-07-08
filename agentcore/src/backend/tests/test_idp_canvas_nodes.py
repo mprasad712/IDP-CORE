@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 from uuid import uuid4
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -372,3 +373,67 @@ async def test_route_transient_canvas_rules_evaluation():
     flow_or = MockFlow()
     status_or = await _route(session, doc_id, job_id, agent_id, 0.80, cfg, flow_or)
     assert status_or == "auto_approved"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Shared-channel classification routing (Task 5)
+#    The classification lives ONLY in the shared IDP working-set snapshot, NOT
+#    in the immediate input Message's payload.  effective_payload() must surface
+#    it; get_payload() (old code) cannot — that's the regression this covers.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _T5Vertex:
+    def __init__(self, snap):
+        self._idp_shared_snapshot = snap
+
+
+class _T5ExecRes:
+    def __init__(self, row):
+        self._row = row
+    def first(self):
+        return self._row
+
+
+class _T5Sess:
+    def __init__(self, rows):
+        self._rows = list(rows)
+    async def exec(self, stmt):
+        return _T5ExecRes(self._rows.pop(0) if self._rows else None)
+
+
+class _T5Scope:
+    def __init__(self, sess):
+        self._sess = sess
+    async def __aenter__(self):
+        return self._sess
+    async def __aexit__(self, *a):
+        return False
+
+
+@pytest.mark.anyio
+async def test_extractor_resolves_config_from_shared_channel(monkeypatch):
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.message import Message
+    rows = [SimpleNamespace(name="Invoice", doc_type="Invoice"),
+            SimpleNamespace(name="Aadhaar Card", doc_type="Aadhaar Card")]
+    monkeypatch.setattr("agentcore.services.deps.session_scope", lambda: _T5Scope(_T5Sess(rows)))
+    comp = IDPLLMExtractor()
+    comp.config_names = ["Invoice", "Aadhaar Card"]
+    comp.document = Message(text="TAX INVOICE", additional_kwargs={"idp": {"document_id": "d1"}})  # NO classification locally
+    comp._vertex = _T5Vertex({"classification": {"type": "invoice"}, "document_id": "d1"})          # only in the shared channel
+    assert await comp._resolve_config_name_from_classification() == "Invoice"
+
+
+@pytest.mark.anyio
+async def test_extractor_skips_when_shared_classification_matches_no_config(monkeypatch):
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.message import Message
+    rows = [SimpleNamespace(name="Invoice", doc_type="Invoice"),
+            SimpleNamespace(name="Aadhaar Card", doc_type="Aadhaar Card")]
+    monkeypatch.setattr("agentcore.services.deps.session_scope", lambda: _T5Scope(_T5Sess(rows)))
+    comp = IDPLLMExtractor()
+    comp.config_names = ["Invoice", "Aadhaar Card"]
+    comp.document = Message(text="MEMO", additional_kwargs={"idp": {"document_id": "d2"}})
+    comp._vertex = _T5Vertex({"classification": {"type": "memo"}})
+    assert await comp._resolve_config_name_from_classification() is None   # no doc_type matches "memo" -> skip

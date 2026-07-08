@@ -121,12 +121,12 @@ class IDPLLMExtractor(Node):
         if not config_names:
             return None
 
-        from agentcore.services.idp.graph_native.payload import get_payload
+        from agentcore.services.idp.graph_native.payload import effective_payload
 
         src = src if src is not None else self.document
-        # A Document Classifier node carries the classification in the IDP payload; fall back to a
-        # top-level additional_kwargs for compatibility.
-        payload = get_payload(src)
+        # Read the classification shared-channel-aware so it survives intermediate nodes (chunking,
+        # etc.); fall back to top-level additional_kwargs for compatibility.
+        payload = effective_payload(self, src)
         classification = payload.get("classification") or (
             (src.additional_kwargs or {}).get("classification", {}) if isinstance(src, Message) else {}
         )
@@ -311,9 +311,9 @@ class IDPLLMExtractor(Node):
         # Multi-config routing: if config_names is populated, resolve the right config
         # based on the upstream classification or skip if no match.
         if config_names and self.extraction_mode == "field_configuration":
-            from agentcore.services.idp.graph_native.payload import get_payload
+            from agentcore.services.idp.graph_native.payload import effective_payload
 
-            classification = get_payload(src).get("classification") or (
+            classification = effective_payload(self, src).get("classification") or (
                 (src.additional_kwargs or {}).get("classification", {}) if isinstance(src, Message) else {}
             )
             classified_type = (classification.get("type") or "unknown").strip()
