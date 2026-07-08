@@ -300,6 +300,23 @@ async def test_classification_clamps_out_of_range_confidence(monkeypatch):
 # Pure unit tests for classify_via_llm — no DB, no network
 # ---------------------------------------------------------------------------
 
+class _FakeResponse:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeLLMPlainOnly:
+    """structured output always fails -> forces the plain ainvoke + JSON-parse fallback path."""
+    def __init__(self, content):
+        self._content = content
+
+    def with_structured_output(self, schema, include_raw=False):
+        raise RuntimeError("structured output unavailable")
+
+    async def ainvoke(self, messages):
+        return _FakeResponse(self._content)
+
+
 class _FakeStructured:
     def __init__(self, payload): self._p = payload
     async def ainvoke(self, messages): return {"parsed": self._p, "raw": None}
@@ -320,3 +337,21 @@ async def test_classify_via_llm_uses_include_raw_and_returns_type():
     result = await classify_via_llm(llm, ["Invoice", "Aadhaar Card"], "TAX INVOICE INV-2026-0042")
     assert result.predicted_type == "Invoice"
     assert result.confidence == pytest.approx(0.9)
+
+
+@pytest.mark.anyio
+async def test_classify_via_llm_json_fallback():
+    from agentcore.services.idp.classification import classify_via_llm
+    fenced = '```json\n{"predicted_type": "Invoice", "confidence": 0.8, "candidates": {}}\n```'
+    result = await classify_via_llm(_FakeLLMPlainOnly(fenced), ["Invoice", "Aadhaar Card"], "TAX INVOICE")
+    assert result.predicted_type == "Invoice"
+    assert result.confidence == pytest.approx(0.8)
+
+
+@pytest.mark.anyio
+async def test_classify_via_llm_sentinel_on_all_failures():
+    from agentcore.services.idp.classification import classify_via_llm
+    # structured output raises AND the plain response is non-JSON -> must return the sentinel, never raise
+    result = await classify_via_llm(_FakeLLMPlainOnly("this is not json at all"), ["Invoice"], "some text")
+    assert result.predicted_type == "unknown"
+    assert result.confidence == 0.0

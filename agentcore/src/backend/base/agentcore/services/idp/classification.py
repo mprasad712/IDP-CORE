@@ -319,7 +319,7 @@ async def classify_and_persist(
     return res
 
 
-async def classify_via_llm(llm_model, doc_types, text, *, timeout: float = _LLM_TIMEOUT) -> "ClassificationResult":
+async def classify_via_llm(llm_model, doc_types: list[str], text: str, *, timeout: float = _LLM_TIMEOUT) -> ClassificationResult:
     """Robust document classification from text — the SAME include_raw + timeout + fallback logic the
     fixed pipeline uses, factored out so the native DocumentClassifier node gets identical behaviour.
     Never raises: returns ClassificationResult(unknown, 0.0, {}) on any failure."""
