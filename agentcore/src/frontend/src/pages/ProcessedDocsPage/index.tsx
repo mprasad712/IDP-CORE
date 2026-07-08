@@ -312,77 +312,6 @@ function evidenceTitle(f: FieldEvidence): string {
   return parts.join("\n");
 }
 
-// ─── Seed data ────────────────────────────────────────────────────────────────
-
-const SEED_DOCS: ProcessedDoc[] = [
-  {
-    id: "1",
-    name: "INV-2026-00142.pdf",
-    sourceAgent: "Invoice Processor",
-    dateProcessed: "2026-06-04 09:12",
-    documentType: "Invoice",
-    fileType: "pdf",
-    overallConfidence: 92,
-    status: "auto_approved",
-    parentDocumentId: null,
-    headerFields: [
-      { key: "invoice_number", value: "INV-2026-00142",    confidence: 98 },
-      { key: "invoice_date",   value: "2026-05-30",        confidence: 96 },
-      { key: "vendor_name",    value: "Acme Supplies Ltd", confidence: 91 },
-      { key: "total_amount",   value: "14,200.00",         confidence: 88 },
-      { key: "tax_amount",     value: "2,420.00",          confidence: 85 },
-    ],
-    lineItemColumns: ["description", "qty", "unit_price", "total"],
-    lineItems: [
-      { id: "r1", description: "Widget A",    qty: "10", unit_price: "500.00",   total: "5,000.00"  },
-      { id: "r2", description: "Widget B",    qty: "5",  unit_price: "800.00",   total: "4,000.00"  },
-      { id: "r3", description: "Service Fee", qty: "1",  unit_price: "2,780.00", total: "2,780.00"  },
-    ],
-  },
-  {
-    id: "2",
-    name: "PAN_CARD_scan.png",
-    sourceAgent: "KYC Extractor",
-    dateProcessed: "2026-06-04 09:45",
-    documentType: "PAN Card",
-    fileType: "png",
-    overallConfidence: 61,
-    status: "pending",
-    parentDocumentId: null,
-    headerFields: [
-      { key: "pan_number",    value: "ABCDE1234F",   confidence: 72 },
-      { key: "full_name",     value: "RAMESH KUMAR", confidence: 65 },
-      { key: "date_of_birth", value: "15/03/1985",   confidence: 54 },
-      { key: "father_name",   value: "",              confidence: 22 },
-    ],
-    lineItemColumns: [],
-    lineItems: [],
-  },
-  {
-    id: "3",
-    name: "receipt_20260603.jpg",
-    sourceAgent: "Receipt Scanner",
-    dateProcessed: "2026-06-03 17:20",
-    documentType: "Receipt",
-    fileType: "jpg",
-    overallConfidence: 88,
-    status: "reviewed",
-    parentDocumentId: null,
-    reviewer: "jane.doe@pwc.com",
-    reviewedAt: "2026-06-03 18:05",
-    headerFields: [
-      { key: "merchant_name",     value: "Starbucks",  confidence: 95 },
-      { key: "transaction_date",  value: "2026-06-03", confidence: 90 },
-      { key: "total_amount",      value: "340.50",     confidence: 85 },
-    ],
-    lineItemColumns: ["item", "price"],
-    lineItems: [
-      { id: "r1", item: "Caramel Macchiato", price: "320.00" },
-      { id: "r2", item: "Cookie",            price: "20.50"  },
-    ],
-  },
-];
-
 // ─── Confidence helpers ───────────────────────────────────────────────────────
 
 function confColor(score: number) {
@@ -1329,11 +1258,11 @@ export default function ProcessedDocsPage() {
     if (docId) setSelectedId(docId);
   }, []);
 
-  // Live data from the IDP backend only. (Demo SEED_DOCS removed so review queues / counts /
-  // tabs / search reflect real documents, not samples. SEED_DOCS definition kept but unused.)
+  // Live data from the IDP backend only — review queues / counts / tabs / search
+  // reflect real documents, not samples.
   const { data: docsPage } = useGetProcessedDocs({ size: 100 });
   const docs: ProcessedDoc[] = useMemo(
-    () => [...(docsPage?.items ?? []).map(listDocToPage) /*, ...SEED_DOCS */],
+    () => [...(docsPage?.items ?? []).map(listDocToPage)],
     [docsPage],
   );
   // Extracted fields/line-items come from the detail endpoint, fetched on select.
