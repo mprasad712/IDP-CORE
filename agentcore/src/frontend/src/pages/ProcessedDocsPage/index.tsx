@@ -18,7 +18,7 @@ import {
   GitCompare,
   Trash2,
 } from "lucide-react";
-import { useState, useMemo, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
+import { useState, useMemo, useEffect, useRef, Fragment, type MouseEvent as ReactMouseEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -67,7 +67,7 @@ import { RunMatchModal } from "./components/RunMatchModal";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type DocStatus = "pending" | "auto_approved" | "reviewed" | "skipped";
+type DocStatus = "pending" | "auto_approved" | "reviewed" | "skipped" | "split";
 
 interface ExtractedField {
   key: string;
@@ -139,6 +139,8 @@ interface ProcessedDoc {
   cellIds?: Record<string, Record<string, string>>;
   // rowId -> (columnName -> per-cell evidence), so line-item cells can show reasoning/source.
   cellMeta?: Record<string, Record<string, FieldEvidence>>;
+  // null for a top-level doc; set on child docs produced by the multi-doc splitter.
+  parentDocumentId: string | null;
 }
 
 // ─── API → page adapters ──────────────────────────────────────────────────────
@@ -147,6 +149,7 @@ function mapApiStatus(s: string): DocStatus {
   if (s === "auto_approved") return "auto_approved";
   if (s === "reviewed") return "reviewed";
   if (s === "skipped") return "skipped";
+  if (s === "split") return "split"; // multi-doc splitter parent — shown as group header only
   return "pending"; // pending_review, extracted, queued, processing, failed
 }
 
@@ -161,6 +164,7 @@ function listDocToPage(d: ApiProcessedDoc): ProcessedDoc {
     overallConfidence: Math.round((d.overall_confidence ?? 0) * 100),
     status: mapApiStatus(d.status),
     reviewDraft: d.review_draft ?? false,
+    parentDocumentId: d.parent_document_id ?? null,
     headerFields: [],
     lineItems: [],
     lineItemColumns: [],
@@ -320,6 +324,7 @@ const SEED_DOCS: ProcessedDoc[] = [
     fileType: "pdf",
     overallConfidence: 92,
     status: "auto_approved",
+    parentDocumentId: null,
     headerFields: [
       { key: "invoice_number", value: "INV-2026-00142",    confidence: 98 },
       { key: "invoice_date",   value: "2026-05-30",        confidence: 96 },
@@ -343,6 +348,7 @@ const SEED_DOCS: ProcessedDoc[] = [
     fileType: "png",
     overallConfidence: 61,
     status: "pending",
+    parentDocumentId: null,
     headerFields: [
       { key: "pan_number",    value: "ABCDE1234F",   confidence: 72 },
       { key: "full_name",     value: "RAMESH KUMAR", confidence: 65 },
@@ -361,6 +367,7 @@ const SEED_DOCS: ProcessedDoc[] = [
     fileType: "jpg",
     overallConfidence: 88,
     status: "reviewed",
+    parentDocumentId: null,
     reviewer: "jane.doe@pwc.com",
     reviewedAt: "2026-06-03 18:05",
     headerFields: [
@@ -411,6 +418,12 @@ function StatusChip({ status }: { status: DocStatus }) {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full bg-muted border border-border px-2.5 py-0.5 text-xs font-medium text-muted-foreground">
         <MinusCircle className="h-3 w-3" /> Skipped
+      </span>
+    );
+  if (status === "split")
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-muted border border-border px-2.5 py-0.5 text-xs font-medium text-muted-foreground">
+        <ListTree className="h-3 w-3" /> Split
       </span>
     );
   return (
@@ -1158,66 +1171,138 @@ function DocTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {docs.map((doc) => (
-            <TableRow
-              key={doc.id}
-              className="cursor-pointer group hover:bg-muted/20 transition-colors"
-              onClick={() => onView(doc)}
-            >
-              <TableCell>
-                <div className="flex items-center gap-2.5">
-                  <div className="h-7 w-7 rounded-lg bg-[#D04A02]/8 flex items-center justify-center flex-shrink-0">
-                    <FileText className="h-3.5 w-3.5 text-[#D04A02]/60" />
+          {(() => {
+            // Build parent→children map from all docs passed in (children have parentDocumentId set).
+            const childrenByParent = new Map<string, ProcessedDoc[]>();
+            for (const d of docs) {
+              if (d.parentDocumentId) {
+                const arr = childrenByParent.get(d.parentDocumentId) ?? [];
+                arr.push(d);
+                childrenByParent.set(d.parentDocumentId, arr);
+              }
+            }
+            // Top-level docs: those with no parent (regular docs + split parent group headers).
+            const topLevel = docs.filter((d) => !d.parentDocumentId);
+
+            // Render a normal reviewable row for a child or a standalone doc.
+            const renderDocRow = (doc: ProcessedDoc, indent = false) => (
+              <TableRow
+                key={doc.id}
+                className="cursor-pointer group hover:bg-muted/20 transition-colors"
+                onClick={() => onView(doc)}
+              >
+                <TableCell>
+                  <div className={cn("flex items-center gap-2.5", indent && "pl-8")}>
+                    {indent && <span className="text-muted-foreground text-sm select-none">↳</span>}
+                    <div className="h-7 w-7 rounded-lg bg-[#D04A02]/8 flex items-center justify-center flex-shrink-0">
+                      <FileText className="h-3.5 w-3.5 text-[#D04A02]/60" />
+                    </div>
+                    <span className="font-medium text-sm">{doc.name}</span>
                   </div>
-                  <span className="font-medium text-sm">{doc.name}</span>
-                </div>
-              </TableCell>
-              <TableCell className="text-sm text-muted-foreground">{doc.sourceAgent}</TableCell>
-              <TableCell className="text-sm text-muted-foreground tabular-nums">{doc.dateProcessed}</TableCell>
-              <TableCell>
-                <Badge variant="outline" className="text-xs rounded-md">{doc.documentType}</Badge>
-              </TableCell>
-              <TableCell className="text-center">
-                <ConfidencePill score={doc.overallConfidence} />
-              </TableCell>
-              <TableCell>
-                <div className="flex items-center gap-1.5">
-                  <StatusChip status={doc.status} />
-                  {doc.reviewDraft && doc.status === "pending" && (
-                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-400 text-amber-600">
-                      Draft
-                    </Badge>
-                  )}
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button
-                    title="View"
-                    onClick={(e) => { e.stopPropagation(); onView(doc); }}
-                    className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    <Eye className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    title="Export CSV"
-                    onClick={(e) => { e.stopPropagation(); exportDocData(doc.id, doc.name); }}
-                    className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    title="Delete"
-                    disabled={deleteDoc.isPending}
-                    onClick={(e) => handleDelete(e, doc)}
-                    className="p-1.5 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50 disabled:pointer-events-none"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </TableCell>
-            </TableRow>
-          ))}
+                </TableCell>
+                <TableCell className="text-sm text-muted-foreground">{doc.sourceAgent}</TableCell>
+                <TableCell className="text-sm text-muted-foreground tabular-nums">{doc.dateProcessed}</TableCell>
+                <TableCell>
+                  <Badge variant="outline" className="text-xs rounded-md">{doc.documentType}</Badge>
+                </TableCell>
+                <TableCell className="text-center">
+                  <ConfidencePill score={doc.overallConfidence} />
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-1.5">
+                    <StatusChip status={doc.status} />
+                    {doc.reviewDraft && doc.status === "pending" && (
+                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-400 text-amber-600">
+                        Draft
+                      </Badge>
+                    )}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      title="View"
+                      onClick={(e) => { e.stopPropagation(); onView(doc); }}
+                      className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      title="Export CSV"
+                      onClick={(e) => { e.stopPropagation(); exportDocData(doc.id, doc.name); }}
+                      className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      title="Delete"
+                      disabled={deleteDoc.isPending}
+                      onClick={(e) => handleDelete(e, doc)}
+                      className="p-1.5 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+
+            return topLevel.map((doc) => {
+              const kids = childrenByParent.get(doc.id) ?? [];
+              const isSplitParent = doc.status === "split" || kids.length > 0;
+
+              if (!isSplitParent) {
+                // Regular (non-split) doc — render as a normal flat row.
+                return renderDocRow(doc, false);
+              }
+
+              // Split parent — render a non-clickable group header row followed by indented child rows.
+              return (
+                <Fragment key={doc.id}>
+                  <TableRow className="bg-muted/30 hover:bg-muted/30">
+                    <TableCell>
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-7 w-7 rounded-lg bg-[#D04A02]/8 flex items-center justify-center flex-shrink-0">
+                          <ListTree className="h-3.5 w-3.5 text-[#D04A02]/60" />
+                        </div>
+                        <span className="font-medium text-sm">{doc.name}</span>
+                        {kids.length > 0 && (
+                          <Badge className="ml-1 text-[10px] px-1.5 py-0 bg-muted text-muted-foreground border border-border font-medium">
+                            Split into {kids.length}
+                          </Badge>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">{doc.sourceAgent}</TableCell>
+                    <TableCell className="text-sm text-muted-foreground tabular-nums">{doc.dateProcessed}</TableCell>
+                    <TableCell>
+                      <Badge variant="outline" className="text-xs rounded-md">{doc.documentType}</Badge>
+                    </TableCell>
+                    {/* No confidence pill for a split parent — it has no extracted data of its own. */}
+                    <TableCell className="text-center">
+                      <span className="text-muted-foreground text-sm">—</span>
+                    </TableCell>
+                    <TableCell>
+                      <StatusChip status={doc.status} />
+                    </TableCell>
+                    {/* "View original" action only — no export/delete on the group header. */}
+                    <TableCell>
+                      <div className="flex items-center justify-end gap-0.5">
+                        <button
+                          title="View original"
+                          onClick={() => onView(doc)}
+                          className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                  {kids.map((kid) => renderDocRow(kid, true))}
+                </Fragment>
+              );
+            });
+          })()}
         </TableBody>
       </Table>
     </div>
@@ -1260,17 +1345,25 @@ export default function ProcessedDocsPage() {
     return ["all", ...types];
   }, [docs]);
 
-  const getFiltered = (status: DocStatus) =>
-    docs.filter((d) => {
-      const matchStatus = d.status === status;
-      const matchSearch =
-        !search ||
-        d.name.toLowerCase().includes(search.toLowerCase()) ||
-        d.sourceAgent.toLowerCase().includes(search.toLowerCase()) ||
-        d.documentType.toLowerCase().includes(search.toLowerCase());
-      const matchType = filterDocType === "all" || d.documentType === filterDocType;
-      return matchStatus && matchSearch && matchType;
-    });
+  const getFiltered = (status: DocStatus): ProcessedDoc[] => {
+    const matchesSearch = (d: ProcessedDoc) =>
+      !search ||
+      d.name.toLowerCase().includes(search.toLowerCase()) ||
+      d.sourceAgent.toLowerCase().includes(search.toLowerCase()) ||
+      d.documentType.toLowerCase().includes(search.toLowerCase());
+    const matchesType = (d: ProcessedDoc) => filterDocType === "all" || d.documentType === filterDocType;
+
+    // Children (and standalone docs) whose own status matches this tab.
+    const children = docs.filter((d) => d.status === status && matchesSearch(d) && matchesType(d));
+
+    // Also include split parents whose children appear in this tab, so the grouping header renders.
+    const childParentIds = new Set(children.map((d) => d.parentDocumentId).filter((id): id is string => id !== null));
+    const splitParents = childParentIds.size > 0
+      ? docs.filter((d) => d.status === "split" && childParentIds.has(d.id))
+      : [];
+
+    return [...splitParents, ...children];
+  };
 
   const counts = useMemo(() => ({
     pending:       docs.filter((d) => d.status === "pending").length,
