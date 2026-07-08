@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -12,7 +13,6 @@ from agentcore.schema.message import Message
 # module-level names so tests can monkeypatch them
 from agentcore.services.deps import session_scope, get_storage_service
 from agentcore.services.idp.splitting import detect_boundaries_hybrid, materialize_children
-from agentcore.services.idp.pipeline import enqueue_document
 from agentcore.services.database.models.idp.documents import IdpDocument
 
 _MAX_VISION_PAGES = 12  # cap page images sent to the LLM
@@ -114,22 +114,23 @@ class IDPDocumentSplitter(Node):
                 child_ids = await materialize_children(session, storage, doc, boundaries)
                 if not child_ids:
                     self.status = "split produced no children — passthrough"
-                    self._decision = ("single", None); return self._decision
+                    self._decision = ("single", None)
+                    return self._decision
 
                 # pre-type each child from the boundary LLM (skip 'unknown')
                 if seg_types:
+                    if len(seg_types) != len(child_ids):
+                        logger.debug(f"[split] seg_types({len(seg_types)}) != children({len(child_ids)}) — pairing by order")
                     for cid, ctype in zip(child_ids, seg_types):
                         c = await session.get(IdpDocument, cid)
                         if c is not None and ctype and str(ctype).lower() != "unknown":
                             c.predicted_type = ctype
                             session.add(c)
+                await session.commit()   # persist children + pre-types (visible to enqueue_document)
 
-                from datetime import datetime, timezone
-                doc.status = "split"                     # TERMINAL status; commit BEFORE the graph ends
-                doc.processing_completed_at = datetime.now(timezone.utc)
-                session.add(doc)
-                await session.commit()
-
+                # Enqueue each child (best-effort). LAZY import of enqueue_document to avoid a module-level
+                # pipeline import (see Fix 2).
+                from agentcore.services.idp.pipeline import enqueue_document
                 enqueued = 0
                 for cid in child_ids:
                     try:
@@ -137,8 +138,26 @@ class IDPDocumentSplitter(Node):
                         enqueued += 1
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(f"[split] could not enqueue child {cid}: {exc}")
+
+                if enqueued == 0:
+                    # SAFETY NET (mirror the fixed pipeline): no child could be enqueued -> FAIL the parent,
+                    # do NOT mark it 'split' (which would strand it with zero processing children).
+                    doc.status = "failed"
+                    doc.error_message = "multi-doc split: no child document could be enqueued"
+                    doc.failed_at = datetime.now(timezone.utc)
+                    session.add(doc)
+                    await session.commit()
+                    self.status = "split failed — no children enqueued"
+                    self._decision = ("split", child_ids)
+                    return self._decision
+
+                doc.status = "split"
+                doc.processing_completed_at = datetime.now(timezone.utc)
+                session.add(doc)
+                await session.commit()
                 self.status = f"split into {len(child_ids)} documents ({enqueued} enqueued)"
-                self._decision = ("split", child_ids); return self._decision
+                self._decision = ("split", child_ids)
+                return self._decision
         except Exception as exc:  # noqa: BLE001 — never crash the run; degrade to passthrough
             logger.warning(f"[split] decision failed, passthrough: {exc}")
             self._decision = ("single", None); return self._decision

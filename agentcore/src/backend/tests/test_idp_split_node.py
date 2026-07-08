@@ -49,7 +49,7 @@ async def test_splitter_forks_multi_doc_and_pretypes(monkeypatch):
     enq = []
     async def fake_enqueue(session, cid): enq.append(cid)
     monkeypatch.setattr("agentcore.components.IDP.document_splitter.materialize_children", fake_materialize)
-    monkeypatch.setattr("agentcore.components.IDP.document_splitter.enqueue_document", fake_enqueue)
+    monkeypatch.setattr("agentcore.services.idp.pipeline.enqueue_document", fake_enqueue)
 
     comp = IDPDocumentSplitter()
     comp.document = _msg(str(parent.id)); comp.llm = object()
@@ -92,3 +92,46 @@ async def test_splitter_child_passes_through(monkeypatch):
     comp = IDPDocumentSplitter(); comp.document = _msg(str(child.id)); comp.llm = None
     kind, _ = await comp._decide()
     assert kind == "single"                             # child (parent_document_id set) never re-splits
+
+
+@pytest.mark.anyio
+async def test_splitter_fails_parent_when_no_child_enqueues(monkeypatch):
+    """Safety net: if every child enqueue raises, parent must be set to 'failed', not 'split'."""
+    parent = SimpleNamespace(id=uuid4(), parent_document_id=None, file_type="pdf", page_count=4,
+                             status="processing", extra={}, predicted_type=None,
+                             processing_completed_at=None, error_message=None, failed_at=None)
+    registry = {parent.id: parent}
+    sess = _Sess(registry)
+    monkeypatch.setattr("agentcore.components.IDP.document_splitter.session_scope", lambda: _Scope(sess))
+    monkeypatch.setattr("agentcore.components.IDP.document_splitter.get_storage_service", lambda: object())
+
+    async def fake_boundaries(*a, **k):
+        return [(0, 1), (2, 3)], ["Invoice", "Receipt"]
+    monkeypatch.setattr("agentcore.components.IDP.document_splitter.detect_boundaries_hybrid", fake_boundaries)
+
+    async def fake_inputs(self, payload, doc): return ({0: "a", 1: "b", 2: "c", 3: "d"}, [])
+    monkeypatch.setattr(IDPDocumentSplitter, "_page_inputs", fake_inputs, raising=True)
+
+    children = []
+    async def fake_materialize(session, storage, parent_doc, boundaries):
+        for _ in boundaries:
+            c = SimpleNamespace(id=uuid4(), predicted_type=None)
+            children.append(c); registry[c.id] = c
+        return [c.id for c in children]
+    monkeypatch.setattr("agentcore.components.IDP.document_splitter.materialize_children", fake_materialize)
+
+    async def fake_enqueue(session, cid): raise RuntimeError("queue down")
+    monkeypatch.setattr("agentcore.services.idp.pipeline.enqueue_document", fake_enqueue)
+
+    comp = IDPDocumentSplitter()
+    comp.document = _msg(str(parent.id)); comp.llm = object()
+    kind, child_ids = await comp._decide()
+
+    # Decision is still ("split", child_ids) — terminal, not passthrough
+    assert kind == "split"
+    assert len(child_ids) == 2
+
+    # Parent must be failed, not "split" (the safety net)
+    assert parent.status == "failed"
+    assert parent.error_message is not None and "no child" in parent.error_message
+    assert parent.failed_at is not None
