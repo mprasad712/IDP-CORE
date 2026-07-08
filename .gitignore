@@ -28,3 +28,7 @@ ENV/
 agentcore/src/backend/scratch/
 agentcore/src/backend/dump_models.py
 
+# Graphify knowledge-graph output (local only, never pushed)
+graphify-out/
+**/graphify-out/
+
