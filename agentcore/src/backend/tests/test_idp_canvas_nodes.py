@@ -627,3 +627,190 @@ async def test_resolve_config_name_skips_none_entry_and_matches_valid(monkeypatc
 
     result = await comp._resolve_config_name_from_classification()
     assert result == "Invoice", f"Expected 'Invoice', got {result!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. Bug 2 — terminal decision persists through the sink (skip → skipped)
+#    _mark_skipped / _drop_document must carry decision="skipped"/"dropped" in
+#    the IDP payload so the sink honours it without cross-session DB reads.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _SkipDoc:
+    """Minimal mock for IdpDocument — status / error_message only."""
+    def __init__(self, status="processing"):
+        self.status = status
+        self.error_message = None
+        self.deleted_at = None
+        self._added = False
+
+    def __repr__(self):
+        return f"<_SkipDoc status={self.status!r}>"
+
+
+class _SkipSession:
+    """Async session mock: get() returns a _SkipDoc; add/commit are no-ops."""
+    def __init__(self, doc):
+        self._doc = doc
+
+    async def get(self, model, pk):
+        return self._doc
+
+    def add(self, obj):
+        self._doc._added = True
+
+    async def commit(self):
+        pass
+
+    async def exec(self, stmt):
+        class _R:
+            def first(self_inner): return None
+            def all(self_inner): return []
+        return _R()
+
+
+class _SkipScope:
+    def __init__(self, doc):
+        self._doc = doc
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return _SkipSession(self._doc)
+
+    async def __aexit__(self, *a):
+        return False
+
+
+@pytest.mark.anyio
+async def test_mark_skipped_carries_decision_in_payload(monkeypatch):
+    """_mark_skipped must return a value whose get_payload() has decision='skipped',
+    AND still commit status='skipped' to the (mocked) document."""
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.message import Message
+    from agentcore.services.idp.graph_native.payload import get_payload
+
+    doc = _SkipDoc()
+    doc_id = str(uuid4())
+    scope = _SkipScope(doc)
+    monkeypatch.setattr("agentcore.services.deps.session_scope", scope)
+
+    comp = IDPLLMExtractor()
+    comp.config_names = ["Invoice"]
+    comp.document = Message(
+        text="hello",
+        additional_kwargs={"idp": {"document_id": doc_id}},
+    )
+
+    result = await comp._mark_skipped("medical report")
+
+    # Payload must carry decision="skipped"
+    p = get_payload(result)
+    assert p.get("decision") == "skipped", (
+        f"Expected decision='skipped' in payload, got {p.get('decision')!r}. "
+        f"Is _mark_skipped still returning Data(data={{}})?"
+    )
+
+    # DB commit must still happen
+    assert doc.status == "skipped", (
+        f"Expected doc.status='skipped' after _mark_skipped, got {doc.status!r}"
+    )
+
+
+@pytest.mark.anyio
+async def test_sink_skips_when_payload_decision_is_skipped(monkeypatch):
+    """finalize() given a payload with decision='skipped' must:
+    - set doc.status = 'skipped'  (or leave it if already terminal)
+    - NOT call save_extraction_results
+    - return Data with status='skipped'
+    """
+    from agentcore.components.IDP.processed_docs_output import IDPProcessedDocsOutput
+    from agentcore.schema.message import Message
+    from agentcore.schema.data import Data
+
+    doc_id = str(uuid4())
+    doc = _SkipDoc(status="processing")  # NOT already terminal — sink must set it
+
+    # Patch session_scope at the source so the local import inside finalize() picks it up
+    monkeypatch.setattr(
+        "agentcore.services.deps.session_scope",
+        _SkipScope(doc),
+    )
+
+    save_called = []
+    async def fake_save(**kwargs):
+        save_called.append(kwargs)
+        return 0.9
+    monkeypatch.setattr(
+        "agentcore.services.idp.extraction.save_extraction_results",
+        fake_save,
+    )
+
+    comp = IDPProcessedDocsOutput()
+    # Feed a Message that carries decision="skipped" in its IDP payload
+    msg = Message(
+        text="",
+        additional_kwargs={"idp": {"document_id": doc_id, "decision": "skipped"}},
+    )
+    comp.data = [msg]
+    comp._vertex = _T5Vertex({"document_id": doc_id, "decision": "skipped"})
+
+    result = await comp.finalize()
+
+    assert isinstance(result, Data), f"Expected Data, got {type(result)}"
+    assert result.data.get("status") == "skipped", (
+        f"Expected status='skipped', got {result.data.get('status')!r}. "
+        f"Is finalize() still falling through to pending_review for decision='skipped'?"
+    )
+    assert not save_called, (
+        f"save_extraction_results must NOT be called for a skipped doc, but was called {len(save_called)} time(s)"
+    )
+    assert doc.status == "skipped", (
+        f"Expected doc.status='skipped' after finalize(), got {doc.status!r}"
+    )
+
+
+@pytest.mark.anyio
+async def test_sink_normal_decision_still_routes_to_pending_review(monkeypatch):
+    """Control / regression guard: finalize() with NO terminal decision (normal extraction)
+    must still route to pending_review when no approval gate wrote a different decision."""
+    from agentcore.components.IDP.processed_docs_output import IDPProcessedDocsOutput
+    from agentcore.schema.message import Message
+    from agentcore.schema.data import Data
+
+    doc_id = str(uuid4())
+    doc = _SkipDoc(status="processing")
+
+    monkeypatch.setattr(
+        "agentcore.services.deps.session_scope",
+        _SkipScope(doc),
+    )
+
+    async def fake_save(**kwargs):
+        return 0.85
+    monkeypatch.setattr(
+        "agentcore.services.idp.extraction.save_extraction_results",
+        fake_save,
+    )
+
+    comp = IDPProcessedDocsOutput()
+    # Normal extraction payload — NO decision key
+    msg = Message(
+        text="some extracted text",
+        additional_kwargs={
+            "idp": {
+                "document_id": doc_id,
+                "extracted": {"headers": {"invoice_no": {"value": "INV-001", "confidence": 0.9}}, "line_items": []},
+            }
+        },
+    )
+    comp.data = [msg]
+    comp._vertex = _T5Vertex({"document_id": doc_id})
+
+    result = await comp.finalize()
+
+    assert isinstance(result, Data)
+    assert result.data.get("status") == "pending_review", (
+        f"Expected status='pending_review' for normal extraction, got {result.data.get('status')!r}"
+    )

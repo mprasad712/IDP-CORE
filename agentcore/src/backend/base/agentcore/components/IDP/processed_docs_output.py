@@ -78,6 +78,21 @@ class IDPProcessedDocsOutput(Node):
                 self.status = f"Document already '{doc.status}' upstream — ProcessedDocsOutput left it unchanged."
                 logger.info(f"[IDP native] {doc_id}: already '{doc.status}'; sink no-op.")
                 return Data(data={"status": doc.status, "document_id": str(doc_id)})
+
+            # Belt-and-braces: if the extractor carried a terminal decision in the IDP payload
+            # (decision="skipped" or "dropped"), honour it WITHOUT re-reading the DB status.
+            # This closes the cross-session race where a separate DB session hasn't flushed yet
+            # and the DB-status guard above reads a stale non-terminal value.
+            decision = str(payload.get("decision") or "").strip().lower()
+            if decision in ("skipped", "dropped"):
+                if doc is not None and doc.status not in ("skipped", "split", "failed"):
+                    doc.status = "skipped"
+                    session.add(doc)
+                    await session.commit()
+                self.status = "Document skipped/dropped upstream — ProcessedDocsOutput left it unchanged."
+                logger.info(f"[IDP native] {doc_id}: payload decision='{decision}'; sink no-op.")
+                return Data(data={"status": "skipped", "document_id": str(doc_id)})
+
             overall_conf = await save_extraction_results(
                 session=session,
                 document_id=doc_id,
@@ -89,7 +104,6 @@ class IDPProcessedDocsOutput(Node):
             # Honor the Approval Gate / router decision recorded in the working-set. The Approval Gate
             # writes decision="auto_approved" / "pending_review" into the payload; without a gate in the
             # flow, default to pending_review. All are valid IdpDocument statuses.
-            decision = str(payload.get("decision") or "").strip().lower()
             if decision in ("auto_approved", "auto_approve", "approved"):
                 status = "auto_approved"
             elif decision == "reviewed":

@@ -303,7 +303,7 @@ class IDPLLMExtractor(Node):
 
         logger.warning(f"[AIFieldExtractor] document skipped: {reason}")
         self.status = f"Skipped — {reason}"
-        return Data(data={})
+        return carry(src, text="", decision="skipped", skip_reason=reason)
 
     async def _handle_unmatched(self, classified_type: str, config_names: list, classifier_ran: bool) -> "Data | None":
         """Apply the 'On unmatched type' action when the classified type matches no selected config.
@@ -349,7 +349,7 @@ class IDPLLMExtractor(Node):
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[AIFieldExtractor] Could not drop document: {exc}")
         self.status = f"Dropped — unmatched type '{classified_type}'."
-        return Data(data={})
+        return carry(src, text="", decision="dropped")
 
     async def extract(self) -> Data:
         src = self.document
