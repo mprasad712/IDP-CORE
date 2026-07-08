@@ -483,9 +483,9 @@ async def test_handle_unmatched_skip(monkeypatch):
     from agentcore.schema.data import Data
     comp = IDPLLMExtractor(); comp.unmatched_action = "skip"
     seen = {}
-    async def fake_skip(self, ct): seen["ct"] = ct; return Data(data={})
+    async def fake_skip(self, ct, reason=None): seen["ct"] = ct; return Data(data={})
     monkeypatch.setattr(IDPLLMExtractor, "_mark_skipped", fake_skip, raising=True)
-    out = await comp._handle_unmatched("medical report", ["Invoice"])
+    out = await comp._handle_unmatched("medical report", ["Invoice"], True)
     assert isinstance(out, Data) and seen["ct"] == "medical report"
 
 
@@ -493,7 +493,7 @@ async def test_handle_unmatched_skip(monkeypatch):
 async def test_handle_unmatched_extract_anyway():
     from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
     comp = IDPLLMExtractor(); comp.unmatched_action = "extract_anyway"
-    out = await comp._handle_unmatched("medical report", ["Invoice"])
+    out = await comp._handle_unmatched("medical report", ["Invoice"], True)
     assert out is None                          # proceed to extraction
     assert comp._override_config_name == "Invoice"
 
@@ -506,5 +506,17 @@ async def test_handle_unmatched_drop(monkeypatch):
     seen = {}
     async def fake_drop(self, ct): seen["ct"] = ct; return Data(data={})
     monkeypatch.setattr(IDPLLMExtractor, "_drop_document", fake_drop, raising=True)
-    out = await comp._handle_unmatched("medical report", ["Invoice"])
+    out = await comp._handle_unmatched("medical report", ["Invoice"], True)
     assert isinstance(out, Data) and seen["ct"] == "medical report"
+
+
+@pytest.mark.anyio
+async def test_handle_unmatched_no_classifier_always_skips(monkeypatch):
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.data import Data
+    comp = IDPLLMExtractor(); comp.unmatched_action = "extract_anyway"   # even extract_anyway...
+    seen = {}
+    async def fake_skip(self, ct, reason=None): seen["ct"] = ct; return Data(data={})
+    monkeypatch.setattr(IDPLLMExtractor, "_mark_skipped", fake_skip, raising=True)
+    out = await comp._handle_unmatched("unknown", ["Invoice", "Aadhaar"], False)   # no classifier
+    assert isinstance(out, Data) and seen["ct"] == "unknown"   # ...still skips when no classifier ran

@@ -143,7 +143,7 @@ class IDPLLMExtractor(Node):
         classification = payload.get("classification") or (
             (src.additional_kwargs or {}).get("classification", {}) if isinstance(src, Message) else {}
         )
-        classifier_ran = bool(classification.get("type"))
+        classifier_ran = bool(classification.get("type"))  # the Classifier emits "unknown" (never "") for a non-match, so a truthy 'type' means a classifier ran
         classified_type = (classification.get("type") or "").strip().lower()
         if not classified_type or classified_type == "unknown":
             # A Document Classifier RAN and could not identify the type -> treat as no-match so the
@@ -256,20 +256,21 @@ class IDPLLMExtractor(Node):
             except Exception:
                 pass
 
-    async def _mark_skipped(self, classified_type: str) -> Data:
+    async def _mark_skipped(self, classified_type: str, reason: str | None = None) -> Data:
         """Persist 'skipped' status + a human-readable REASON on the document, and return empty Data.
 
         The reason is stored on ``doc.error_message`` so the Playground can show WHY it was skipped."""
         src = self.document
         # Explain WHY, distinguishing the two skip causes so the user can fix the flow.
         config_names = list(self.config_names) if self.config_names else []
-        if (not classified_type or classified_type.strip().lower() in ("", "unknown")) and len(config_names) > 1:
-            reason = (
-                "Multiple field configurations are selected but there is no Document Classifier node to "
-                "route between them. Add a Document Classifier, or select a single field configuration."
-            )
-        else:
-            reason = f"No selected field configuration matches the document type '{classified_type}'."
+        if reason is None:
+            if (not classified_type or classified_type.strip().lower() in ("", "unknown")) and len(config_names) > 1:
+                reason = (
+                    "Multiple field configurations are selected but there is no Document Classifier node to "
+                    "route between them. Add a Document Classifier, or select a single field configuration."
+                )
+            else:
+                reason = f"No selected field configuration matches the document type '{classified_type}'."
 
         try:
             from agentcore.services.deps import session_scope
@@ -298,10 +299,13 @@ class IDPLLMExtractor(Node):
         self.status = f"Skipped — {reason}"
         return Data(data={})
 
-    async def _handle_unmatched(self, classified_type: str, config_names: list) -> "Data | None":
+    async def _handle_unmatched(self, classified_type: str, config_names: list, classifier_ran: bool) -> "Data | None":
         """Apply the 'On unmatched type' action when the classified type matches no selected config.
-        Returns terminal Data for 'skip'/'drop'; returns None for 'extract_anyway' (caller proceeds, with
-        self._override_config_name already set to the first selected config)."""
+        extract_anyway/drop apply ONLY when a Document Classifier actually RAN (the control requires one);
+        with no classifier there is nothing to route on, so always skip with a helpful reason. Returns
+        terminal Data for skip/drop; None for extract_anyway (caller proceeds with _override_config_name set)."""
+        if not classifier_ran:
+            return await self._mark_skipped(classified_type)   # no classifier -> skip with the 'add a Classifier' reason
         action = str(getattr(self, "unmatched_action", "skip") or "skip").strip()
         if action == "extract_anyway":
             self._override_config_name = config_names[0] if config_names else None
@@ -309,7 +313,10 @@ class IDPLLMExtractor(Node):
             return None
         if action == "drop":
             return await self._drop_document(classified_type)
-        return await self._mark_skipped(classified_type)   # 'skip' (default)
+        return await self._mark_skipped(
+            classified_type,
+            reason=f"The classified type '{classified_type}' matches none of the selected field configurations.",
+        )
 
     async def _drop_document(self, classified_type: str) -> Data:
         """unmatched_action='drop': soft-delete the document (hidden from Processed Docs) + return empty Data."""
@@ -381,13 +388,12 @@ class IDPLLMExtractor(Node):
             # classifier can't be disambiguated → skip.
             matched_config = await self._resolve_config_name_from_classification()
             if matched_config is None:
-                # classified type matches no selected config -> apply the 'On unmatched type' action
-                unmatched = await self._handle_unmatched(classified_type, config_names)
+                classifier_ran = bool(classification.get("type"))
+                unmatched = await self._handle_unmatched(classified_type, config_names, classifier_ran)
                 if unmatched is not None:
                     return unmatched        # skip / drop -> terminal
-                # extract_anyway -> _handle_unmatched set self._override_config_name; fall through to extract
+                # extract_anyway -> _handle_unmatched set self._override_config_name; fall through
             else:
-                # Override single config_name with the matched one
                 self._override_config_name = matched_config
         else:
             self._override_config_name = None
@@ -495,11 +501,22 @@ class IDPLLMExtractor(Node):
 
         self._override_config_name = None
         if config_names and self.extraction_mode == "field_configuration":
+            from agentcore.services.idp.graph_native.payload import effective_payload
+            from agentcore.schema.message import Message as _Msg
+
+            classification = effective_payload(self, rep).get("classification") or (
+                (rep.additional_kwargs or {}).get("classification", {}) if isinstance(rep, _Msg) else {}
+            )
+            classified_type = (classification.get("type") or "unknown").strip()
             matched = await self._resolve_config_name_from_classification(rep)
             if matched is None:
-                self.status = "Skipped — no field configuration matches the classified type."
-                return carry(rep, text="", extracted={})
-            self._override_config_name = matched
+                classifier_ran = bool(classification.get("type"))
+                unmatched = await self._handle_unmatched(classified_type, config_names, classifier_ran)
+                if unmatched is not None:
+                    return unmatched
+                # extract_anyway -> _override_config_name set; fall through to per-chunk extraction
+            else:
+                self._override_config_name = matched
         effective = self._override_config_name or single_config or (config_names[0] if config_names else None)
 
         if not self.llm:
