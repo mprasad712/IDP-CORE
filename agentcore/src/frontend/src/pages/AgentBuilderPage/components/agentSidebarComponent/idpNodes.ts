@@ -651,7 +651,7 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 0,
       base_classes: ["Data"],
-      field_order: ["document", "llm", "config_name", "config_names", "input_mode", "unmatched_action", "model_name"],
+      field_order: ["document", "llm", "config_name", "config_names", "input_mode", "unmatched_action"],
       template: {
         document: {
           _input_type: "HandleInput",
@@ -731,7 +731,6 @@ export const IDP_NODES: IDPData = {
           "What to do when a document's classified type matches none of the selected Field Configurations (e.g. a medical report in an invoice-only agent): skip (default) / extract anyway / drop. Requires a Document Classifier upstream.",
           true,
         ),
-        model_name: strField("model_name", "LLM Model", "gpt-4o", "Model to use when no model node is connected.", false, true),
       },
       outputs: [output("extracted_data", "Extracted Data", ["Data"])],
     },
@@ -895,7 +894,7 @@ export const IDP_NODES: IDPData = {
       official: true,
       priority: 0,
       base_classes: ["Message"],
-      field_order: ["document", "llm", "document_types", "confidence_threshold", "model_name"],
+      field_order: ["document", "llm", "document_types", "confidence_threshold"],
       template: {
         document: {
           _input_type: "MessageInput",
@@ -917,7 +916,7 @@ export const IDP_NODES: IDPData = {
           advanced: false,
           display_name: "Language Model",
           dynamic: false,
-          info: "Connect a model from the Models sidebar. Falls back to model_name if not connected.",
+          info: "Connect a model from the Models sidebar. Without one, the classifier matches document types by keyword (offline).",
           input_types: ["LanguageModel"],
           list: false,
           name: "llm",
@@ -949,14 +948,6 @@ export const IDP_NODES: IDPData = {
           "Min Confidence Score",
           0.75,
           "Predictions below this threshold are marked as 'unknown'.",
-          true,
-        ),
-        model_name: strField(
-          "model_name",
-          "LLM Model",
-          "gpt-4o",
-          "Model to use when no Language Model node is connected.",
-          false,
           true,
         ),
       },
@@ -998,7 +989,7 @@ export const IDP_NODES: IDPData = {
           advanced: false,
           display_name: "Language Model",
           dynamic: false,
-          info: "Connect a model from the Models sidebar. Falls back to model_name if not connected.",
+          info: "Optional. A vision-capable model gives the most accurate boundary detection; without one, textual rules are used.",
           input_types: ["LanguageModel"],
           list: false,
           name: "llm",
@@ -1017,8 +1008,7 @@ export const IDP_NODES: IDPData = {
         ),
       },
       outputs: [
-        output("single_document", "Single Document", ["Message"], true),
-        output("split", "Split", ["Message"], true),
+        output("output_document", "Document", ["Message"]),
       ],
     },
   },
