@@ -34,7 +34,7 @@ class IDPLLMExtractor(Node):
             display_name="Language Model",
             input_types=["LanguageModel"],
             required=False,
-            info="Connect any model from the Models sidebar. Falls back to model_name if not connected.",
+            info="Connect any model from the Models sidebar.",
         ),
         DropdownInput(
             name="extraction_mode",
@@ -77,13 +77,6 @@ class IDPLLMExtractor(Node):
                 "Skipped for review. 'extract_anyway': force it through the first selected config. 'drop': "
                 "discard it (soft-deleted, hidden from Processed Docs). Requires a Document Classifier upstream."
             ),
-        ),
-        MessageTextInput(
-            name="model_name",
-            display_name="LLM Model",
-            value="gpt-4o",
-            advanced=True,
-            info="Model to use when no model node is connected.",
         ),
     ]
 

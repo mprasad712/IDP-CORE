@@ -7,15 +7,16 @@ from typing import Any
 from loguru import logger
 
 from agentcore.custom.custom_node.node import Node
-from agentcore.io import FloatInput, HandleInput, MessageTextInput, MultiselectInput, Output
+from agentcore.io import FloatInput, HandleInput, MultiselectInput, Output
 from agentcore.schema.message import Message
 
 
 class IDPDocumentClassifier(Node):
     display_name = "Document Classifier"
     description = (
-        "Uses an LLM to detect the document type (invoice, contract, etc.) "
-        "from your Field Configurations and tags the document for downstream routing."
+        "Detects the document type (invoice, contract, etc.) from your Field Configurations and tags "
+        "the document for downstream routing. Uses the connected model when available; without one it "
+        "falls back to offline keyword matching."
     )
     icon = "Tag"
     name = "DocumentClassifier"
@@ -32,7 +33,7 @@ class IDPDocumentClassifier(Node):
             display_name="Language Model",
             input_types=["LanguageModel"],
             required=False,
-            info="Connect any model from the Models sidebar. Falls back to model_name if not connected.",
+            info="Connect any model from the Models sidebar. Without one, the classifier matches document types by keyword (offline).",
         ),
         MultiselectInput(
             name="document_types",
@@ -47,13 +48,6 @@ class IDPDocumentClassifier(Node):
             value=0.75,
             advanced=True,
             info="Predictions below this threshold are marked as 'unknown'.",
-        ),
-        MessageTextInput(
-            name="model_name",
-            display_name="LLM Model",
-            value="gpt-4o",
-            advanced=True,
-            info="Model to use when no Language Model node is connected.",
         ),
     ]
 
@@ -136,11 +130,12 @@ class IDPDocumentClassifier(Node):
                 )).first()
                 type_descriptions[dt] = config.description if (config and config.description) else dt
 
-        llm_model = self.llm
-        if llm_model is None:
-            llm_model = self._build_fallback_model()
-
-        result = await self._invoke_llm(llm_model, doc_types=selected_types, text=text, descriptions=type_descriptions)
+        if self.llm is None:
+            # No model connected → offline keyword classification (rules fallback).
+            from agentcore.services.idp.classification import classify_via_rules
+            result = classify_via_rules(selected_types, text, descriptions=type_descriptions)
+        else:
+            result = await self._invoke_llm(self.llm, doc_types=selected_types, text=text, descriptions=type_descriptions)
 
         # Defensive: never trust the model call to return a result object (structured output can yield
         # None). getattr-with-default keeps the classifier from crashing the whole run.
@@ -158,22 +153,6 @@ class IDPDocumentClassifier(Node):
         return self._tag_message(src, predicted_type, confidence, reasoning)
 
     # ── helpers ───────────────────────────────────────────────────────────
-
-    def _build_fallback_model(self):
-        try:
-            from agentcore.services.deps import get_settings_service
-            from agentcore.services.model_service_client import MicroserviceChatModel
-            settings = get_settings_service().settings
-            return MicroserviceChatModel(
-                service_url=settings.model_service_url,
-                service_api_key=settings.model_service_api_key,
-                registry_model_id=None,
-                provider="openai",
-                model=str(self.model_name),
-            )
-        except Exception as exc:
-            logger.warning(f"[DocumentClassifier] Could not build fallback model: {exc}")
-            return None
 
     async def _invoke_llm(self, llm_model, messages=None, *, doc_types=None, text: str = "", descriptions=None) -> "ClassificationResult":
         from agentcore.services.idp.classification import ClassificationResult, classify_via_llm

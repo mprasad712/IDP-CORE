@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from uuid import UUID, uuid4
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -381,3 +382,66 @@ async def classify_via_llm(llm_model, doc_types: list[str], text: str, *, descri
     except (TypeError, ValueError):
         result.confidence = 0.0
     return result
+
+
+# ── model-free keyword fallback (used by the Document Classifier when no model is connected) ──────────
+
+_RULE_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "from", "this", "that", "your", "our",
+    "of", "to", "in", "on", "is", "are", "be", "an", "or", "by", "at",
+    "document", "documents", "type", "types",
+})
+
+
+def _rule_tokens(s: str) -> set[str]:
+    """Lowercase alphanumeric tokens (len >= 3), minus grammar/domain stopwords."""
+    return {t for t in re.findall(r"[a-z0-9]+", (s or "").lower()) if len(t) >= 3 and t not in _RULE_STOPWORDS}
+
+
+def classify_via_rules(
+    doc_types: list[str],
+    text: str,
+    *,
+    descriptions: dict | None = None,
+    threshold: float = 0.5,
+) -> ClassificationResult:
+    """Model-free document classification via keyword matching — the offline fallback the Document
+    Classifier node uses when NO Language Model is connected. Scores each candidate type by how many
+    of its NAME tokens (primary signal) and description tokens (secondary) appear in the document text.
+    Returns the best type only when its NAME-token hit ratio clears ``threshold`` (default 0.5), else
+    'unknown'. Confidence maps match strength to [0.5, 0.9] so a full name match clears a typical
+    confidence gate while weak matches fall back to 'unknown'. Never raises."""
+    try:
+        descriptions = descriptions or {}
+        text_tokens = _rule_tokens(text)
+        if not text_tokens or not doc_types:
+            return ClassificationResult(
+                predicted_type="unknown", confidence=0.0, candidates={},
+                reasoning="keyword match (no model): empty text or no candidate types",
+            )
+        scored: dict[str, float] = {}
+        name_hit_ratio: dict[str, float] = {}
+        for dt in doc_types:
+            name_tokens = _rule_tokens(dt)
+            desc_tokens = _rule_tokens(descriptions.get(dt, "")) - name_tokens
+            name_hits = (len(name_tokens & text_tokens) / len(name_tokens)) if name_tokens else 0.0
+            desc_hits = (len(desc_tokens & text_tokens) / len(desc_tokens)) if desc_tokens else 0.0
+            raw = (0.7 * name_hits + 0.3 * desc_hits) if desc_tokens else name_hits
+            scored[dt] = round(raw, 4)
+            name_hit_ratio[dt] = name_hits
+        best = max(scored, key=scored.get)
+        # Require at least half of the winning type's NAME tokens to appear — a stray description-word
+        # match alone must not win. (For a one-word type name this means the word must be present.)
+        if name_hit_ratio.get(best, 0.0) < threshold or scored[best] <= 0.0:
+            return ClassificationResult(
+                predicted_type="unknown", confidence=0.0, candidates=scored,
+                reasoning="keyword match (no model): no candidate cleared the threshold",
+            )
+        confidence = round(min(0.9, 0.5 + 0.4 * scored[best]), 4)
+        return ClassificationResult(
+            predicted_type=best, confidence=confidence, candidates=scored,
+            reasoning=f"keyword match (no model): '{best}' matched on name/description keywords",
+        )
+    except Exception as exc:  # noqa: BLE001 — never crash the classifier
+        logger.warning(f"[classify_via_rules] failed: {exc}")
+        return ClassificationResult(predicted_type="unknown", confidence=0.0, candidates={})
