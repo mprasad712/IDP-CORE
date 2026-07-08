@@ -254,10 +254,11 @@ def test_long_doc_text_splitting_with_overlap():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Aggregation Deduplication Strategies tests
+# 3. Chunk-merge Deduplication Strategies tests
+#    (the AI Field Extractor merges per-chunk extractions itself — no Chunk Aggregator node)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_chunk_aggregator_deduplication_strategies():
+def test_chunk_merge_deduplication_strategies():
     results = [
         {
             "headers": {

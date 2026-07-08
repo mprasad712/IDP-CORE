@@ -12,7 +12,6 @@ if TYPE_CHECKING:
     from agentcore.components.IDP.visual_element_detection import IDPVisualElementDetection
     from agentcore.components.IDP.math_reconcile import IDPMathReconcile
     from agentcore.components.IDP.approval_gate import IDPApprovalGate
-    from agentcore.components.IDP.chunk_aggregator import IDPChunkAggregator
     from agentcore.components.IDP.chunking_strategy import IDPChunkingStrategy
     from agentcore.components.IDP.condition_node import IDPConditionNode
     from agentcore.components.IDP.confidence_router import IDPConfidenceRouter
@@ -35,7 +34,6 @@ _dynamic_imports = {
     "IDPVisualElementDetection": "visual_element_detection",
     "IDPMathReconcile": "math_reconcile",
     "IDPApprovalGate": "approval_gate",
-    "IDPChunkAggregator": "chunk_aggregator",
     "IDPChunkingStrategy": "chunking_strategy",
     "IDPConditionNode": "condition_node",
     "IDPConfidenceRouter": "confidence_router",
