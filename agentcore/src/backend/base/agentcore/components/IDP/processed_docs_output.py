@@ -44,12 +44,22 @@ class IDPProcessedDocsOutput(Node):
         # immediate inputs are bare Data(extracted) or a Message an upstream node stripped.
         payload: dict = dict(get_shared_state(self))
         extracted: dict = {}
+        # Track whether any LOCAL input item carries a terminal decision (skip/drop).
+        # The extractor that sets decision is the sink's direct upstream, so its carry(...)
+        # decision always arrives on a local data item.  We gate the skip/drop short-circuit
+        # on this local flag — not on the merged payload — to avoid acting on a shared-state
+        # value that could (theoretically) bleed from a different document's run.
+        local_terminal_decision: str = ""
         for item in items:
             p = get_payload(item)
             if p:
                 payload = {**payload, **p}
                 if isinstance(p.get("extracted"), dict) and (p["extracted"].get("headers") or p["extracted"].get("line_items")):
                     extracted = p["extracted"]
+                # Capture terminal decision from LOCAL item payloads only.
+                item_decision = str(p.get("decision") or "").strip().lower()
+                if item_decision in ("skipped", "dropped") and not local_terminal_decision:
+                    local_terminal_decision = item_decision
             # Also accept a plain Data(extracted) output on the edge.
             data_dict = getattr(item, "data", None)
             if isinstance(data_dict, dict) and (data_dict.get("headers") or data_dict.get("line_items")):
@@ -80,18 +90,24 @@ class IDPProcessedDocsOutput(Node):
                 return Data(data={"status": doc.status, "document_id": str(doc_id)})
 
             # Belt-and-braces: if the extractor carried a terminal decision in the IDP payload
-            # (decision="skipped" or "dropped"), honour it WITHOUT re-reading the DB status.
-            # This closes the cross-session race where a separate DB session hasn't flushed yet
-            # and the DB-status guard above reads a stale non-terminal value.
+            # (decision="skipped" or "dropped") on a LOCAL input item, honour it WITHOUT
+            # re-reading the DB status.  This closes the cross-session race where a separate DB
+            # session hasn't flushed yet and the DB-status guard above reads a stale non-terminal
+            # value.  We gate on local_terminal_decision (set from local item payloads only) so a
+            # shared-state bleed from another document's run cannot trigger a spurious skip.
             decision = str(payload.get("decision") or "").strip().lower()
-            if decision in ("skipped", "dropped"):
-                if doc is not None and doc.status not in ("skipped", "split", "failed"):
+            if local_terminal_decision in ("skipped", "dropped"):
+                # Only overwrite status when the document is NOT already in a finalized state.
+                # "reviewed" and "auto_approved" are human/system-finalized; overwriting them on a
+                # re-process where the extractor now skips would clobber the human review record.
+                _finalized_statuses = ("skipped", "split", "failed", "reviewed", "auto_approved")
+                if doc is not None and doc.status not in _finalized_statuses:
                     doc.status = "skipped"
                     session.add(doc)
                     await session.commit()
                 self.status = "Document skipped/dropped upstream — ProcessedDocsOutput left it unchanged."
-                logger.info(f"[IDP native] {doc_id}: payload decision='{decision}'; sink no-op.")
-                return Data(data={"status": "skipped", "document_id": str(doc_id)})
+                logger.info(f"[IDP native] {doc_id}: local payload decision='{local_terminal_decision}'; sink no-op.")
+                return Data(data={"status": doc.status if doc is not None else "skipped", "document_id": str(doc_id)})
 
             overall_conf = await save_extraction_results(
                 session=session,

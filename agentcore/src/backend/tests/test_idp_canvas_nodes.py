@@ -814,3 +814,151 @@ async def test_sink_normal_decision_still_routes_to_pending_review(monkeypatch):
     assert result.data.get("status") == "pending_review", (
         f"Expected status='pending_review' for normal extraction, got {result.data.get('status')!r}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Robustness: re-process skip must NOT clobber finalized (reviewed/auto_approved) docs
+#     Finding 1 — the skip short-circuit must guard against overwriting human-finalized status.
+#     Finding 2 — the skip short-circuit must be gated on LOCAL item payload, not merged payload.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_sink_skip_does_not_overwrite_reviewed_status(monkeypatch):
+    """Finding 1: finalize() with a LOCAL item decision='skipped' but doc.status='reviewed'
+    must NOT overwrite to 'skipped'.  Status stays 'reviewed'; no save called."""
+    from agentcore.components.IDP.processed_docs_output import IDPProcessedDocsOutput
+    from agentcore.schema.message import Message
+    from agentcore.schema.data import Data
+
+    doc_id = str(uuid4())
+    doc = _SkipDoc(status="reviewed")   # human-finalized — must not be clobbered
+
+    monkeypatch.setattr("agentcore.services.deps.session_scope", _SkipScope(doc))
+
+    save_called = []
+    async def fake_save(**kwargs):
+        save_called.append(kwargs)
+        return 0.9
+    monkeypatch.setattr("agentcore.services.idp.extraction.save_extraction_results", fake_save)
+
+    comp = IDPProcessedDocsOutput()
+    # Local item carries decision="skipped" — simulates a re-process where extractor now skips
+    msg = Message(
+        text="",
+        additional_kwargs={"idp": {"document_id": doc_id, "decision": "skipped"}},
+    )
+    comp.data = [msg]
+    comp._vertex = _T5Vertex({"document_id": doc_id, "decision": "skipped"})
+
+    result = await comp.finalize()
+
+    assert isinstance(result, Data)
+    # Status must stay "reviewed" — not overwritten to "skipped"
+    assert result.data.get("status") == "reviewed", (
+        f"Expected status='reviewed' (unchanged), got {result.data.get('status')!r}. "
+        f"The skip short-circuit must NOT clobber a human-finalized doc."
+    )
+    # save_extraction_results must NOT be called (we still short-circuit — just don't overwrite)
+    assert not save_called, (
+        f"save_extraction_results must NOT be called for a skipped doc, "
+        f"but was called {len(save_called)} time(s)"
+    )
+    # The in-memory doc status must be unchanged
+    assert doc.status == "reviewed", (
+        f"doc.status must remain 'reviewed', got {doc.status!r}"
+    )
+    # And add/commit must NOT have been called (no DB write for finalized docs)
+    assert not doc._added, (
+        f"session.add() must NOT be called when doc is already 'reviewed'"
+    )
+
+
+@pytest.mark.anyio
+async def test_sink_skip_does_not_overwrite_auto_approved_status(monkeypatch):
+    """Finding 1 (auto_approved variant): finalize() with a LOCAL item decision='skipped'
+    but doc.status='auto_approved' must NOT overwrite to 'skipped'.  Status stays 'auto_approved'."""
+    from agentcore.components.IDP.processed_docs_output import IDPProcessedDocsOutput
+    from agentcore.schema.message import Message
+    from agentcore.schema.data import Data
+
+    doc_id = str(uuid4())
+    doc = _SkipDoc(status="auto_approved")   # system-finalized — must not be clobbered
+
+    monkeypatch.setattr("agentcore.services.deps.session_scope", _SkipScope(doc))
+
+    save_called = []
+    async def fake_save(**kwargs):
+        save_called.append(kwargs)
+        return 0.9
+    monkeypatch.setattr("agentcore.services.idp.extraction.save_extraction_results", fake_save)
+
+    comp = IDPProcessedDocsOutput()
+    msg = Message(
+        text="",
+        additional_kwargs={"idp": {"document_id": doc_id, "decision": "skipped"}},
+    )
+    comp.data = [msg]
+    comp._vertex = _T5Vertex({"document_id": doc_id, "decision": "skipped"})
+
+    result = await comp.finalize()
+
+    assert isinstance(result, Data)
+    assert result.data.get("status") == "auto_approved", (
+        f"Expected status='auto_approved' (unchanged), got {result.data.get('status')!r}. "
+        f"The skip short-circuit must NOT clobber a system-finalized doc."
+    )
+    assert not save_called, (
+        f"save_extraction_results must NOT be called for a skipped doc"
+    )
+    assert doc.status == "auto_approved", (
+        f"doc.status must remain 'auto_approved', got {doc.status!r}"
+    )
+    assert not doc._added, (
+        f"session.add() must NOT be called when doc is already 'auto_approved'"
+    )
+
+
+@pytest.mark.anyio
+async def test_sink_local_item_skip_triggers_shortcircuit(monkeypatch):
+    """Finding 2 (positive): a local item WITH decision='skipped' on a pending/queued doc
+    DOES short-circuit.  Keeps the existing Task 2 behavior green and confirms that the
+    local-item gate works correctly for normal (non-finalized) documents."""
+    from agentcore.components.IDP.processed_docs_output import IDPProcessedDocsOutput
+    from agentcore.schema.message import Message
+    from agentcore.schema.data import Data
+
+    doc_id = str(uuid4())
+    doc = _SkipDoc(status="processing")   # NOT finalized — skip SHOULD be applied
+
+    monkeypatch.setattr("agentcore.services.deps.session_scope", _SkipScope(doc))
+
+    save_called = []
+    async def fake_save(**kwargs):
+        save_called.append(kwargs)
+        return 0.9
+    monkeypatch.setattr("agentcore.services.idp.extraction.save_extraction_results", fake_save)
+
+    comp = IDPProcessedDocsOutput()
+    # Local item carries decision="skipped" via the IDP payload
+    msg = Message(
+        text="",
+        additional_kwargs={"idp": {"document_id": doc_id, "decision": "skipped"}},
+    )
+    comp.data = [msg]
+    comp._vertex = _T5Vertex({"document_id": doc_id, "decision": "skipped"})
+
+    result = await comp.finalize()
+
+    assert isinstance(result, Data)
+    # Short-circuit should fire; doc becomes "skipped"
+    assert result.data.get("status") == "skipped", (
+        f"Expected status='skipped' for a processing doc with local skip decision, "
+        f"got {result.data.get('status')!r}"
+    )
+    assert not save_called, (
+        f"save_extraction_results must NOT be called for a skipped doc"
+    )
+    assert doc.status == "skipped", (
+        f"doc.status must be set to 'skipped', got {doc.status!r}"
+    )
