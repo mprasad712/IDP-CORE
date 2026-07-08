@@ -13,14 +13,32 @@ export interface ProcessResult {
   status: string;
 }
 
+/**
+ * Which agent version a document runs against.
+ * Omitted -> the backend defaults to "dev" = the draft canvas (what the Playground wants).
+ * "uat"/"prod" -> the PUBLISHED deployment snapshot, so the run is immune to later canvas edits.
+ */
+export interface RunTarget {
+  env?: string;
+  /** e.g. "v2". Omitted -> the currently active published version. */
+  version?: string;
+}
+
 /** Upload one or more documents to an IDP agent. */
 export const usePostDocumentUpload = () => {
   const queryClient = useQueryClient();
 
-  return useMutation<UploadResult, Error, { agent_id: string; files: File[] }>({
-    mutationFn: async ({ agent_id, files }) => {
+  return useMutation<
+    UploadResult,
+    Error,
+    { agent_id: string; files: File[] } & RunTarget
+  >({
+    mutationFn: async ({ agent_id, files, env, version }) => {
       const form = new FormData();
       form.append("agent_id", agent_id);
+      // Only send when set — an empty string is not a valid env and would 400.
+      if (env) form.append("env", env);
+      if (version) form.append("version", version);
       files.forEach((f) => form.append("files", f));
       const res = await api.post(`${getURL("IDP_DOCUMENTS")}/upload`, form, {
         headers: { "Content-Type": "multipart/form-data" },
@@ -77,8 +95,20 @@ export const useUploadAndProcess = () => {
   const upload = usePostDocumentUpload();
   const process = usePostProcessDocument();
 
-  const run = async (agent_id: string, file: File): Promise<ProcessResult> => {
-    const uploaded = await upload.mutateAsync({ agent_id, files: [file] });
+  /**
+   * `target` is optional: callers that omit it (the Playground) keep running the draft.
+   * The env/version ride on the uploaded document row, so /process needs no extra argument.
+   */
+  const run = async (
+    agent_id: string,
+    file: File,
+    target?: RunTarget,
+  ): Promise<ProcessResult> => {
+    const uploaded = await upload.mutateAsync({
+      agent_id,
+      files: [file],
+      ...target,
+    });
     const document_id = uploaded.document_ids[0];
     return process.mutateAsync({ document_id });
   };

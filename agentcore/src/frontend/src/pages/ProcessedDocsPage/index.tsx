@@ -122,6 +122,12 @@ interface ProcessedDoc {
   id: string;
   name: string;
   sourceAgent: string;
+  /** Which agent version actually ran this document: "uat"/"prod" (a published deployment snapshot)
+   *  or null/"dev" (the draft canvas — Playground, a connector, or a pre-run_env document). */
+  runEnv?: string | null;
+  runVersion?: string | null;
+  /** How the document arrived: "upload" (UI), "api" (POST /api/run), a connector, … */
+  source?: string | null;
   dateProcessed: string;
   documentType: string;
   fileType: string;
@@ -155,6 +161,9 @@ function listDocToPage(d: ApiProcessedDoc): ProcessedDoc {
     id: d.id,
     name: d.original_filename,
     sourceAgent: d.agent_name ?? d.agent_id.slice(0, 8),
+    runEnv: d.run_env ?? null,
+    runVersion: d.run_version ?? null,
+    source: d.source ?? null,
     dateProcessed: (d.processing_completed_at ?? d.created_at ?? "").slice(0, 19).replace("T", " "),
     documentType: d.predicted_type ?? d.file_type ?? "—",
     fileType: (d.file_type ?? "").toLowerCase().replace(/^\./, ""),
@@ -390,6 +399,64 @@ function ConfidencePill({ score }: { score: number }) {
     <span className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold tabular-nums", c.badge)}>
       <span className={cn("h-1.5 w-1.5 rounded-full", c.dot)} />
       {score}%
+    </span>
+  );
+}
+
+// ─── Run provenance ───────────────────────────────────────────────────────────
+// Which agent version ran the document, and how it arrived. Both come straight off `idp_documents`
+// (`run_env`/`run_version`/`source`) — the same columns the pipeline resolves the graph from, so these
+// badges say what actually executed, not what the agent is configured to do now.
+
+const ENV_BADGE: Record<string, string> = {
+  uat: "border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400",
+  prod: "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+  dev: "border-border bg-muted text-muted-foreground",
+};
+
+/** `run_env` is NULL for the Playground, connectors, and documents processed before the column existed. */
+function RunTargetBadge({ env, version }: { env?: string | null; version?: string | null }) {
+  const key = (env || "dev").toLowerCase();
+  const label = key === "dev" ? "Draft" : `${key.toUpperCase()}${version ? ` · ${version}` : ""}`;
+  return (
+    <span
+      title={
+        key === "dev"
+          ? "Ran the draft canvas (Playground / connector)"
+          : `Ran the published ${key.toUpperCase()} snapshot${version ? ` ${version}` : ""}`
+      }
+      className={cn(
+        "inline-flex items-center rounded px-1.5 py-0 text-[10px] font-medium border tabular-nums",
+        ENV_BADGE[key] ?? ENV_BADGE.dev,
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
+const SOURCE_LABEL: Record<string, string> = {
+  upload: "UI",
+  api: "API",
+  mail_connector: "Email",
+  sharepoint: "SharePoint",
+  onedrive: "OneDrive",
+};
+
+function SourceBadge({ source }: { source?: string | null }) {
+  if (!source) return null;
+  const isApi = source === "api";
+  return (
+    <span
+      title={isApi ? "Submitted by calling the agent over POST /api/run" : `Source: ${source}`}
+      className={cn(
+        "inline-flex items-center rounded px-1.5 py-0 text-[10px] font-medium border",
+        isApi
+          ? "border-sky-500/40 bg-sky-500/10 text-sky-600 dark:text-sky-400"
+          : "border-border bg-muted text-muted-foreground",
+      )}
+    >
+      {SOURCE_LABEL[source] ?? source}
     </span>
   );
 }
@@ -738,6 +805,8 @@ function DocDetailView({
               <h2 className="text-base font-semibold leading-tight truncate">{doc.name}</h2>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                 <span>Agent: <span className="text-foreground font-medium">{doc.sourceAgent}</span></span>
+                <RunTargetBadge env={doc.runEnv} version={doc.runVersion} />
+                <SourceBadge source={doc.source} />
                 <span className="text-border">·</span>
                 <span>{doc.dateProcessed}</span>
                 <span className="text-border">·</span>
@@ -1172,7 +1241,15 @@ function DocTable({
                   <span className="font-medium text-sm">{doc.name}</span>
                 </div>
               </TableCell>
-              <TableCell className="text-sm text-muted-foreground">{doc.sourceAgent}</TableCell>
+              <TableCell className="text-sm text-muted-foreground">
+                <div className="flex flex-col items-start gap-1">
+                  <span>{doc.sourceAgent}</span>
+                  <div className="flex items-center gap-1">
+                    <RunTargetBadge env={doc.runEnv} version={doc.runVersion} />
+                    <SourceBadge source={doc.source} />
+                  </div>
+                </div>
+              </TableCell>
               <TableCell className="text-sm text-muted-foreground tabular-nums">{doc.dateProcessed}</TableCell>
               <TableCell>
                 <Badge variant="outline" className="text-xs rounded-md">{doc.documentType}</Badge>

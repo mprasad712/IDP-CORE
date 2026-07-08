@@ -81,6 +81,10 @@ interface WorkagentType {
   status: boolean;
   enabled: boolean;
   inputType?: "chat" | "autonomous" | "file_processing";
+  /** The published snapshot contains IDP nodes, so the agent is called with a document attachment
+   *  rather than an `input_value`. `inputType` cannot answer this — an IDP agent has no Chat Input,
+   *  so it publishes as "autonomous". Drives which "Export as API" snippet is shown. */
+  isIdp?: boolean;
 }
 
 const EMPTY_WORKFLOWS: WorkagentType[] = [];
@@ -207,6 +211,7 @@ export default function WorkflowsView({
     agentName: string;
     version: string;
     deployId: string;
+    isIdp: boolean;
   } | null>(null);
   const [exportAgentData, setExportAgentData] = useState<AgentType | undefined>(
     undefined,
@@ -323,6 +328,7 @@ export default function WorkflowsView({
         status: item.is_active,
         enabled: item.is_enabled,
         inputType: item.input_type,
+        isIdp: item.is_idp ?? false,
       }));
   }, [workflows, data?.items]);
 
@@ -1653,6 +1659,7 @@ export default function WorkflowsView({
                                   agentName: workflow.name,
                                   version: workflow.version ?? "v1",
                                   deployId: workflow.id,
+                                  isIdp: workflow.isIdp ?? false,
                                 });
                                 setOpenExportApiModal(true);
                               }}
@@ -1817,6 +1824,7 @@ export default function WorkflowsView({
           version={exportApiAgent.version}
           environment={activeTab.toLowerCase() as "uat" | "prod"}
           deployId={exportApiAgent.deployId}
+          isIdp={exportApiAgent.isIdp}
         />
       )}
       <Dialog

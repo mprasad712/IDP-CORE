@@ -326,7 +326,13 @@ function UploadPanel({
       setState("uploading");
       setErrorMsg("");
       pollCountRef.current = 0;
-      const processResult = await uploadAndProcess(selectedAgentId, file);
+      // Run the PUBLISHED snapshot for the selected env/version, not the draft canvas. `version_label`
+      // is the "v2" of the deployment this registry row lists; when absent the backend runs the active
+      // published version. (The Playground deliberately sends neither, so it keeps running the draft.)
+      const processResult = await uploadAndProcess(selectedAgentId, file, {
+        env: env.toLowerCase(),
+        version: selectedAgent?.version_label ?? undefined,
+      });
       setState("processing");
       pollForResult(String(processResult.document_id), filename);
     } catch (e: any) {
