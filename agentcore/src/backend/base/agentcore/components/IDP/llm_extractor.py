@@ -161,6 +161,10 @@ class IDPLLMExtractor(Node):
 
             async with session_scope() as session:
                 for name in config_names:
+                    # Match by config NAME first (removes LIMIT-1 duplicate ambiguity and covers
+                    # the real data condition where doc_type=None but the name IS the doc type).
+                    if name.strip().lower() == classified_type:
+                        return name
                     config = (await session.exec(
                         select(IdpFieldConfiguration)
                         .where(

@@ -520,3 +520,87 @@ async def test_handle_unmatched_no_classifier_always_skips(monkeypatch):
     monkeypatch.setattr(IDPLLMExtractor, "_mark_skipped", fake_skip, raising=True)
     out = await comp._handle_unmatched("unknown", ["Invoice", "Aadhaar"], False)   # no classifier
     assert isinstance(out, Data) and seen["ct"] == "unknown"   # ...still skips when no classifier ran
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. Bug 1 — multi-config match by name OR doc_type (Task 1)
+#    The old loop only checked config.doc_type; when a config has doc_type=None
+#    (duplicate "Invoice" configs are a real data condition) a correctly-classified
+#    "invoice" document wrongly gets skipped.  The fix also matches on config NAME.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_resolve_config_name_matches_by_name_when_doc_type_is_none(monkeypatch):
+    """Case (a): classified 'invoice' + config_names=['Invoice'] where the looked-up
+    config has doc_type=None.  Old code returns None (bug); fixed code returns 'Invoice'."""
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.message import Message
+
+    # Two rows returned for the name "Invoice" (duplicate configs); first has doc_type=None.
+    rows = [SimpleNamespace(name="Invoice", doc_type=None)]
+    monkeypatch.setattr("agentcore.services.deps.session_scope", lambda: _T5Scope(_T5Sess(rows)))
+
+    comp = IDPLLMExtractor()
+    comp.config_names = ["Invoice"]
+    comp.document = Message(text="TAX INVOICE", additional_kwargs={"idp": {}})
+    comp._vertex = _T5Vertex({"classification": {"type": "invoice"}, "document_id": "d3"})
+
+    result = await comp._resolve_config_name_from_classification()
+    assert result == "Invoice", f"Expected 'Invoice', got {result!r}"
+
+
+@pytest.mark.anyio
+async def test_resolve_config_name_matches_by_doc_type_when_name_differs(monkeypatch):
+    """Case (b): classified 'medical report' + config named 'Invoice Extraction Schema'
+    with doc_type='Medical Report' selected.  Should return the config name (doc_type match)."""
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.message import Message
+
+    rows = [SimpleNamespace(name="Invoice Extraction Schema", doc_type="Medical Report")]
+    monkeypatch.setattr("agentcore.services.deps.session_scope", lambda: _T5Scope(_T5Sess(rows)))
+
+    comp = IDPLLMExtractor()
+    comp.config_names = ["Invoice Extraction Schema"]
+    comp.document = Message(text="PATIENT REPORT", additional_kwargs={"idp": {}})
+    comp._vertex = _T5Vertex({"classification": {"type": "medical report"}, "document_id": "d4"})
+
+    result = await comp._resolve_config_name_from_classification()
+    assert result == "Invoice Extraction Schema", f"Expected 'Invoice Extraction Schema', got {result!r}"
+
+
+@pytest.mark.anyio
+async def test_resolve_config_name_unknown_classifier_returns_none():
+    """Case (c): classified type is 'unknown' with a classifier having run => returns None."""
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.message import Message
+
+    comp = IDPLLMExtractor()
+    comp.config_names = ["Invoice", "Medical Report"]
+    comp.document = Message(text="x", additional_kwargs={"idp": {}})
+    comp._vertex = _T5Vertex({"classification": {"type": "unknown"}})
+
+    result = await comp._resolve_config_name_from_classification()
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_resolve_config_name_no_match_returns_none(monkeypatch):
+    """Case (d): classified 'aadhaar' with config_names=['Invoice','Medical Report'],
+    neither name nor doc_type matches => None."""
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.message import Message
+
+    rows = [
+        SimpleNamespace(name="Invoice", doc_type="Invoice"),
+        SimpleNamespace(name="Medical Report", doc_type="Medical Report"),
+    ]
+    monkeypatch.setattr("agentcore.services.deps.session_scope", lambda: _T5Scope(_T5Sess(rows)))
+
+    comp = IDPLLMExtractor()
+    comp.config_names = ["Invoice", "Medical Report"]
+    comp.document = Message(text="x", additional_kwargs={"idp": {}})
+    comp._vertex = _T5Vertex({"classification": {"type": "aadhaar"}})
+
+    result = await comp._resolve_config_name_from_classification()
+    assert result is None
