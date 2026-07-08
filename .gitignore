@@ -28,3 +28,15 @@ ENV/
 agentcore/src/backend/scratch/
 agentcore/src/backend/dump_models.py
 
+
+# Local API-test scripts: these hold a live agent API key (agk_...) in plaintext.
+# A `git add .` would publish it. Keep them out of the index entirely.
+**/scripts/run_agent_api.py
+**/scripts/Invoice.pdf.pdf
+
+# Vendored langfuse checkout. NOTE: langfuse/ is currently TRACKED (added in eea5e1f
+# "feat: integrate langfuse codebase") and lives on origin/main, so this pattern does NOT
+# untrack it — git ignores only untracked paths. It stops NEW files under langfuse/ from
+# being picked up. Local edits to already-tracked langfuse files must simply not be staged;
+# `git rm -r --cached langfuse` would delete 3830 files for everyone on pull.
+langfuse/
