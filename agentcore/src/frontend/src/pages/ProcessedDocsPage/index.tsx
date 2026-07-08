@@ -603,7 +603,7 @@ function DocDetailView({
   const [showTrace, setShowTrace] = useState(false);
   const [showMatchPanel, setShowMatchPanel] = useState(false);
   const [showRunMatchModal, setShowRunMatchModal] = useState<"2way" | "3way" | null>(null);
-  const isReadOnly = doc.status === "auto_approved" || doc.status === "reviewed";
+  const isReadOnly = doc.status === "auto_approved" || doc.status === "reviewed" || doc.status === "split";
 
   const { data: matchResult, isLoading: isLoadingMatch, refetch: refetchMatch } = useGetMatchResults(
     { documentId: doc.id },
@@ -1173,16 +1173,19 @@ function DocTable({
         <TableBody>
           {(() => {
             // Build parent→children map from all docs passed in (children have parentDocumentId set).
+            const presentIds = new Set(docs.map((d) => d.id));
             const childrenByParent = new Map<string, ProcessedDoc[]>();
             for (const d of docs) {
-              if (d.parentDocumentId) {
+              if (d.parentDocumentId && presentIds.has(d.parentDocumentId)) {
+                // Only group children whose parent IS present in the current fetch.
                 const arr = childrenByParent.get(d.parentDocumentId) ?? [];
                 arr.push(d);
                 childrenByParent.set(d.parentDocumentId, arr);
               }
             }
-            // Top-level docs: those with no parent (regular docs + split parent group headers).
-            const topLevel = docs.filter((d) => !d.parentDocumentId);
+            // Top-level docs: those with no parent OR orphan children (parent absent from this set).
+            // Orphan children render as normal flat reviewable rows (never dropped).
+            const topLevel = docs.filter((d) => !d.parentDocumentId || !presentIds.has(d.parentDocumentId));
 
             // Render a normal reviewable row for a child or a standalone doc.
             const renderDocRow = (doc: ProcessedDoc, indent = false) => (
