@@ -161,10 +161,8 @@ class IDPLLMExtractor(Node):
 
             async with session_scope() as session:
                 for name in config_names:
-                    # Match by config NAME first (removes LIMIT-1 duplicate ambiguity and covers
-                    # the real data condition where doc_type=None but the name IS the doc type).
-                    if name.strip().lower() == classified_type:
-                        return name
+                    if not name:
+                        continue
                     config = (await session.exec(
                         select(IdpFieldConfiguration)
                         .where(
@@ -173,7 +171,11 @@ class IDPLLMExtractor(Node):
                         )
                         .limit(1)
                     )).first()
-                    if config and config.doc_type and config.doc_type.strip().lower() == classified_type:
+                    if config is None:
+                        continue
+                    cfg_name = (config.name or "").strip().lower()
+                    cfg_dtype = (config.doc_type or "").strip().lower()
+                    if cfg_name == classified_type or cfg_dtype == classified_type:
                         return config.name
         except Exception as exc:
             logger.warning(f"[AIFieldExtractor] multi-config lookup failed: {exc}")

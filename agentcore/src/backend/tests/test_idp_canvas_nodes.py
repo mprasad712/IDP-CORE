@@ -604,3 +604,26 @@ async def test_resolve_config_name_no_match_returns_none(monkeypatch):
 
     result = await comp._resolve_config_name_from_classification()
     assert result is None
+
+
+@pytest.mark.anyio
+async def test_resolve_config_name_skips_none_entry_and_matches_valid(monkeypatch):
+    """config_names contains a None entry BEFORE the valid matching name.
+    Before the fix this would raise AttributeError (None.strip()) which was
+    swallowed by the outer except, returning None instead of 'Invoice'.
+    After the fix the None entry is skipped and the valid match is returned."""
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.message import Message
+
+    # First call: config lookup for None entry — should be skipped (never called).
+    # Second call: config lookup for "Invoice" — returns the matching row.
+    rows = [SimpleNamespace(name="Invoice", doc_type=None)]
+    monkeypatch.setattr("agentcore.services.deps.session_scope", lambda: _T5Scope(_T5Sess(rows)))
+
+    comp = IDPLLMExtractor()
+    comp.config_names = [None, "Invoice"]   # None before the valid entry
+    comp.document = Message(text="TAX INVOICE", additional_kwargs={"idp": {}})
+    comp._vertex = _T5Vertex({"classification": {"type": "invoice"}, "document_id": "d5"})
+
+    result = await comp._resolve_config_name_from_classification()
+    assert result == "Invoice", f"Expected 'Invoice', got {result!r}"
