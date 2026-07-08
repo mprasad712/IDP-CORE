@@ -58,16 +58,23 @@ class IDPDocumentUpload(Node):
                     .order_by(IdpProcessingJob.created_at.desc())
                 )
             ).first()
-            agent_scope = str(doc.agent_id)
+            # The directory the document was ACTUALLY written into — read it from `file_path`, never
+            # rebuild it from `doc.agent_id`. Documents stored before the directory rename live under the
+            # old `idp_agents.id` folder and must keep resolving. See services/idp/storage_scope.py.
+            from agentcore.services.idp.storage_scope import scope_of
+
             file_path = doc.file_path or ""
+            agent_scope = scope_of(file_path)
             file_name = file_path.split("/", 1)[1] if "/" in file_path else file_path
             file_type = (doc.file_type or "").lower().lstrip(".")
             job_id = str(job.id) if job else None
+            idp_agent_id = str(doc.agent_id)
 
         file_bytes = await get_storage_service().get_file(agent_scope, file_name)
         overall_kind, page_status = text_layer.classify_document(file_bytes, file_type, min_text_length=50)
 
         text = ""
+        tokens: list[dict] = []
         try:
             _, tokens = text_layer.extract_native_text(file_bytes, file_type)
             text = " ".join(str(t.get("text", "")) for t in tokens)
@@ -79,10 +86,18 @@ class IDPDocumentUpload(Node):
             text=text,
             document_id=str(doc_id),
             job_id=job_id,
-            agent_id=agent_scope,
+            # `agent_id` is the IdpAgent row id (what IdpDocument.agent_id FKs to); `agent_scope` is the
+            # storage DIRECTORY. They used to be the same string — they are not any more.
+            agent_id=idp_agent_id,
             agent_scope=agent_scope,
             file_name=file_name,
             file_type=file_type,
             overall_kind=overall_kind,
             page_status=page_status,
+            # Carry the native token stream, not just the flattened text. It is the ONLY thing that can say
+            # whether an extracted value is actually in the document. Without it every field on a digital
+            # PDF persists `grounded=NULL` — unverifiable — because only the PaddleOCR node ever set this,
+            # and a digital document never reaches it. A scanned page yields few or no tokens here; the OCR
+            # node overwrites them downstream via `carry(...)`.
+            tokens=tokens,
         )

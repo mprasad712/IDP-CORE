@@ -19,6 +19,22 @@ from agentcore.services.base import Service
 # Connector catalogue helpers (async)
 # ---------------------------------------------------------------------------
 
+async def _connector_storage_scope(session, idp_agent) -> str:
+    """Storage directory for a connector-ingested document: ``<agent.id>(<name>_dev_draft)``.
+
+    Connectors do not (yet) carry an env/version, so their documents run the draft canvas. Falls back to
+    the raw base-agent id if the Agent row can't be read — a directory name must never fail an ingest.
+    """
+    from agentcore.services.database.models.agent.model import Agent
+    from agentcore.services.idp.storage_scope import storage_scope
+
+    try:
+        base_agent = await session.get(Agent, idp_agent.agent_id)
+        return storage_scope(idp_agent.agent_id, getattr(base_agent, "name", None))
+    except Exception:  # noqa: BLE001 - never block ingest on a cosmetic directory name
+        return str(idp_agent.agent_id)
+
+
 async def _get_storage_connector_config(connector_id: str) -> dict | None:
     """Fetch and decrypt provider_config for a storage connector from the DB."""
     from uuid import UUID as _UUID
@@ -2207,7 +2223,9 @@ class TriggerService(Service):
                 session.add(idp_agent)
                 await session.flush()
 
-            agent_scope = str(idp_agent.id)
+            # Connector-ingested documents always run the DRAFT canvas (no env/version is threaded
+            # through yet), so they land in the agent's "(name_dev_draft)" directory.
+            agent_scope = await _connector_storage_scope(session, idp_agent)
             all_ok = True  # True only if every (intended) attachment ingested → email marked seen
             for att in raw_attachments:
                 name = att.get("name", "attachment")
@@ -2432,7 +2450,9 @@ class TriggerService(Service):
                     session.add(idp_agent)
                     await session.flush()
 
-                agent_scope = str(idp_agent.id)
+                # Connector-ingested documents always run the DRAFT canvas (no env/version is threaded
+                # through yet), so they land in the agent's "(name_dev_draft)" directory.
+                agent_scope = await _connector_storage_scope(session, idp_agent)
                 conn_uuid = None
                 try:
                     conn_uuid = _UUID(str(connector_id))
@@ -2643,7 +2663,9 @@ class TriggerService(Service):
                 session.add(idp_agent)
                 await session.flush()
 
-            agent_scope = str(idp_agent.id)
+            # Connector-ingested documents always run the DRAFT canvas (no env/version is threaded
+            # through yet), so they land in the agent's "(name_dev_draft)" directory.
+            agent_scope = await _connector_storage_scope(session, idp_agent)
             conn_uuid = None
             try:
                 conn_uuid = _UUID(str(connector_id))

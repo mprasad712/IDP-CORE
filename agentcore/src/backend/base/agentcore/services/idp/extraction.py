@@ -18,13 +18,7 @@ try:
     _MAX_VISION_PAGES = max(1, int(os.getenv("IDP_MAX_VISION_PAGES", "20") or "20"))
 except (TypeError, ValueError):
     _MAX_VISION_PAGES = 20
-from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
-from agentcore.services.database.models.idp.config import (
-    IdpFieldConfiguration,
-    IdpFieldConfigHeader,
-    IdpFieldConfigLineItem,
-)
 from agentcore.services.idp.prompt_templates import (
     build_extraction_messages,
     build_compact_extraction_messages,
@@ -121,9 +115,30 @@ COMPACT_SYSTEM_PROMPT = (
     "- Do NOT include reasoning text. Return ONLY valid JSON, no prose, no markdown fences."
 )
 
-# Fallback used only when the model returns a plain scalar instead of {value,confidence}.
-# This path should now be rare since the prompt explicitly requests the object form.
-_DEFAULT_FIELD_CONFIDENCE = 0.75
+def _model_confidence(raw: Any, value: Any) -> float | None:
+    """The MODEL's own confidence for one field, clamped to [0,1]. Never a made-up constant.
+
+    * ``0.0``  — the field has no value. Stored for the UI, excluded from the overall mean.
+    * ``None`` — the field HAS a value but the model reported no usable confidence. We do not invent one:
+      an unknown confidence is not a confident one. It is stored as SQL NULL and excluded from the mean,
+      so a response where the model omits every confidence yields ``overall=0.0`` and routes to review.
+    * otherwise the model's float.
+
+    Every populated field used to get a hardcoded ``0.75`` here (and ``0.8`` on the structured-output path),
+    which then got overwritten downstream by an OCR-substring score — so the model's judgement never reached
+    the database at all. Out-of-range values are clamped rather than rescaled: a model that answers ``95``
+    meaning 95% is indistinguishable from one that is badly broken, and clamping to 1.0 fails safe toward
+    "the model claims certainty" rather than silently inventing ``0.95``.
+    """
+    if value is None or not str(value).strip():
+        return 0.0
+    if raw is None:
+        return None
+    try:
+        conf = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, conf))
 
 
 def _strip_code_fences(text: str) -> str:
@@ -166,29 +181,20 @@ def _loads_lenient(raw_text: str) -> Any:
 
 
 def _expand_value(v: Any) -> tuple:
-    """Map a scalar value OR a {value,confidence,reasoning} dict to (value:str|None, confidence, reasoning).
+    """Map a ``{value,confidence,reasoning}`` dict OR a bare scalar to ``(value:str|None, confidence, reasoning)``.
 
-    Compact responses give a scalar → assign the uniform default confidence. A verbose response
-    (dict with a real confidence) is preserved, so this works for both output styles.
+    Both compact and verbose prompts now request the dict form. A bare scalar means the model ignored the
+    schema; it yields ``confidence=None`` (unknown), and the caller logs it. It used to yield a hardcoded
+    0.75 with ``reasoning="compact extraction"`` — which is why every field in the database carries that
+    string and why "the LLM's confidence" was a constant nobody had ever measured.
     """
     if isinstance(v, dict):
         val = v.get("value")
         val_s = str(val) if val not in (None, "") else None
-        if v.get("confidence") is not None:
-            try:
-                conf = float(v.get("confidence"))
-            except (TypeError, ValueError):
-                conf = _DEFAULT_FIELD_CONFIDENCE if val_s is not None else 0.0
-        else:
-            conf = _DEFAULT_FIELD_CONFIDENCE if val_s is not None else 0.0
-        # Clamp to [0,1]: a model may return 95 (meaning 95%), 1.2, or -0.5 — an out-of-range
-        # score would corrupt the overall-confidence average and break auto-approve routing.
-        conf = max(0.0, min(1.0, conf))
         reasoning = v.get("reasoning") if v.get("reasoning") is not None else None
-        return val_s, conf, reasoning
+        return val_s, _model_confidence(v.get("confidence"), val_s), reasoning
     val_s = str(v) if v not in (None, "") else None
-    conf = _DEFAULT_FIELD_CONFIDENCE if val_s is not None else 0.0
-    return val_s, conf, ("compact extraction" if val_s is not None else None)
+    return val_s, _model_confidence(None, val_s), None
 
 
 def _expand_extraction(parsed: Any) -> Dict[str, Any]:
@@ -377,13 +383,15 @@ async def extract_dynamic(
     clean_headers: Dict[str, Any] = {}
     for k, v in parsed["headers"].items():
         if isinstance(v, dict):
+            _val = str(v["value"]) if v.get("value") is not None else None
             clean_headers[k] = {
-                "value": str(v["value"]) if v.get("value") is not None else None,
-                "confidence": float(v.get("confidence", 0.8)),
+                "value": _val,
+                "confidence": _model_confidence(v.get("confidence"), _val),
                 "reasoning": str(v["reasoning"]) if v.get("reasoning") is not None else None,
             }
         else:
-            clean_headers[k] = {"value": str(v) if v is not None else None, "confidence": 0.8, "reasoning": "Direct extraction"}
+            _val = str(v) if v is not None else None
+            clean_headers[k] = {"value": _val, "confidence": _model_confidence(None, _val), "reasoning": None}
 
     clean_line_items: List[Dict[str, Any]] = []
     for idx, row in enumerate(parsed["line_items"]):
@@ -394,10 +402,11 @@ async def extract_dynamic(
         for col in row.get("columns", []):
             if not isinstance(col, dict):
                 continue
+            _val = str(col["value"]) if col.get("value") is not None else None
             clean_cols.append({
                 "column_name": str(col.get("column_name", "")),
-                "value": str(col["value"]) if col.get("value") is not None else None,
-                "confidence": float(col.get("confidence", 0.8)),
+                "value": _val,
+                "confidence": _model_confidence(col.get("confidence"), _val),
                 "reasoning": str(col["reasoning"]) if col.get("reasoning") is not None else None,
             })
         clean_line_items.append({"row_index": int(row_idx), "columns": clean_cols})
@@ -436,25 +445,11 @@ async def extract_named_config(
     llm_model: Any
 ) -> Dict[str, Any]:
     """Extract structured data from a document conforming to a saved Field Configuration schema."""
-    # 1. Fetch Configuration
-    config = await session.get(IdpFieldConfiguration, field_config_id)
-    if not config or config.deleted_at is not None:
-        raise ValueError(f"Active field configuration '{field_config_id}' not found.")
+    # 1+2. Field definitions: this run's FROZEN copy on a published run (the config is mutable in place
+    #      and the graph only names it), else the live tables. Raises if neither is available.
+    from agentcore.services.idp.field_defs import load_field_definitions
 
-    # 2. Fetch associated headers and line item fields
-    headers_stmt = (
-        select(IdpFieldConfigHeader)
-        .where(IdpFieldConfigHeader.config_id == field_config_id)
-        .order_by(IdpFieldConfigHeader.display_order)
-    )
-    headers = (await session.exec(headers_stmt)).all()
-
-    lines_stmt = (
-        select(IdpFieldConfigLineItem)
-        .where(IdpFieldConfigLineItem.config_id == field_config_id)
-        .order_by(IdpFieldConfigLineItem.display_order)
-    )
-    line_items = (await session.exec(lines_stmt)).all()
+    headers, line_items = await load_field_definitions(session, field_config_id)
 
     # 3. Build a COMPACT prompt (flat values, field names + DB prompts as hints). The verbose
     #    per-cell value+confidence+reasoning schema truncates line_items on multi-row tables.
@@ -787,24 +782,10 @@ async def extract_multimodal(
             raise ValueError("AsyncSession is required for configuration-based multimodal extraction.")
         
         config_id = UUID(str(prompt_or_config_id))
-        config = await session.get(IdpFieldConfiguration, config_id)
-        if not config or config.deleted_at is not None:
-            raise ValueError(f"Active field configuration '{config_id}' not found.")
+        # Frozen definitions on a published run, else the live tables (see services/idp/field_defs.py).
+        from agentcore.services.idp.field_defs import load_field_definitions
 
-        # Fetch associated headers and line item fields
-        headers_stmt = (
-            select(IdpFieldConfigHeader)
-            .where(IdpFieldConfigHeader.config_id == config_id)
-            .order_by(IdpFieldConfigHeader.display_order)
-        )
-        headers = (await session.exec(headers_stmt)).all()
-
-        lines_stmt = (
-            select(IdpFieldConfigLineItem)
-            .where(IdpFieldConfigLineItem.config_id == config_id)
-            .order_by(IdpFieldConfigLineItem.display_order)
-        )
-        line_items = (await session.exec(lines_stmt)).all()
+        headers, line_items = await load_field_definitions(session, config_id)
 
         # Build prompt from general template; images are the document so pass a placeholder for {data}
         _sys, prompt = build_extraction_messages(
@@ -873,28 +854,36 @@ async def extract_multimodal(
                 raise ValueError("Parsed output is not a JSON object.")
             parsed.setdefault("headers", {})
             parsed.setdefault("line_items", [])
-            # Normalise the verbose multimodal response into the canonical shape.
+            # Normalise the verbose multimodal response into the canonical shape. Confidence comes from the
+            # model or it is None — a `0.8` default here would be the vision path's copy of the `0.75` bug.
             clean_h: Dict[str, Any] = {}
             for k, v in parsed["headers"].items():
                 if isinstance(v, dict):
+                    _hv = str(v["value"]) if v.get("value") is not None else None
                     clean_h[k] = {
-                        "value": str(v["value"]) if v.get("value") is not None else None,
-                        "confidence": float(v.get("confidence", 0.8)),
+                        "value": _hv,
+                        "confidence": _model_confidence(v.get("confidence"), _hv),
                         "reasoning": str(v["reasoning"]) if v.get("reasoning") is not None else None,
                     }
                 else:
-                    clean_h[k] = {"value": str(v) if v is not None else None, "confidence": 0.8, "reasoning": "Direct extraction"}
+                    _hv = str(v) if v is not None else None
+                    clean_h[k] = {"value": _hv, "confidence": _model_confidence(None, _hv), "reasoning": None}
             clean_li: List[Dict[str, Any]] = []
             for idx, row in enumerate(parsed["line_items"]):
                 if not isinstance(row, dict):
                     continue
-                clean_li.append({"row_index": row.get("row_index", idx), "columns": [
-                    {"column_name": str(c.get("column_name", "")),
-                     "value": str(c["value"]) if c.get("value") is not None else None,
-                     "confidence": float(c.get("confidence", 0.8)),
-                     "reasoning": str(c["reasoning"]) if c.get("reasoning") is not None else None}
-                    for c in row.get("columns", []) if isinstance(c, dict)
-                ]})
+                cols: List[Dict[str, Any]] = []
+                for c in row.get("columns", []):
+                    if not isinstance(c, dict):
+                        continue
+                    _cv = str(c["value"]) if c.get("value") is not None else None
+                    cols.append({
+                        "column_name": str(c.get("column_name", "")),
+                        "value": _cv,
+                        "confidence": _model_confidence(c.get("confidence"), _cv),
+                        "reasoning": str(c["reasoning"]) if c.get("reasoning") is not None else None,
+                    })
+                clean_li.append({"row_index": row.get("row_index", idx), "columns": cols})
             raw_result = {"headers": clean_h, "line_items": clean_li}
             usage_info = _extract_usage_from_response(response, model_fallback=getattr(llm_model, "model_name", None))
         except Exception as e:
@@ -980,127 +969,63 @@ def _normalize_line_items(rows: Any) -> List[Dict[str, Any]]:
                 flat_cols.append({
                     "column_name": key,
                     "value": val.get("value"),
-                    "confidence": val.get("confidence", 0.0),
+                    "confidence": _model_confidence(val.get("confidence"), val.get("value")),
                     "reasoning": val.get("reasoning"),
                 })
             else:
-                flat_cols.append({"column_name": key, "value": val, "confidence": 0.0})
+                # A bare scalar cell: the model ignored the {value, confidence} schema. Unknown, not 0.0 —
+                # a hard 0.0 would drag the document's mean down and route a good extraction to review.
+                flat_cols.append({"column_name": key, "value": val, "confidence": _model_confidence(None, val)})
         if flat_cols:
             normalized.append({"row_index": row_idx, "columns": flat_cols})
     return normalized
 
 
-def _ocr_evidence(
-    extracted_value: str,
-    ocr_tokens: List[Dict[str, Any]],
-    llm_conf: float,
-    vision_mode: bool = False,
-) -> tuple:
-    """Return (source_location, confidence_score) from OCR evidence.
+def field_confidences(extraction_result: Dict[str, Any]) -> List[float]:
+    """The MODEL'S OWN per-field confidence for every POPULATED header and line-item cell, in save order.
 
-    LLMs always over-report confidence (0.9+ for everything they found, 0.0 for
-    what they missed) so their self-score is essentially binary.  Real confidence
-    comes from how clearly the extracted value appears in the raw OCR output:
+    THE single definition of "how confident are we". ``save_extraction_results`` persists these, and
+    ``graph_native.payload.overall_confidence`` (the Confidence Router / Rules / Approval Gate) averages
+    the same list — so the number that routes a document is the number stored on it and shown in the UI.
 
-      0.88–1.00  exact single-token match           — value found verbatim, clear OCR
-      0.70–0.87  substring / near-exact match       — found with minor formatting diff
-      0.52–0.69  value in concatenated token stream — found but split across tokens
-      0.25–0.51  word-level overlap only            — partially matched, possible error
-      0.10–0.35  value not in OCR (inferred)        — model calculated / reformatted
-      0.00        null / missing field
+    Two exclusions, both deliberate:
+
+    * **No value** — averaging absent fields in as 0.0 would drag the mean far below the real confidence of
+      what WAS extracted. A 40-field config that legitimately finds 12 fields is not 30% confident.
+    * **Confidence ``None``** — the model returned a value but no usable confidence (it ignored the schema).
+      Unknown is not zero and it is not 0.75 either. If EVERY populated field is unknown this list is empty
+      and the overall confidence is 0.0, which routes the document to review. That is the safe direction:
+      we know nothing about it, so a human looks.
+
+    Grounding is deliberately absent. Whether a value actually appears in the document is an INDEPENDENT
+    signal (:class:`grounding.Grounder`); folding it into this number is precisely the bug this replaced.
+    An OCR substring ratio was overwriting the model's judgement, so a value the model flagged as a guess
+    scored 1.0 for appearing on the page, and a correctly reformatted date scored 0.285 for not appearing
+    verbatim. Route on confidence AND grounding — never on their product.
     """
-    if not extracted_value or not extracted_value.strip():
-        return None, 0.0
+    confs: List[float] = []
 
-    val = extracted_value.strip().lower()
-    if not val:
-        return None, 0.0
+    def _take(entry: Any) -> None:
+        if not isinstance(entry, dict) or entry.get("value") is None:
+            return
+        conf = entry.get("confidence")
+        if conf is None:
+            return
+        confs.append(float(conf))
 
-    if not ocr_tokens:
-        # Vision path: there is NO OCR token stream to score against — the model read the pixels
-        # directly — so trust its own per-field confidence (clamped to [0,1] in case it over-reports).
-        if vision_mode:
-            return None, round(max(0.0, min(1.0, llm_conf)), 3)
-        # Text path: no OCR tokens (e.g. a digital PDF / native text with no token export). Apply a
-        # LIGHT dampening — text-only extraction isn't OCR-cross-checked — but do NOT cap below the
-        # usual auto-approve threshold, or a genuinely high-confidence digital doc could never
-        # auto-approve (Codex #9). max(0.0,...) guards a model reporting a negative confidence.
-        return None, round(max(0.0, min(llm_conf * 0.92, 0.92)), 3)
+    for field_data in (extraction_result.get("headers") or {}).values():
+        _take(field_data)
+    for row in _normalize_line_items(extraction_result.get("line_items", [])):
+        for col in row.get("columns", []):
+            _take(col)
 
-    # Pre-build the full document text for multi-token substring checks.
-    all_text = " ".join(str(t.get("text", "")).strip() for t in ocr_tokens).lower()
-    avg_ocr_conf = (
-        sum(float(t.get("confidence", 1.0)) for t in ocr_tokens) / len(ocr_tokens)
-    )
+    return confs
 
-    source_loc: dict | None = None
-    best_score = 0.0
-    val_words = val.split()
 
-    for token in ocr_tokens:
-        tok_text = str(token.get("text", "")).strip().lower()
-        if not tok_text:
-            continue
-        ocr_conf = float(token.get("confidence", 1.0))
-
-        # ── Exact single-token match ──
-        if val == tok_text:
-            score = 0.88 + ocr_conf * 0.12          # 0.88 – 1.00
-            if score > best_score:
-                best_score = score
-                source_loc = {
-                    "page_number": token.get("page_number", 1),
-                    "bounding_box": token.get("bounding_box"),
-                    "confidence": ocr_conf,
-                }
-            continue
-
-        # ── Substring match (value in token text or token in value) ──
-        if val in tok_text or tok_text in val:
-            shorter = min(len(val), len(tok_text))
-            longer  = max(len(val), len(tok_text))
-            ratio   = shorter / longer if longer else 0.0
-            score   = (0.70 + ratio * 0.17) * ocr_conf   # 0.70 – 0.87 × ocr_conf
-            if score > best_score:
-                best_score = score
-                if source_loc is None:
-                    source_loc = {
-                        "page_number": token.get("page_number", 1),
-                        "bounding_box": token.get("bounding_box"),
-                        "confidence": ocr_conf,
-                    }
-            continue
-
-        # ── Word-level overlap (multi-word values like "Acme Supplies Ltd") ──
-        tok_words = set(tok_text.split())
-        overlap   = set(val_words) & tok_words
-        if overlap:
-            overlap_ratio = len(overlap) / max(len(val_words), len(tok_words))
-            score = overlap_ratio * 0.50 * ocr_conf   # 0.00 – 0.50
-            if score > best_score:
-                best_score = score
-                if source_loc is None:
-                    source_loc = {
-                        "page_number": token.get("page_number", 1),
-                        "bounding_box": token.get("bounding_box"),
-                        "confidence": ocr_conf,
-                    }
-
-    # ── Multi-token concatenation check ──
-    # Catches values split across adjacent tokens (e.g. "14,200.00" → "14," + "200.00")
-    if best_score < 0.52 and val in all_text:
-        score = 0.52 + avg_ocr_conf * 0.17           # 0.52 – 0.69
-        best_score = max(best_score, score)
-
-    if best_score > 0.0:
-        return source_loc, round(min(best_score, 1.0), 3)
-
-    # ── Not found in OCR at all ──
-    # The model inferred, calculated, or reformatted this value.
-    # Use a heavily dampened LLM score so it stays clearly below verified fields.
-    # max(0.0,...) guards against a negative model confidence -> never persist a negative score.
-    inferred_score = round(max(0.0, min(llm_conf * 0.38, 0.35)), 3)
-    return source_loc, inferred_score
+def compute_overall_confidence(extraction_result: Dict[str, Any]) -> float:
+    """Mean of :func:`field_confidences`. Nothing usable -> 0.0 (routes to review, never auto-approves)."""
+    confs = field_confidences(extraction_result)
+    return sum(confs) / len(confs) if confs else 0.0
 
 
 async def save_extraction_results(
@@ -1109,39 +1034,106 @@ async def save_extraction_results(
     job_id: UUID,
     extraction_result: Dict[str, Any],
     ocr_tokens: Optional[List[Dict[str, Any]]] = None,
-    vision_mode: bool = False,
+    skip_if_already_saved: bool = False,
 ) -> float:
-    """Persist extraction results and compute OCR-evidence-based field confidence.
+    """Persist extraction results. Returns the document's overall confidence.
 
-    Confidence is derived from how clearly each extracted value appears in the raw
-    OCR token stream (see _ocr_evidence), NOT from LLM self-reporting which is
-    systematically overconfident (always ~0.9 for found fields, 0.0 for missing ones).
+    Two INDEPENDENT signals are stored per field, and they must not be mixed:
+
+    * ``confidence_score`` — the model's own number (NULL if it reported none). Only this is averaged.
+    * ``grounded`` / ``source_location`` — whether the value actually appears in ``ocr_tokens``, decided by
+      :class:`grounding.Grounder`, which the model does not influence. ``grounded=None`` means there was no
+      token stream to check against (vision path); it is *unknown*, not a failure.
+
+    ``ocr_tokens`` therefore no longer affects the score at all — it only decides grounding. It used to BE
+    the score: a substring ratio against the token stream overwrote whatever the model said.
+
+    CONCURRENCY: a native graph can reach more than one ``Processed Docs Output`` (both branches of a
+    Confidence Router are wired to one), and each sink runs in its OWN session. The delete-then-insert
+    below is idempotent only when serialized — run it twice in parallel and both DELETEs see nothing,
+    both INSERT, and the second dies on ``uq_idp_ext_header_job_field``. So take a row lock on the
+    document first: it makes every writer for this document queue up behind the one in flight.
+
+    ``skip_if_already_saved`` then makes an opportunistic writer **never downgrade** what is already there.
+    The losing sink is the one on the router branch the document did not take: it carries no OCR tokens, so
+    its rows would all have ``grounded=None``. Note the rule is NOT "first writer wins" — which sink reaches
+    the lock first is arbitrary, so that would lose the grounding half the time. It is:
+
+        * rows exist AND they were grounding-checked        -> keep them, save nothing
+        * rows exist, unchecked, and WE have no tokens      -> keep them (nothing to add)
+        * rows exist, unchecked, and WE have tokens         -> replace them (an upgrade)
+        * no rows                                           -> save
+
+    Callers that own the document's single save (``pipeline._run``) leave the flag False and get the old
+    replace-everything behavior.
     """
-    from sqlalchemy import delete
+    from sqlalchemy import delete, select as sa_select
     from agentcore.services.database.models.idp.documents import (
         IdpExtractedHeader,
         IdpExtractedLineItem,
         IdpDocument
     )
 
+    # 0. Serialize every writer for this document. Concurrent sinks now queue instead of colliding.
+    await session.execute(sa_select(IdpDocument.id).where(IdpDocument.id == document_id).with_for_update())
+
+    from agentcore.services.idp.grounding import Grounder, evidence_trace, grounding_summary
+
+    if skip_if_already_saved:
+        # Read `grounded` in PYTHON, not via SQL COUNT. It is tri-state, and `COUNT(grounded)` would treat
+        # an explicit `False` (the hallucination signal) identically to a `True`. Only a handful of rows.
+        flags = (
+            await session.execute(
+                sa_select(IdpExtractedHeader.grounded).where(IdpExtractedHeader.job_id == job_id)
+            )
+        ).scalars().all()
+        already = len(flags)
+        checked = sum(1 for g in flags if g is not None)
+        # Only overwrite to UPGRADE unchecked rows with grounding-checked ones.
+        if already and (checked or not ocr_tokens):
+            doc = await session.get(IdpDocument, document_id)
+            existing_conf = float(doc.overall_confidence or 0.0) if doc else 0.0
+            logger.info(
+                f"[Extraction] {document_id}: job {job_id} already has {already} header(s) "
+                f"({checked} grounding-checked) — another sink persisted this run; not overwriting "
+                f"(conf={existing_conf:.2f})."
+            )
+            await session.commit()   # release the row lock
+            return existing_conf
+        if already:
+            logger.info(
+                f"[Extraction] {document_id}: replacing {already} unchecked header(s) for job {job_id} "
+                f"with a grounding-checked save."
+            )
+
     # 1. Delete stale records so re-processing is idempotent.
     await session.execute(delete(IdpExtractedHeader).where(IdpExtractedHeader.job_id == job_id))
     await session.execute(delete(IdpExtractedLineItem).where(IdpExtractedLineItem.job_id == job_id))
 
-    confidences: List[float] = []
+    # Built ONCE for the whole document — it normalizes and indexes the token stream. `_ocr_evidence`
+    # re-joined every token into one string per field, i.e. 40 full passes for a 40-field config.
+    grounder = Grounder(ocr_tokens)
+    grounded_flags: List[Optional[bool]] = []
+    ungrounded: List[str] = []
+    missing_conf: List[str] = []
 
     # 2. Save header fields.
     headers_dict = extraction_result.get("headers", {})
     for field_name, field_data in headers_dict.items():
         val = field_data.get("value")
         extracted_val = str(val) if val is not None else None
-        llm_conf = float(field_data.get("confidence", 0.0))
-        reasoning = field_data.get("reasoning")
+        conf = field_data.get("confidence")          # the MODEL's number; None when it reported none
 
-        if extracted_val is None:
-            conf, source_loc = 0.0, None
-        else:
-            source_loc, conf = _ocr_evidence(extracted_val, ocr_tokens or [], llm_conf, vision_mode=vision_mode)
+        source_loc, grounded = grounder.check(extracted_val)
+        # Quote the document, don't ask the model to justify itself. Only the verbose/free-text prompt
+        # supplies `reasoning`; the compact one is forbidden from doing so (output-token overflow).
+        reasoning = field_data.get("reasoning") or evidence_trace(grounded, source_loc)
+        if extracted_val is not None:
+            grounded_flags.append(grounded)
+            if grounded is False:
+                ungrounded.append(field_name)
+            if conf is None:
+                missing_conf.append(field_name)
 
         header_rec = IdpExtractedHeader(
             id=uuid4(),
@@ -1152,14 +1144,10 @@ async def save_extraction_results(
             confidence_score=conf,
             reasoning_trace=reasoning,
             source_location=source_loc,
+            grounded=grounded,
             is_reviewed=False,
         )
         session.add(header_rec)
-        # Only extracted fields count toward overall confidence.
-        # Null/missing fields are stored with conf=0.0 for the UI but excluded
-        # from the average so they don't dilute the score of what WAS found.
-        if extracted_val is not None:
-            confidences.append(conf)
 
     # 3. Save line items (handles both flat and nested LLM output shapes).
     line_items_list = _normalize_line_items(extraction_result.get("line_items", []))
@@ -1169,13 +1157,16 @@ async def save_extraction_results(
             col_name = col.get("column_name")
             val = col.get("value")
             extracted_val = str(val) if val is not None else None
-            llm_conf = float(col.get("confidence", 0.0))
-            reasoning = col.get("reasoning")
+            conf = col.get("confidence")
 
-            if extracted_val is None:
-                conf, source_loc = 0.0, None
-            else:
-                source_loc, conf = _ocr_evidence(extracted_val, ocr_tokens or [], llm_conf, vision_mode=vision_mode)
+            source_loc, grounded = grounder.check(extracted_val)
+            reasoning = col.get("reasoning") or evidence_trace(grounded, source_loc)
+            if extracted_val is not None:
+                grounded_flags.append(grounded)
+                if grounded is False:
+                    ungrounded.append(f"row{row_idx}.{col_name}")
+                if conf is None:
+                    missing_conf.append(f"row{row_idx}.{col_name}")
 
             line_rec = IdpExtractedLineItem(
                 id=uuid4(),
@@ -1187,15 +1178,35 @@ async def save_extraction_results(
                 confidence_score=conf,
                 reasoning_trace=reasoning,
                 source_location=source_loc,
+                grounded=grounded,
                 is_reviewed=False,
             )
             session.add(line_rec)
-            if extracted_val is not None:
-                confidences.append(conf)
 
-    # 4. Overall confidence = mean of all field scores.
-    # No fields extracted → 0.0 (routes to HITL review rather than silent auto-approve).
-    overall_conf = sum(confidences) / len(confidences) if confidences else 0.0
+    # 4. Overall confidence = mean of the MODEL's per-field confidences. Computed by the SAME function the
+    #    Confidence Router / Rules / Approval Gate use, so the routed number, the stored number and the UI
+    #    number are one number. Grounding is reported separately and never folded in.
+    overall_conf = compute_overall_confidence(extraction_result)
+
+    summary = grounding_summary(grounded_flags)
+    if not grounder.available:
+        logger.info(f"[Extraction] {document_id}: no token stream — grounding unknown for all fields.")
+    elif ungrounded:
+        logger.warning(
+            f"[Extraction] {document_id}: {summary['ungrounded']}/{summary['checked']} extracted value(s) "
+            f"NOT found in the document: {', '.join(ungrounded[:10])}"
+            f"{' …' if len(ungrounded) > 10 else ''}"
+        )
+    if missing_conf:
+        # Headers AND line-item cells. If the model ignored the {value, confidence} schema entirely this
+        # list holds every populated field, the mean has nothing to average, and the document scores 0.0 —
+        # which routes it to review. That is the intended failure direction, but it should be loud.
+        logger.warning(
+            f"[Extraction] {document_id}: the model returned no confidence for {len(missing_conf)} of "
+            f"{len(grounded_flags)} populated field(s) — stored as NULL and excluded from the mean "
+            f"(overall={overall_conf:.4f}): {', '.join(missing_conf[:10])}"
+            f"{' …' if len(missing_conf) > 10 else ''}"
+        )
 
     # 5. Persist overall confidence on the document row.
     doc = await session.get(IdpDocument, document_id)

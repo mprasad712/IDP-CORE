@@ -170,15 +170,15 @@ async def test_extract_dynamic_dirty_json_fallback():
     )
 
     assert "headers" in res
-    # Flat value "INV-1003" should be converted to the canonical structured format with the
-    # uniform compact-mode default confidence.
-    from agentcore.services.idp.extraction import _DEFAULT_FIELD_CONFIDENCE
+    # A bare scalar means the model ignored the {value, confidence} schema, so its confidence is UNKNOWN.
+    # It used to be silently replaced with a hardcoded 0.75 (and stamped reasoning="compact extraction"),
+    # which is why every row in the database carried that constant. Unknown is not 0.75 — and not 0.0.
     assert res["headers"]["invoice_number"]["value"] == "INV-1003"
-    assert res["headers"]["invoice_number"]["confidence"] == _DEFAULT_FIELD_CONFIDENCE
-    assert res["headers"]["invoice_number"]["reasoning"] == "compact extraction"
+    assert res["headers"]["invoice_number"]["confidence"] is None
+    assert res["headers"]["invoice_number"]["reasoning"] is None
 
-    # Columns present in the document get the same default confidence.
-    assert res["line_items"][0]["columns"][0]["confidence"] == _DEFAULT_FIELD_CONFIDENCE
+    # Same for a scalar line-item cell.
+    assert res["line_items"][0]["columns"][0]["confidence"] is None
 
 @pytest.mark.anyio
 async def test_extract_named_config_success():
@@ -577,11 +577,10 @@ async def test_save_extraction_results_success():
             ocr_tokens=ocr_tokens
         )
 
-    # Confidence is now OCR-evidence-based (NOT the LLM's self-reported score): values found
-    # verbatim in the OCR tokens score high, reformatted/absent values score low. Here
-    # invoice_number + item are exact OCR matches (high ~0.99); date is absent (low ~0.3),
-    # so the overall mean lands in the mid-range.
-    assert 0.6 < overall_conf < 0.85
+    # confidence_score is the MODEL's number, full stop: mean(0.95, 0.85, 0.9) = 0.9. Whether a value
+    # was found in the OCR tokens is recorded separately as `grounded` and never folded into the score.
+    # This used to be an OCR substring ratio that overwrote whatever the model said.
+    assert overall_conf == pytest.approx(0.9)
 
     async with session_scope() as session:
         # Check persisted headers
@@ -592,7 +591,8 @@ async def test_save_extraction_results_success():
         header_map = {h.field_name: h for h in headers}
         assert "invoice_number" in header_map
         assert header_map["invoice_number"].extracted_value == "INV-TEST-100"
-        assert float(header_map["invoice_number"].confidence_score) >= 0.88  # exact OCR token match
+        assert float(header_map["invoice_number"].confidence_score) == pytest.approx(0.95)  # the MODEL's
+        assert header_map["invoice_number"].grounded is True                                # found in OCR
         assert header_map["invoice_number"].reasoning_trace == "Top left location"
         assert header_map["invoice_number"].source_location is not None
         assert header_map["invoice_number"].source_location["page_number"] == 1
@@ -600,11 +600,12 @@ async def test_save_extraction_results_success():
 
         assert "date" in header_map
         assert header_map["date"].extracted_value == "2026-06-08"
-        # Date wasn't in ocr_tokens, so source_location should be None
+        # The date is absent from ocr_tokens: no source_location, and grounded=False — the signal that
+        # says "the model produced a value that is not on the page". Its CONFIDENCE is untouched (0.85):
+        # a confident hallucination is still confident. That is exactly why the two must stay separate.
         assert header_map["date"].source_location is None
-        # ...and its OCR-evidence confidence is low (absent value), well below the exact match.
-        assert float(header_map["date"].confidence_score) <= 0.51
-        assert float(header_map["date"].confidence_score) < float(header_map["invoice_number"].confidence_score)
+        assert header_map["date"].grounded is False
+        assert float(header_map["date"].confidence_score) == pytest.approx(0.85)
 
         # Check line items
         line_items = (await session.exec(
@@ -616,7 +617,8 @@ async def test_save_extraction_results_success():
         assert line_items[0].row_index == 0
         assert line_items[0].source_location is not None
         assert line_items[0].source_location["bounding_box"] == [[100, 100], [200, 100], [200, 120], [100, 120]]
-        assert float(line_items[0].confidence_score) >= 0.88  # "Widgets" is an exact OCR match
+        assert float(line_items[0].confidence_score) == pytest.approx(0.9)   # the model's, not the OCR's
+        assert line_items[0].grounded is True
 
         # Check updated document confidence (DB NUMERIC column rounds to 4 dp, so compare approx)
         db_doc = await session.get(IdpDocument, doc_id)
@@ -641,7 +643,12 @@ async def test_save_extraction_results_success():
 
 
 def test_expand_extraction_flat_and_empty():
-    """_expand_extraction: flat values -> canonical with 0.85; empty/None -> 0.0; continuous row_index."""
+    """_expand_extraction: a populated scalar -> confidence None (unknown); empty/None -> 0.0.
+
+    The distinction is load-bearing. `None` is dropped from the overall mean; `0.0` is averaged in. A
+    field the model never scored must not drag the document's confidence down, and must not prop it up
+    either — which a hardcoded 0.75 did for every populated field in the database.
+    """
     from agentcore.services.idp.extraction import _expand_extraction
 
     parsed = {
@@ -652,14 +659,17 @@ def test_expand_extraction_flat_and_empty():
         ],
     }
     out = _expand_extraction(parsed)
-    from agentcore.services.idp.extraction import _DEFAULT_FIELD_CONFIDENCE
     assert out["headers"]["invoice_number"]["value"] == "INV-9"
-    assert out["headers"]["invoice_number"]["confidence"] == _DEFAULT_FIELD_CONFIDENCE
+    assert out["headers"]["invoice_number"]["confidence"] is None          # populated, unscored
     assert out["headers"]["po_number"]["value"] is None and out["headers"]["po_number"]["confidence"] == 0.0
     assert out["headers"]["vendor"]["value"] is None and out["headers"]["vendor"]["confidence"] == 0.0
     assert [r["row_index"] for r in out["line_items"]] == [0, 1]
     cols0 = {c["column_name"]: c for c in out["line_items"][0]["columns"]}
-    assert cols0["description"]["value"] == "Widget" and cols0["description"]["confidence"] == _DEFAULT_FIELD_CONFIDENCE
+    assert cols0["description"]["value"] == "Widget" and cols0["description"]["confidence"] is None
+
+    # A dict value with a real confidence is preserved verbatim — that is the whole point of the change.
+    scored = _expand_extraction({"headers": {"total": {"value": "50.00", "confidence": 0.42}}})
+    assert scored["headers"]["total"]["confidence"] == 0.42
 
 
 @pytest.mark.anyio
@@ -675,8 +685,15 @@ async def test_extract_dynamic_compact_flat_line_items():
     assert [r["row_index"] for r in res["line_items"]] == [0, 1, 2]
 
 
-def test_build_compact_extraction_messages_is_flat():
-    """The compact named-config prompt must ask for FLAT JSON — no per-cell confidence/reasoning."""
+def test_build_compact_extraction_messages_asks_for_confidence_but_not_reasoning():
+    """The compact named-config prompt must ask the model for a per-field confidence.
+
+    It used to forbid one ("Do NOT include any confidence or reasoning keys"), so `_expand_value` stamped a
+    hardcoded 0.75 on every populated field and "the LLM's confidence" was a constant nobody had measured.
+
+    `reasoning` stays banned: a 100–200 char string per cell × N fields × M rows is what overflowed the
+    output-token budget and truncated `line_items` to empty. A bare float is ~12 tokens.
+    """
     from agentcore.services.idp.prompt_templates import build_compact_extraction_messages
 
     class _H:
@@ -691,13 +708,20 @@ def test_build_compact_extraction_messages_is_flat():
     line_items = [_C("description", "text"), _C("amount", "number", "the row total")]
     system, user = build_compact_extraction_messages(headers, line_items, ocr_text="DOC TEXT HERE")
 
-    # System forbids confidence/reasoning; user carries the field names + hints + the raw text.
-    assert "confidence" not in system.lower() or "do not include" in system.lower()
     assert "invoice_number" in user and "description" in user
     assert "the invoice id top-right" in user  # DB prompt hint preserved
     assert "DOC TEXT HERE" in user
-    # The flat JSON scaffold must NOT contain a per-cell "confidence" key.
-    assert '"confidence"' not in user
+
+    # The scaffold asks for {value, confidence} per header AND per line-item column.
+    assert '"confidence"' in user
+    assert '"value"' in user
+    # ...and the model is told to actually vary it, not emit a constant.
+    assert "genuine float" in system.lower()
+    assert "not a constant" in system.lower()
+
+    # `reasoning` must NOT be requested anywhere — it is the token-overflow culprit.
+    assert '"reasoning"' not in user
+    assert "do not include a 'reasoning' key" in system.lower()
 
 
 @pytest.mark.anyio
@@ -748,13 +772,12 @@ async def test_extract_named_config_compact_flat_multirow():
             assert names == {"description", "amount"}
             assert "junk" not in names
 
-        # Row 3 had no "amount" -> filled as a declared-but-missing cell at confidence 0.0.
+        # Row 3 had no "amount" -> filled as a declared-but-missing cell at confidence 0.0 (no value).
         row3 = {c["column_name"]: c for c in res["line_items"][2]["columns"]}
         assert row3["amount"]["value"] is None
         assert float(row3["amount"]["confidence"]) == 0.0
-        # Present compact cells (flat scalar, no model confidence) get the uniform default.
-        from agentcore.services.idp.extraction import _DEFAULT_FIELD_CONFIDENCE
-        assert float(row3["description"]["confidence"]) == _DEFAULT_FIELD_CONFIDENCE
+        # A populated cell the model returned as a bare scalar has an UNKNOWN confidence, not a default.
+        assert row3["description"]["confidence"] is None
     finally:
         async with session_scope() as session:
             db_cfg = await session.get(IdpFieldConfiguration, config_id)

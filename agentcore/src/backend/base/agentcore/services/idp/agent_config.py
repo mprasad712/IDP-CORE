@@ -132,6 +132,11 @@ class ResolvedPipelineConfig:
     # (route_1..route_5). Absent node -> route_field None + empty route_map -> no route_label set.
     route_field: str | None = None
     route_map: dict = field(default_factory=dict)
+    # Which environment's graph this run executed: "dev" (draft canvas) | "uat" | "prod".
+    # ``_run`` sets it from the document's run_env. It exists because pipeline.py reads
+    # ``getattr(cfg, "environment", "production")`` when opening the trace — with no such field, EVERY
+    # IDP trace was labelled "production" regardless of where it actually ran.
+    environment: str = "dev"
 
 
 # ───────────────────────── graph helpers ─────────────────────────
@@ -353,6 +358,15 @@ async def _lookup_config_id_by_name(session, org_id, name: str) -> UUID | None:
     """
     if not name:
         return None
+
+    # A published run froze this name -> id at publish time. Use it: the live lookup would miss a renamed
+    # or deleted config and, worse, silently fall back to a GLOBAL config that happens to share the name.
+    from agentcore.services.idp.field_defs import frozen_id_for_name
+
+    frozen = frozen_id_for_name(name)
+    if frozen is not None:
+        return frozen
+
     base_q = select(IdpFieldConfiguration).where(
         IdpFieldConfiguration.name == name,
         IdpFieldConfiguration.deleted_at.is_(None),

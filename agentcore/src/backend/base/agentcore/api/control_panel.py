@@ -145,6 +145,10 @@ class ControlPanelAgentItem(BaseModel):
     last_run: datetime | None = None      # placeholder – no model field yet
     failed_runs: int = 0                   # placeholder – no model field yet
     input_type: str = "autonomous"         # "chat" | "autonomous" | "file_processing" — from snapshot._input_type
+    # True when the published snapshot contains IDP nodes: such an agent is called over /api/run with a
+    # document attachment rather than an input_value, so "Export as API" must show a different snippet.
+    # `input_type` cannot answer this — an IDP agent has no Chat Input, so it publishes as "autonomous".
+    is_idp: bool = False
     moved_to_prod: bool = False
     pending_prod_approval: bool = False
 
@@ -723,8 +727,11 @@ async def list_control_panel_agents(
             failed_runs = failed_count or 0
 
             # Read _input_type from the snapshot (set at publish time)
+            from agentcore.services.idp.agent_config import agent_contains_idp_nodes
+
             snap = dep.agent_snapshot or {}
             _input_type = snap.get("_input_type", "autonomous")
+            _is_idp = agent_contains_idp_nodes(snap)
             version_number = f"v{dep.version_number}"
             promoted_from_uat_id = getattr(dep, "promoted_from_uat_id", None)
             source_uat_version_number = (
@@ -761,6 +768,7 @@ async def list_control_panel_agents(
                     last_run=last_run,
                     failed_runs=failed_runs,
                     input_type=_input_type,
+                    is_idp=_is_idp,
                     moved_to_prod=(
                         True
                         if env == ControlPanelEnv.PROD

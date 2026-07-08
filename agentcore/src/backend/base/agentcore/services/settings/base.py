@@ -286,6 +286,19 @@ class Settings(BaseSettings):
     """The maximum number of retries for the health check."""
     max_file_size_upload: int = 1024
     """The maximum file size for the upload in MB."""
+    idp_api_max_attachment_mb: int = 25
+    """Max size of a base64 document attachment on POST /api/run, in MB (decoded).
+
+    Deliberately much smaller than ``max_file_size_upload``: that limit is applied by
+    ``ContentSizeLimitMiddleware`` to the RAW request body, so a base64 attachment would otherwise be
+    allowed to approach a gigabyte of JSON, held in memory ~3x over (b64 string + decoded bytes + write).
+    The effective cap is ``min(max_file_size_upload, idp_api_max_attachment_mb)``."""
+    idp_api_run_timeout_seconds: int = 300
+    """How long POST /api/run waits for an IDP pipeline before handing the caller a poll URL.
+
+    On timeout the request returns **202 Accepted** with the document id — the pipeline is NOT cancelled,
+    it keeps running and persists its result, which the caller fetches from
+    ``GET /api/run/{agent_id}/documents/{document_id}``. Set to 0 to wait indefinitely."""
     deactivate_tracing: bool = False
     """If set to True, tracing will be deactivated."""
     max_transactions_to_keep: int = 3000

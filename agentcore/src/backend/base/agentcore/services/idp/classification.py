@@ -21,6 +21,7 @@ from agentcore.services.database.models.agent.model import Agent
 from agentcore.services.idp.agent_config import resolve_pipeline_config
 from agentcore.services.idp.catalogue import DEFAULT_TEMPLATES
 from agentcore.services.idp.extraction import _extract_usage_from_response
+from agentcore.services.idp.snapshot import graph_agent_view, pin_idp_agent, resolve_agent_graph
 
 
 class ClassificationResult(BaseModel):
@@ -69,7 +70,14 @@ async def classify_and_persist(
     if not base_agent:
         raise ValueError(f"Base agent {idp_agent.agent_id} not found")
 
-    cfg = await resolve_pipeline_config(session, idp_agent, base_agent)
+    # This runs in its OWN session (pipeline._hook_classify isolates it), so it must resolve the run's
+    # graph itself. Without this it would re-read the DRAFT `agent.data` and pick the classifier model /
+    # Named Config from whatever the canvas says *right now* — even on a published UAT/PROD run.
+    # `doc.run_env` is NULL for the Playground and connectors, which resolves back to the draft.
+    graph, _ = await resolve_agent_graph(session, base_agent.id, doc.run_env, doc.run_version)
+    cfg = await resolve_pipeline_config(
+        session, pin_idp_agent(idp_agent, graph), graph_agent_view(base_agent, graph)
+    )
     # A Document Classifier node may target its own model (SLM/local); else share extraction's.
     model_id = cfg.classify_model_id or cfg.model_id
     if not model_id:
@@ -252,6 +260,10 @@ async def classify_and_persist(
                     id=config_id,
                     name=global_template.name,
                     description=global_template.description,
+                    # `doc_type` is what the AI Field Extractor's multi-type routing matches the
+                    # classifier's prediction against. A clone without it can never be selected, so the
+                    # extractor skips the document and saves zero fields — silently.
+                    doc_type=global_template.doc_type,
                     org_id=org_id,
                     is_template=False,
                     is_active=True,
@@ -271,6 +283,11 @@ async def classify_and_persist(
                         is_required=h.is_required,
                         display_order=h.display_order,
                         description=h.description,
+                        # `prompt` is the per-field extraction hint the prompt builder feeds the LLM. The
+                        # catalogue templates carry their guidance in `prompt` (and leave `description`
+                        # NULL), so dropping it here produced a clone whose extraction prompt was just a
+                        # list of bare field names — silently degraded, with no error.
+                        prompt=h.prompt,
                     )
                     for h in headers
                 ]
@@ -285,6 +302,7 @@ async def classify_and_persist(
                         column_type=li.column_type,
                         is_required=li.is_required,
                         display_order=li.display_order,
+                        prompt=li.prompt,   # same as headers: the per-column extraction hint
                     )
                     for li in line_items
                 ]

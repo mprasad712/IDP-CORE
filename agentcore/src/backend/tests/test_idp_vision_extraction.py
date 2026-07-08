@@ -173,29 +173,43 @@ def test_build_compact_extraction_messages_vision_requests_confidence():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Task 5: vision-aware confidence — _ocr_evidence / save_extraction_results
+# Task 5: per-field confidence is the MODEL's — on every path, vision or not
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_ocr_evidence_vision_mode_uses_model_confidence_directly():
-    from agentcore.services.idp.extraction import _ocr_evidence
-    # vision: no OCR token stream to score against -> trust the model's own confidence verbatim
-    assert _ocr_evidence("x", [], 0.9, vision_mode=True) == (None, 0.9)
-    # text mode with no tokens (existing behavior) -> dampened min(0.9*0.80, 0.75) = 0.72
-    assert _ocr_evidence("x", [], 0.9, vision_mode=False) == (None, 0.72)
+def test_every_path_now_uses_the_models_confidence_verbatim():
+    """Vision used to be the ONLY path that kept the model's number. Now every path does.
+
+    The text path dampened it (`llm_conf x 0.92` with no tokens) or replaced it outright with an OCR
+    substring ratio, so an identical extraction scored differently depending on whether the document
+    happened to be scanned, digital, or a docx. The file format no longer touches the score.
+    """
+    from agentcore.services.idp.extraction import _model_confidence
+
+    assert _model_confidence(0.9, "x") == 0.9
+    assert _model_confidence(0.42, "x") == 0.42
 
 
-def test_ocr_evidence_default_preserves_text_behavior():
-    from agentcore.services.idp.extraction import _ocr_evidence
-    # default (no vision_mode kwarg) must be identical to the pre-change text path -> no regression
-    assert _ocr_evidence("x", [], 0.9) == (None, 0.72)
+def test_a_populated_field_with_no_model_confidence_is_unknown_not_a_constant():
+    from agentcore.services.idp.extraction import _model_confidence
+
+    assert _model_confidence(None, "x") is None       # model ignored the schema -> unknown, NOT 0.75
+    assert _model_confidence("garbage", "x") is None  # unparseable -> unknown
+    assert _model_confidence(None, None) == 0.0       # no value at all -> a real 0.0
+    assert _model_confidence(0.9, "  ") == 0.0        # blank value -> 0.0 whatever it claims
 
 
-def test_save_extraction_results_accepts_vision_mode_defaulting_false():
+def test_save_extraction_results_no_longer_takes_vision_mode():
+    """`vision_mode` chose how hard to dampen the score. Nothing dampens the score any more.
+
+    Grounding availability is decided by whether `ocr_tokens` is non-empty — a fact, not a mode flag.
+    """
     import inspect
-    from agentcore.services.idp.extraction import save_extraction_results
-    params = inspect.signature(save_extraction_results).parameters
-    assert "vision_mode" in params
-    assert params["vision_mode"].default is False   # text callers unchanged
+    from agentcore.services.idp.extraction import compute_overall_confidence, save_extraction_results
+
+    assert "vision_mode" not in inspect.signature(save_extraction_results).parameters
+    assert "ocr_tokens" in inspect.signature(save_extraction_results).parameters
+    # ...and the score function cannot even SEE the tokens. It is structurally incapable of blending them.
+    assert list(inspect.signature(compute_overall_confidence).parameters) == ["extraction_result"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -233,23 +247,43 @@ def test_expand_value_clamps_confidence_to_unit_range():
     assert _expand_value({"value": "x", "confidence": 0.83})[1] == 0.83   # in-range unchanged
 
 
-def test_ocr_evidence_vision_clamps_out_of_range_model_confidence():
-    from agentcore.services.idp.extraction import _ocr_evidence
-    assert _ocr_evidence("x", [], 1.5, vision_mode=True) == (None, 1.0)   # over-reported 1.5 -> 1.0
-    assert _ocr_evidence("x", [], 95.0, vision_mode=True) == (None, 1.0)
-    assert _ocr_evidence("x", [], -0.2, vision_mode=True) == (None, 0.0)
+def test_out_of_range_model_confidence_is_clamped():
+    """A model answering 95 (meaning 95%), 1.5, or -0.2 must never reach the DB's [0,1] CHECK constraint.
+
+    Clamped, deliberately NOT rescaled: 95 -> 1.0, not 0.95. A model that ignores the 0.0–1.0 instruction
+    is a model whose confidence we cannot interpret, and inventing 0.95 for it is the same class of lie as
+    the old hardcoded 0.75. Clamping fails toward "it claims certainty" — visible and checkable.
+    """
+    from agentcore.services.idp.extraction import _model_confidence
+
+    assert _model_confidence(1.5, "x") == 1.0
+    assert _model_confidence(95.0, "x") == 1.0
+    assert _model_confidence(-0.2, "x") == 0.0
+    assert _model_confidence(-0.5, "x") == 0.0
+    assert _model_confidence(0.83, "x") == 0.83   # in-range untouched
 
 
-def test_ocr_evidence_never_returns_negative_confidence():
-    from agentcore.services.idp.extraction import _ocr_evidence
-    # A model returning a NEGATIVE confidence must never produce a negative saved score
-    # (would violate the DB [0,1] constraint / corrupt routing). Covers both llm_conf paths:
-    assert _ocr_evidence("x", [], -0.5, vision_mode=False)[1] == 0.0          # no-tokens text dampening
-    toks = [{"text": "unrelated", "confidence": 1.0}]
-    _sl, c = _ocr_evidence("value-not-in-ocr", toks, -0.5, vision_mode=True)  # inferred/not-found branch
-    assert c >= 0.0
-    # in-range still behaves as before (regression)
-    assert _ocr_evidence("x", [], 0.9, vision_mode=False)[1] == 0.72
+def test_a_confident_hallucination_keeps_its_confidence_and_is_caught_by_grounding():
+    """The central invariant of the split. Confidence and grounding must disagree here, or neither works.
+
+    A hallucinated value carries HIGH model confidence — that IS hallucination. Damping the score toward
+    zero (the old `llm_conf x 0.38`) both hid the model's claim and mislabelled every correctly reformatted
+    date as invented. Keep the claim; report separately that it is not on the page.
+    """
+    from agentcore.services.idp.extraction import _model_confidence
+    from agentcore.services.idp.grounding import Grounder
+
+    tokens = [{"text": "INV-2026-0042", "bounding_box": None, "confidence": 1.0, "page_number": 1}]
+    grounder = Grounder(tokens)
+
+    assert _model_confidence(0.99, "INV-2099-9999") == 0.99          # the model is sure...
+    assert grounder.check("INV-2099-9999") == (None, False)          # ...and it is not on the page
+
+    assert _model_confidence(0.99, "INV-2026-0042") == 0.99
+    assert grounder.check("INV-2026-0042")[1] is True
+
+    # No token stream -> grounding is UNKNOWN, never False. Vision documents must not all route to review.
+    assert Grounder([]).check("INV-2099-9999") == (None, None)
 
 
 def test_render_document_images_rejects_bad_input():
