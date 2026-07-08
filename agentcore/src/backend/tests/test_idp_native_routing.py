@@ -539,21 +539,31 @@ def test_extractor_extracts_each_chunk_and_merges(monkeypatch):
 
 
 def test_chunk_aggregator_merges_per_chunk_data():
-    """The Chunk Aggregator combines per-chunk EXTRACTION Data (keep-highest-confidence). NOTE: it must
-    be fed extracted Data — wiring Chunking → Aggregator directly (raw Message chunks) does not work."""
-    from agentcore.schema.data import Data
+    """The Chunk Aggregator combines per-chunk IDP-envelope Messages (keep-highest-confidence). Each
+    chunk carries extracted headers in additional_kwargs['idp']['extracted']['headers']; the aggregator
+    merges them and returns carry(rep, extracted=merged) so document_id + fields survive downstream."""
+    from uuid import uuid4
 
     from agentcore.components.IDP.chunk_aggregator import IDPChunkAggregator
+    from agentcore.schema.message import Message
+    from agentcore.services.idp.graph_native.payload import get_payload
+
+    doc_id = str(uuid4())
+
+    def _chunk(headers):
+        return Message(text="", additional_kwargs={"idp": {"document_id": doc_id, "extracted": {"headers": headers, "line_items": []}}})
 
     a = IDPChunkAggregator()
     a.chunks_data = [
-        Data(data={"vendor": "ACME", "vendor_confidence": 0.8}),
-        Data(data={"vendor": "ACME Inc", "vendor_confidence": 0.95, "total": "100"}),
+        _chunk({"vendor": {"value": "ACME", "confidence": 0.8}}),
+        _chunk({"vendor": {"value": "ACME Inc", "confidence": 0.95}, "total": {"value": "100", "confidence": 0.9}}),
     ]
     a.dedup_strategy = "keep_highest_confidence"
     agg = a.aggregated_data()
-    assert agg.data.get("vendor") == "ACME Inc"   # higher confidence wins
-    assert agg.data.get("total") == "100"
+    payload = get_payload(agg)
+    headers = (payload.get("extracted") or {}).get("headers") or {}
+    assert headers.get("vendor", {}).get("value") == "ACME Inc"   # higher confidence wins
+    assert "total" in headers
 
 
 def test_scan_corrector_output_flows_to_the_next_node(monkeypatch):

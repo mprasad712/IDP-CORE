@@ -33,50 +33,48 @@ class IDPChunkAggregator(Node):
         Output(display_name="Aggregated Data", name="aggregated_data", method="aggregated_data"),
     ]
 
-    def aggregated_data(self) -> Data:
+    def aggregated_data(self):
+        from agentcore.services.idp.graph_native.payload import carry, get_payload
+
         chunks = self.chunks_data
         if not chunks:
+            self.status = "No chunks to aggregate."
             return Data(data={}, text="")
-
         if not isinstance(chunks, list):
             chunks = [chunks]
 
         strategy = self.dedup_strategy
-        merged: dict = {}
+        merged_headers: dict = {}
+        merged_line_items: list = []
+        rep = chunks[0]  # representative — carries document_id + the shared IDP payload
 
         for chunk in chunks:
-            chunk_data: dict = {}
-            if isinstance(chunk, Data):
-                chunk_data = chunk.data or {}
-            elif isinstance(chunk, dict):
-                chunk_data = chunk
-
-            for key, value in chunk_data.items():
-                # Skip internal pipeline metadata keys
-                if key.startswith("chunk_") or key == "total_chunks" or key == "chunking_method":
-                    continue
-
-                if key not in merged:
-                    merged[key] = value
+            # Prefer the IDP working-set envelope (where the extractor puts `extracted`); fall back to
+            # a bare Data/dict for back-compat with non-IDP producers.
+            extracted = (get_payload(chunk).get("extracted") or {})
+            if not extracted and isinstance(getattr(chunk, "data", None), dict):
+                extracted = chunk.data
+            headers = extracted.get("headers", {}) if isinstance(extracted, dict) else {}
+            for field_name, field_data in headers.items():
+                if field_name not in merged_headers:
+                    merged_headers[field_name] = field_data
                 elif strategy == "keep_first":
-                    pass  # already set
+                    pass
                 elif strategy == "keep_highest_confidence":
-                    existing_conf = merged.get(f"{key}_confidence", 0.0)
-                    new_conf = chunk_data.get(f"{key}_confidence", 0.0)
                     try:
-                        if float(new_conf) > float(existing_conf):
-                            merged[key] = value
-                            merged[f"{key}_confidence"] = new_conf
-                    except (TypeError, ValueError):
+                        new_c = float((field_data or {}).get("confidence", 0.0))
+                        cur_c = float((merged_headers[field_name] or {}).get("confidence", 0.0))
+                        if new_c > cur_c:
+                            merged_headers[field_name] = field_data
+                    except (TypeError, ValueError, AttributeError):
                         pass
                 elif strategy == "merge_all":
-                    existing = merged[key]
-                    if isinstance(existing, list):
-                        existing.append(value)
-                    else:
-                        merged[key] = [existing, value]
+                    merged_headers[field_name] = field_data  # last wins; line items carry the rest
+            rows = extracted.get("line_items", []) if isinstance(extracted, dict) else []
+            if isinstance(rows, list):
+                merged_line_items.extend(rows)
 
-        total_chunks = len(chunks)
-        merged["_aggregated_from_chunks"] = total_chunks
-        self.status = f"Aggregated {total_chunks} chunk(s) → {len(merged)} field(s)"
-        return Data(data=merged)
+        merged = {"headers": merged_headers, "line_items": merged_line_items}
+        self.status = f"Aggregated {len(chunks)} chunk(s) → {len(merged_headers)} header field(s), {len(merged_line_items)} line item(s)"
+        # Carry the merged extraction in the IDP payload so document_id + fields survive downstream + to the sink.
+        return carry(rep, extracted=merged)
