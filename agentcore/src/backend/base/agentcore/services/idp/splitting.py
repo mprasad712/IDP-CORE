@@ -164,13 +164,12 @@ def _boundaries_from_page_texts(
     boundaries: list[tuple[int, int]] = []
     for idx, start in enumerate(starts):
         end = starts[idx + 1] - 1 if idx + 1 < len(starts) else max_pages - 1
-        # trim TRULY blank separator pages (empty after strip) from both ends —
-        # short-but-valid content pages (e.g. "x", "items") must NOT be trimmed
-        while end > start and not (page_texts.get(end) or "").strip():
+        # trim near-blank separator pages (< 10 chars, to absorb OCR page-number noise) from both ends
+        while end > start and len((page_texts.get(end) or "").strip()) < 10:
             end -= 1
-        while start < end and not (page_texts.get(start) or "").strip():
+        while start < end and len((page_texts.get(start) or "").strip()) < 10:
             start += 1
-        if (page_texts.get(start) or "").strip() or start == end:
+        if len((page_texts.get(start) or "").strip()) >= 10 or start == end:
             boundaries.append((start, end))
     return (boundaries or [(0, max_pages - 1)]), has_strong, has_header_hint
 
@@ -256,8 +255,9 @@ async def detect_boundaries_hybrid(
     splits only; LLM fail -> conservative. Never raises.
     """
     n = page_count if page_count and page_count > 0 else (max(page_texts.keys(), default=-1) + 1)
-    single = [(0, max(0, n - 1))]
+    single = [(0, n - 1)] if n >= 1 else []
     boundaries, has_strong, has_header_hint = _boundaries_from_page_texts(page_texts, page_count)
+    # has_header_hint isn't gated on: ANY non-confident multi-page doc escalates to the LLM (safer)
     confident = has_strong and len(boundaries) >= 2
 
     if llm_model is None:
