@@ -114,9 +114,13 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _classification_of(src: Any) -> dict:
-    """The Document Classifier's block (``additional_kwargs['classification']`` = {type, confidence})."""
-    ak = getattr(src, "additional_kwargs", None)
-    cl = ak.get("classification") if isinstance(ak, dict) else None
+    """The Document Classifier's block (``idp['classification']`` = {type, confidence, reasoning}).
+    Reads it from the IDP working-set payload (where the classifier now carries it); falls back to the
+    legacy top-level ``additional_kwargs['classification']`` for older messages."""
+    cl = get_payload(src).get("classification")
+    if not isinstance(cl, dict):
+        ak = getattr(src, "additional_kwargs", None)
+        cl = ak.get("classification") if isinstance(ak, dict) else None
     return cl if isinstance(cl, dict) else {}
 
 

@@ -638,3 +638,18 @@ def test_chunking_carries_working_set_into_every_chunk():
     assert len(chunks) >= 1
     assert all(get_payload(c).get("document_id") == "doc-1" for c in chunks)
     assert [get_payload(c).get("chunk_index") for c in chunks] == list(range(len(chunks)))
+
+
+def test_resolve_field_reads_classification_from_idp_payload():
+    from agentcore.services.idp.graph_native.payload import resolve_field
+    from agentcore.schema.message import Message
+    msg = Message(text="x", additional_kwargs={"idp": {"classification": {"type": "Invoice", "confidence": 0.83, "reasoning": "has GSTIN"}}})
+    assert resolve_field(msg, "reasoning") == "has GSTIN"     # only in the idp classification block (step-2)
+    assert resolve_field(msg, "confidence") == 0.83           # step-1 misses (no overall_conf), step-2 supplies it
+
+
+def test_resolve_field_classification_legacy_toplevel_fallback():
+    from agentcore.services.idp.graph_native.payload import resolve_field
+    from agentcore.schema.message import Message
+    msg = Message(text="x", additional_kwargs={"classification": {"type": "Invoice", "reasoning": "legacy"}})
+    assert resolve_field(msg, "reasoning") == "legacy"        # legacy top-level still readable via fallback
