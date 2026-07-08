@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from agentcore.components.IDP.condition_node import IDPConditionNode
     from agentcore.components.IDP.confidence_router import IDPConfidenceRouter
     from agentcore.components.IDP.document_classifier import IDPDocumentClassifier
+    from agentcore.components.IDP.document_splitter import IDPDocumentSplitter
     from agentcore.components.IDP.document_type_detector import IDPDocumentTypeDetector
     from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
     from agentcore.components.IDP.merge_node import IDPMergeNode
@@ -38,6 +39,7 @@ _dynamic_imports = {
     "IDPConditionNode": "condition_node",
     "IDPConfidenceRouter": "confidence_router",
     "IDPDocumentClassifier": "document_classifier",
+    "IDPDocumentSplitter": "document_splitter",
     "IDPDocumentTypeDetector": "document_type_detector",
     "IDPLLMExtractor": "llm_extractor",
     "IDPMergeNode": "merge_node",

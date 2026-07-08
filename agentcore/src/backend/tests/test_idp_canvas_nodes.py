@@ -438,3 +438,16 @@ async def test_extractor_skips_when_shared_classification_matches_no_config(monk
     comp.document = Message(text="MEMO", additional_kwargs={"idp": {"document_id": "d2"}})
     comp._vertex = _T5Vertex({"classification": {"type": "memo"}})
     assert await comp._resolve_config_name_from_classification() is None   # no doc_type matches "memo" -> skip
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Document Splitter node registration
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_document_splitter_is_registered():
+    from agentcore.components.IDP import IDPDocumentSplitter  # noqa: F401
+    import agentcore.components.IDP as idp
+    assert "IDPDocumentSplitter" in idp.__all__
+    comp = IDPDocumentSplitter()
+    names = {o.name for o in comp.outputs}
+    assert names == {"single_document", "split"}
