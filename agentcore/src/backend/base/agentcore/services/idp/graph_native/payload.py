@@ -19,6 +19,10 @@ from typing import Any
 
 IDP_KEY = "idp"
 
+# Decisions that mark a document as terminally handled — downstream nodes must pass
+# through without triggering any model call or DB write.
+TERMINAL_DECISIONS: frozenset[str] = frozenset({"skipped", "split", "dropped", "failed"})
+
 
 def get_payload(src: Any) -> dict:
     """Read the IDP working set off a Message / dict (empty dict when absent)."""

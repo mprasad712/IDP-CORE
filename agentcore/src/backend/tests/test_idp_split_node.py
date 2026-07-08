@@ -62,7 +62,7 @@ async def test_splitter_forks_multi_doc_and_pretypes(monkeypatch):
     assert len(child_ids) == 2 and len(enq) == 2
     assert parent.status == "split"
     assert [c.predicted_type for c in children] == ["Invoice", "Medical Report"]   # pre-typed from seg_types
-    out = await comp.split()
+    out = await comp.route()
     assert out is not None
 
 
@@ -82,7 +82,7 @@ async def test_splitter_passthrough_single_doc(monkeypatch):
     kind, _ = await comp._decide()
     assert kind == "single"
     assert parent.status == "processing"                # NOT finalized
-    out = await comp.single_document()
+    out = await comp.route()
     assert out is not None
 
 
@@ -198,3 +198,48 @@ async def test_splitter_reuses_existing_children_on_retry(monkeypatch):
     assert kind == "split"
     assert set(child_ids) == {child1.id, child2.id}
     assert set(enq) == {child1.id, child2.id}  # existing children enqueued
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Task-3: single-output node (route()) + decision carry
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_splitter_single_output_passthrough(monkeypatch):
+    """route() on a single-doc decision must return a carry whose payload has NO 'decision' key."""
+    from agentcore.services.idp.graph_native.payload import get_payload
+
+    # Monkeypatch _decide so no DB / storage is needed
+    async def fake_decide(self): return ("single", None)
+    monkeypatch.setattr(IDPDocumentSplitter, "_decide", fake_decide, raising=True)
+
+    comp = IDPDocumentSplitter()
+    comp.document = _msg(str(__import__("uuid").uuid4()))
+
+    out = await comp.route()
+    assert out is not None
+    payload = get_payload(out)
+    assert "decision" not in payload, f"Expected no 'decision' key for single-doc path, got {payload!r}"
+
+
+@pytest.mark.anyio
+async def test_splitter_split_carries_decision(monkeypatch):
+    """route() on a multi-doc decision must return a carry with decision='split' in the payload."""
+    from agentcore.services.idp.graph_native.payload import get_payload
+    from uuid import uuid4
+
+    child_ids = [uuid4(), uuid4()]
+
+    async def fake_decide(self): return ("split", child_ids)
+    monkeypatch.setattr(IDPDocumentSplitter, "_decide", fake_decide, raising=True)
+
+    comp = IDPDocumentSplitter()
+    comp.document = _msg(str(uuid4()))
+
+    out = await comp.route()
+    assert out is not None
+    payload = get_payload(out)
+    assert payload.get("decision") == "split", (
+        f"Expected decision='split' in payload for multi-doc path, got {payload!r}"
+    )

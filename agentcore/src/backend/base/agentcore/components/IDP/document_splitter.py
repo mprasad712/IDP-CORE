@@ -40,9 +40,7 @@ class IDPDocumentSplitter(Node):
     ]
 
     outputs = [
-        Output(display_name="Single Document", name="single_document", method="single_document",
-               group_outputs=True),
-        Output(display_name="Split", name="split", method="split", group_outputs=True),
+        Output(display_name="Document", name="output_document", method="route"),
     ]
 
     _decided: bool = False
@@ -175,18 +173,7 @@ class IDPDocumentSplitter(Node):
             logger.warning(f"[split] decision failed, passthrough: {exc}")
             self._decision = ("single", None); return self._decision
 
-    async def single_document(self) -> Message:
+    async def route(self) -> Message:
         from agentcore.services.idp.graph_native.payload import carry
         kind, _ = await self._decide()
-        if kind == "single":
-            return carry(self.document)
-        self.stop("single_document")
-        return self.document
-
-    async def split(self) -> Message:
-        from agentcore.services.idp.graph_native.payload import carry
-        kind, child_ids = await self._decide()
-        if kind == "split":
-            return carry(self.document, split=True)
-        self.stop("split")
-        return self.document
+        return carry(self.document, decision="split") if kind == "split" else carry(self.document)

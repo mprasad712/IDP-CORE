@@ -97,9 +97,23 @@ class IDPDocumentClassifier(Node):
     async def classify(self) -> Message:
         from agentcore.services.deps import session_scope
         from agentcore.services.database.models.idp.config import IdpFieldConfiguration
+        from agentcore.services.idp.graph_native.payload import (
+            TERMINAL_DECISIONS,
+            carry,
+            effective_payload,
+        )
         from sqlmodel import select
 
         src = self.document
+
+        # Terminal-decision short-circuit: if an upstream node (e.g. Document Splitter) has
+        # already finalised the document (split/skipped/dropped/failed), pass through without
+        # any LLM call or DB write.  Preserves the decision in the outgoing payload.
+        _decision = str(effective_payload(self, src).get("decision") or "").strip().lower()
+        if _decision in TERMINAL_DECISIONS:
+            self.status = f"passthrough ({_decision})"
+            return carry(src)
+
         text = src.text if isinstance(src, Message) else str(src)
         selected_types: list[str] = list(self.document_types) if self.document_types else []
 

@@ -450,7 +450,7 @@ def test_document_splitter_is_registered():
     assert "IDPDocumentSplitter" in idp.__all__
     comp = IDPDocumentSplitter()
     names = {o.name for o in comp.outputs}
-    assert names == {"single_document", "split"}
+    assert names == {"output_document"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -961,4 +961,95 @@ async def test_sink_local_item_skip_triggers_shortcircuit(monkeypatch):
     )
     assert doc.status == "skipped", (
         f"doc.status must be set to 'skipped', got {doc.status!r}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. Task-3: terminal-decision short-circuit in Extractor and Classifier
+#     A split parent (decision="split") must NOT trigger any LLM call in either
+#     node — both must pass the document through unchanged.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_extractor_passthrough_on_terminal_decision(monkeypatch):
+    """extract() with an incoming payload carrying decision='split' must return a passthrough
+    and must NOT call extract_named_config (no model call, no extraction)."""
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.message import Message
+    from agentcore.services.idp.graph_native.payload import get_payload
+
+    extract_named_called = []
+
+    async def fake_extract_named_config(**kwargs):
+        extract_named_called.append(kwargs)
+        return {"headers": {}, "line_items": []}
+
+    monkeypatch.setattr(
+        "agentcore.services.idp.extraction.extract_named_config",
+        fake_extract_named_config,
+    )
+
+    comp = IDPLLMExtractor()
+    comp.config_name = "Invoice"
+    comp.config_names = ["Invoice"]
+    comp.extraction_mode = "field_configuration"
+    comp.document = Message(
+        text="some ocr text",
+        additional_kwargs={"idp": {"document_id": str(uuid4()), "decision": "split"}},
+    )
+    # No shared vertex snapshot — decision lives in the local message payload
+    comp._vertex = None
+
+    result = await comp.extract()
+
+    assert result is not None, "extract() must return a value, not None"
+    assert not extract_named_called, (
+        f"extract_named_config must NOT be called when decision='split', "
+        f"but was called {len(extract_named_called)} time(s)"
+    )
+    # The returned payload should still carry the terminal decision through
+    payload = get_payload(result)
+    assert payload.get("decision") == "split", (
+        f"Passthrough must preserve decision='split' in payload, got {payload!r}"
+    )
+
+
+@pytest.mark.anyio
+async def test_classifier_passthrough_on_terminal_decision(monkeypatch):
+    """classify() with an incoming payload carrying decision='split' must return the document
+    unchanged and must NOT call the classification LLM."""
+    from agentcore.components.IDP.document_classifier import IDPDocumentClassifier
+    from agentcore.schema.message import Message
+    from agentcore.services.idp.graph_native.payload import get_payload
+
+    llm_called = []
+
+    async def fake_invoke_llm(self, llm_model, doc_types, text, descriptions):
+        llm_called.append(True)
+        from types import SimpleNamespace
+        return SimpleNamespace(predicted_type="Invoice", confidence=0.9, reasoning="")
+
+    monkeypatch.setattr(IDPDocumentClassifier, "_invoke_llm", fake_invoke_llm, raising=True)
+
+    comp = IDPDocumentClassifier()
+    comp.document_types = ["Invoice"]
+    comp.confidence_threshold = 0.75
+    comp.document = Message(
+        text="some document text",
+        additional_kwargs={"idp": {"document_id": str(uuid4()), "decision": "split"}},
+    )
+    comp._vertex = None
+
+    result = await comp.classify()
+
+    assert result is not None, "classify() must return a value, not None"
+    assert not llm_called, (
+        f"_invoke_llm must NOT be called when decision='split', "
+        f"but was called {len(llm_called)} time(s)"
+    )
+    # Must preserve the terminal decision in the outgoing payload
+    payload = get_payload(result)
+    assert payload.get("decision") == "split", (
+        f"Passthrough must preserve decision='split' in payload, got {payload!r}"
     )

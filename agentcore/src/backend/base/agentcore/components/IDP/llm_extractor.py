@@ -353,6 +353,19 @@ class IDPLLMExtractor(Node):
 
     async def extract(self) -> Data:
         src = self.document
+
+        # Terminal-decision short-circuit: if an upstream node has already finalised the document
+        # (split / skipped / dropped / failed), pass through without any model call or DB write.
+        from agentcore.services.idp.graph_native.payload import (
+            TERMINAL_DECISIONS,
+            effective_payload,
+        )
+        _first = src[0] if isinstance(src, (list, tuple)) and src else src
+        _decision = str(effective_payload(self, _first).get("decision") or "").strip().lower()
+        if _decision in TERMINAL_DECISIONS:
+            self.status = f"passthrough ({_decision})"
+            return carry(_first)
+
         # Long-document support: the Chunking Strategy node feeds a LIST of chunk Messages. Extract each
         # chunk with the resolved Field Configuration and merge the per-chunk JSONs into one result — so
         # the user tunes chunk size on the Chunking node and the extractor handles any document length.
@@ -497,6 +510,17 @@ class IDPLLMExtractor(Node):
             return carry(self.document if not isinstance(self.document, (list, tuple)) else None,
                          text="", extracted={"error": "no chunks to extract"})
         rep = chunks[0]  # representative chunk — carries the shared payload + classification block
+
+        # Terminal-decision short-circuit: if the representative chunk already carries a terminal
+        # decision, pass through without any model call or DB write.
+        from agentcore.services.idp.graph_native.payload import (
+            TERMINAL_DECISIONS,
+            effective_payload,
+        )
+        _decision = str(effective_payload(self, rep).get("decision") or "").strip().lower()
+        if _decision in TERMINAL_DECISIONS:
+            self.status = f"passthrough ({_decision})"
+            return carry(rep)
 
         # Resolve the Field Configuration ONCE (single or classifier-routed), same rules as a single doc.
         config_names: list[str] = list(self.config_names) if self.config_names else []
