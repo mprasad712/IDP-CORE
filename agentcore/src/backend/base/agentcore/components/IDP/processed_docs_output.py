@@ -71,6 +71,13 @@ class IDPProcessedDocsOutput(Node):
         job_id = UUID(str(job_id_raw)) if job_id_raw else doc_id
 
         async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            # Respect a terminal status already committed upstream (extractor skip/drop -> 'skipped';
+            # Document Splitter -> 'split'/'failed'). The sink must NOT overwrite it with pending_review.
+            if doc is not None and doc.status in ("skipped", "split", "failed"):
+                self.status = f"Document already '{doc.status}' upstream — ProcessedDocsOutput left it unchanged."
+                logger.info(f"[IDP native] {doc_id}: already '{doc.status}'; sink no-op.")
+                return Data(data={"status": doc.status, "document_id": str(doc_id)})
             overall_conf = await save_extraction_results(
                 session=session,
                 document_id=doc_id,
@@ -81,8 +88,7 @@ class IDPProcessedDocsOutput(Node):
             )
             # Honor the Approval Gate / router decision recorded in the working-set. The Approval Gate
             # writes decision="auto_approved" / "pending_review" into the payload; without a gate in the
-            # flow, default to pending_review. All are valid IdpDocument statuses. (Codex #1: the sink
-            # used to hardcode "pending_review", so auto-approve never took effect.)
+            # flow, default to pending_review. All are valid IdpDocument statuses.
             decision = str(payload.get("decision") or "").strip().lower()
             if decision in ("auto_approved", "auto_approve", "approved"):
                 status = "auto_approved"
@@ -90,7 +96,6 @@ class IDPProcessedDocsOutput(Node):
                 status = "reviewed"
             else:
                 status = "pending_review"
-            doc = await session.get(IdpDocument, doc_id)
             if doc is not None:
                 doc.status = status
                 session.add(doc)

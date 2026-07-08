@@ -415,3 +415,79 @@ def test_tag_message_puts_classification_in_idp_payload():
     assert payload.get("predicted_type") == "Invoice"
     assert (payload.get("classification") or {}).get("type") == "Invoice"   # rides in idp, not top-level
     assert payload.get("document_id") == "d1"                                # envelope preserved
+
+
+# ---------------------------------------------------------------------------
+# _persist_predicted_type — must not clobber a good pre-type with 'unknown' (FIX 3)
+# ---------------------------------------------------------------------------
+
+class _FakeScopeForClassifier:
+    def __init__(self, sess): self._s = sess
+    async def __aenter__(self): return self._s
+    async def __aexit__(self, *a): return False
+
+
+class _FakeSessForClassifier:
+    def __init__(self, doc):
+        self._doc = doc
+        self.added = []
+        self.committed = False
+
+    async def get(self, model, ident):
+        return self._doc
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def commit(self):
+        self.committed = True
+
+
+@pytest.mark.anyio
+async def test_classifier_does_not_overwrite_pretype_with_unknown(monkeypatch):
+    """_persist_predicted_type must NOT overwrite a meaningful pre-type with 'unknown'."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+    from agentcore.components.IDP.document_classifier import IDPDocumentClassifier
+    from agentcore.schema.message import Message
+
+    doc_id = uuid4()
+    doc = SimpleNamespace(id=doc_id, predicted_type="Medical Report")
+    sess = _FakeSessForClassifier(doc)
+
+    monkeypatch.setattr(
+        "agentcore.services.deps.session_scope",
+        lambda: _FakeScopeForClassifier(sess),
+    )
+
+    comp = IDPDocumentClassifier()
+    src = Message(text="", additional_kwargs={"idp": {"document_id": str(doc_id)}})
+    await comp._persist_predicted_type(src, "unknown")
+
+    assert doc.predicted_type == "Medical Report"
+    assert not sess.committed  # no DB write since nothing changed
+
+
+@pytest.mark.anyio
+async def test_classifier_sets_predicted_type_when_none(monkeypatch):
+    """_persist_predicted_type must set predicted_type when doc has none (even on 'unknown')."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+    from agentcore.components.IDP.document_classifier import IDPDocumentClassifier
+    from agentcore.schema.message import Message
+
+    doc_id = uuid4()
+    doc = SimpleNamespace(id=doc_id, predicted_type=None)
+    sess = _FakeSessForClassifier(doc)
+
+    monkeypatch.setattr(
+        "agentcore.services.deps.session_scope",
+        lambda: _FakeScopeForClassifier(sess),
+    )
+
+    comp = IDPDocumentClassifier()
+    src = Message(text="", additional_kwargs={"idp": {"document_id": str(doc_id)}})
+    await comp._persist_predicted_type(src, "Invoice")
+
+    assert doc.predicted_type == "Invoice"
+    assert sess.committed

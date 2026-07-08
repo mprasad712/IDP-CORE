@@ -174,3 +174,98 @@ def test_serialize_table_roundtrip():
 def test_serialize_table_rejects_bad_format():
     with pytest.raises(ValueError):
         serialize_table(["a"], [{"a": 1}], "json")   # json/txt not offered for bulk tables
+
+
+# ---------------------------------------------------------------------------
+# IDPProcessedDocsOutput.finalize — terminal-status preservation (FIX 1)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+class _FakeSessionScope:
+    """Async context manager yielding a pre-configured fake session."""
+    def __init__(self, sess): self._sess = sess
+    async def __aenter__(self): return self._sess
+    async def __aexit__(self, *a): return False
+
+
+class _FakeSession:
+    def __init__(self, doc):
+        self._doc = doc
+        self.added = []
+        self.committed = False
+
+    async def get(self, model, ident):
+        return self._doc
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def commit(self):
+        self.committed = True
+
+
+@pytest.mark.anyio
+async def test_processed_docs_output_preserves_terminal_status(monkeypatch):
+    """finalize must not overwrite status='skipped' (set by extractor upstream) with 'pending_review'."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+    from agentcore.components.IDP.processed_docs_output import IDPProcessedDocsOutput
+    from agentcore.schema.message import Message
+
+    doc_id = uuid4()
+    doc = SimpleNamespace(id=doc_id, status="skipped")
+
+    fake_session = _FakeSession(doc)
+    monkeypatch.setattr(
+        "agentcore.services.deps.session_scope",
+        lambda: _FakeSessionScope(fake_session),
+    )
+
+    comp = IDPProcessedDocsOutput()
+    comp.data = Message(text="", additional_kwargs={"idp": {"document_id": str(doc_id)}})
+
+    result = await comp.finalize()
+
+    # sink must not call commit (nothing changed) and must return the upstream status unchanged
+    assert result.data["status"] == "skipped"
+    assert not fake_session.committed
+    assert doc.status == "skipped"
+
+
+@pytest.mark.anyio
+async def test_processed_docs_output_sets_pending_review_for_non_terminal(monkeypatch):
+    """finalize must set 'pending_review' when the doc has a non-terminal status (e.g. 'processing')."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+    from agentcore.components.IDP.processed_docs_output import IDPProcessedDocsOutput
+    from agentcore.schema.message import Message
+
+    doc_id = uuid4()
+    doc = SimpleNamespace(id=doc_id, status="processing")
+
+    fake_session = _FakeSession(doc)
+    monkeypatch.setattr(
+        "agentcore.services.deps.session_scope",
+        lambda: _FakeSessionScope(fake_session),
+    )
+
+    async def _noop_save(**kwargs):
+        return 0.0
+
+    monkeypatch.setattr(
+        "agentcore.services.idp.extraction.save_extraction_results",
+        _noop_save,
+    )
+
+    comp = IDPProcessedDocsOutput()
+    comp.data = Message(text="", additional_kwargs={"idp": {"document_id": str(doc_id)}})
+
+    result = await comp.finalize()
+
+    assert result.data["status"] == "pending_review"
+    assert doc.status == "pending_review"
+    assert fake_session.committed

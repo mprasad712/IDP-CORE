@@ -188,9 +188,11 @@ class IDPDocumentClassifier(Node):
             async with session_scope() as session:
                 doc = await session.get(IdpDocument, doc_id)
                 if doc:
-                    doc.predicted_type = predicted_type
-                    session.add(doc)
-                    await session.commit()
+                    # don't clobber a meaningful pre-type (e.g. the Document Splitter's) with 'unknown'
+                    if predicted_type != "unknown" or not doc.predicted_type:
+                        doc.predicted_type = predicted_type
+                        session.add(doc)
+                        await session.commit()
         except Exception as exc:
             logger.debug(f"[DocumentClassifier] Could not persist predicted_type: {exc}")
 

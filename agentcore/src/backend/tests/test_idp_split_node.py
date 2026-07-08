@@ -22,6 +22,10 @@ class _Sess:
     async def get(self, model, ident): return self._r.get(ident)
     def add(self, x): pass
     async def commit(self): self.committed = True
+    async def exec(self, stmt):
+        class _Empty:
+            def all(self): return []
+        return _Empty()
 
 
 @pytest.mark.anyio
@@ -135,3 +139,62 @@ async def test_splitter_fails_parent_when_no_child_enqueues(monkeypatch):
     assert parent.status == "failed"
     assert parent.error_message is not None and "no child" in parent.error_message
     assert parent.failed_at is not None
+
+
+@pytest.mark.anyio
+async def test_splitter_reuses_existing_children_on_retry(monkeypatch):
+    """On retry: if children already exist in DB, reuse them; never call materialize_children again."""
+    parent = SimpleNamespace(id=uuid4(), parent_document_id=None, file_type="pdf", page_count=4,
+                             status="processing", extra={}, predicted_type=None,
+                             processing_completed_at=None, error_message=None, failed_at=None)
+    child1 = SimpleNamespace(id=uuid4(), predicted_type="Invoice")
+    child2 = SimpleNamespace(id=uuid4(), predicted_type="Receipt")
+
+    class _SessWithExec:
+        def __init__(self, registry):
+            self._r = registry
+            self.committed = False
+            self._exec_result = [child1, child2]
+
+        async def get(self, model, ident):
+            return self._r.get(ident)
+
+        def add(self, x):
+            pass
+
+        async def commit(self):
+            self.committed = True
+
+        async def exec(self, stmt):
+            class _Result:
+                def __init__(self, rows): self._rows = rows
+                def all(self): return self._rows
+            return _Result(self._exec_result)
+
+    registry = {parent.id: parent}
+    sess = _SessWithExec(registry)
+    monkeypatch.setattr("agentcore.components.IDP.document_splitter.session_scope", lambda: _Scope(sess))
+    monkeypatch.setattr("agentcore.components.IDP.document_splitter.get_storage_service", lambda: object())
+
+    async def fake_boundaries(*a, **k):
+        return [(0, 1), (2, 3)], ["Invoice", "Receipt"]
+    monkeypatch.setattr("agentcore.components.IDP.document_splitter.detect_boundaries_hybrid", fake_boundaries)
+
+    async def fake_inputs(self, payload, doc): return ({0: "a", 1: "b", 2: "c", 3: "d"}, [])
+    monkeypatch.setattr(IDPDocumentSplitter, "_page_inputs", fake_inputs, raising=True)
+
+    async def _should_not_be_called(*a, **k):
+        raise AssertionError("materialize_children was called on retry — duplicate children would be created")
+    monkeypatch.setattr("agentcore.components.IDP.document_splitter.materialize_children", _should_not_be_called)
+
+    enq = []
+    async def fake_enqueue(session, cid): enq.append(cid)
+    monkeypatch.setattr("agentcore.services.idp.pipeline.enqueue_document", fake_enqueue)
+
+    comp = IDPDocumentSplitter()
+    comp.document = _msg(str(parent.id)); comp.llm = object()
+    kind, child_ids = await comp._decide()
+
+    assert kind == "split"
+    assert set(child_ids) == {child1.id, child2.id}
+    assert set(enq) == {child1.id, child2.id}  # existing children enqueued

@@ -73,6 +73,8 @@ class IDPDocumentSplitter(Node):
                     page_texts[i] = pdf[i].get_text() or ""   # native text (digital)
                 if bool(getattr(self, "use_vision", True)) and len(page_images) < _MAX_VISION_PAGES:
                     page_images.append((pdf[i].get_pixmap(dpi=120).tobytes("png"), "image/png"))
+                elif bool(getattr(self, "use_vision", True)) and len(page_images) == _MAX_VISION_PAGES and i == _MAX_VISION_PAGES:
+                    logger.debug(f"[split] page-image cap {_MAX_VISION_PAGES} reached; later pages use text only")
             pdf.close()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[split] page render failed: {exc}")
@@ -111,7 +113,18 @@ class IDPDocumentSplitter(Node):
                     self._decision = ("single", None); return self._decision
 
                 storage = get_storage_service()
-                child_ids = await materialize_children(session, storage, doc, boundaries)
+                from sqlmodel import select
+                existing = (await session.exec(
+                    select(IdpDocument).where(
+                        IdpDocument.parent_document_id == doc.id,
+                        IdpDocument.deleted_at.is_(None),
+                    )
+                )).all()
+                if existing:
+                    child_ids = [c.id for c in existing]   # reuse — a prior fork already created them
+                    seg_types = None                       # already pre-typed on first materialize
+                else:
+                    child_ids = await materialize_children(session, storage, doc, boundaries)
                 if not child_ids:
                     self.status = "split produced no children — passthrough"
                     self._decision = ("single", None)
@@ -120,7 +133,7 @@ class IDPDocumentSplitter(Node):
                 # pre-type each child from the boundary LLM (skip 'unknown')
                 if seg_types:
                     if len(seg_types) != len(child_ids):
-                        logger.debug(f"[split] seg_types({len(seg_types)}) != children({len(child_ids)}) — pairing by order")
+                        logger.warning(f"[split] seg_types({len(seg_types)}) != children({len(child_ids)}) — pairing by order")
                     for cid, ctype in zip(child_ids, seg_types):
                         c = await session.get(IdpDocument, cid)
                         if c is not None and ctype and str(ctype).lower() != "unknown":
