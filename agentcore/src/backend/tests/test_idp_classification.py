@@ -9,7 +9,7 @@ from agentcore.services.database.models.idp.config import IdpAgent, IdpFieldConf
 from agentcore.services.database.models.idp.documents import IdpDocument, IdpDocumentClassification
 from agentcore.services.database.models.user.model import User
 from agentcore.services.database.models.organization.model import Organization
-from agentcore.services.idp.classification import classify_and_persist, ClassificationResult
+from agentcore.services.idp.classification import classify_and_persist, classify_via_llm, ClassificationResult
 from agentcore.services.idp import classification
 
 
@@ -294,3 +294,29 @@ async def test_classification_clamps_out_of_range_confidence(monkeypatch):
             if db_reg:
                 await session.delete(db_reg)
                 await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Pure unit tests for classify_via_llm — no DB, no network
+# ---------------------------------------------------------------------------
+
+class _FakeStructured:
+    def __init__(self, payload): self._p = payload
+    async def ainvoke(self, messages): return {"parsed": self._p, "raw": None}
+
+
+class _FakeLLM:
+    """Mimics a model whose structured output only works WITH include_raw=True."""
+    def __init__(self, payload): self._p = payload
+    def with_structured_output(self, schema, include_raw=False):
+        if not include_raw:
+            raise TypeError("include_raw required")   # forces the working branch
+        return _FakeStructured(self._p)
+
+
+@pytest.mark.anyio
+async def test_classify_via_llm_uses_include_raw_and_returns_type():
+    llm = _FakeLLM(ClassificationResult(predicted_type="Invoice", confidence=0.9, candidates={"Invoice": 0.9}))
+    result = await classify_via_llm(llm, ["Invoice", "Aadhaar Card"], "TAX INVOICE INV-2026-0042")
+    assert result.predicted_type == "Invoice"
+    assert result.confidence == pytest.approx(0.9)

@@ -317,3 +317,60 @@ async def classify_and_persist(
     if usage_info:
         res["_usage"] = usage_info
     return res
+
+
+async def classify_via_llm(llm_model, doc_types, text, *, timeout: float = _LLM_TIMEOUT) -> "ClassificationResult":
+    """Robust document classification from text — the SAME include_raw + timeout + fallback logic the
+    fixed pipeline uses, factored out so the native DocumentClassifier node gets identical behaviour.
+    Never raises: returns ClassificationResult(unknown, 0.0, {}) on any failure."""
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    types_desc = ", ".join(doc_types)
+    system_prompt = (
+        "You are an expert Document Classifier.\n"
+        "Classify the document text into exactly one of the following types:\n\n"
+        f"{types_desc}\n\n"
+        "If the document does not match any of these types, return 'unknown' as predicted_type.\n"
+        "Provide a confidence score (0.0 to 1.0) and include other top candidate types in the candidates dictionary."
+    )
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=f"Document Text:\n{text[:4000]}")]
+
+    result = None
+    if hasattr(llm_model, "with_structured_output"):
+        try:
+            try:
+                structured = llm_model.with_structured_output(ClassificationResult, include_raw=True)
+                res = await asyncio.wait_for(structured.ainvoke(messages), timeout=timeout)
+                result = res.get("parsed") if isinstance(res, dict) else res
+            except TypeError:
+                structured = llm_model.with_structured_output(ClassificationResult)
+                result = await asyncio.wait_for(structured.ainvoke(messages), timeout=timeout)
+        except Exception as exc:
+            logger.warning(f"[classify_via_llm] structured output failed: {exc}. Falling back to JSON parse.")
+
+    if result is None:
+        try:
+            response = await asyncio.wait_for(llm_model.ainvoke(messages), timeout=timeout)
+            content = (response.content if hasattr(response, "content") else str(response)).strip()
+            if content.startswith("```"):
+                lines = content.split("\n")
+                if lines[0].strip().startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines).strip()
+            parsed = json.loads(content)
+            result = ClassificationResult(
+                predicted_type=parsed.get("predicted_type", "unknown"),
+                confidence=float(parsed.get("confidence", 0.0)),
+                candidates=parsed.get("candidates", {}),
+            )
+        except Exception as exc:
+            logger.error(f"[classify_via_llm] parsing failed: {exc}")
+            result = ClassificationResult(predicted_type="unknown", confidence=0.0, candidates={})
+
+    try:
+        result.confidence = max(0.0, min(1.0, float(result.confidence)))
+    except (TypeError, ValueError):
+        result.confidence = 0.0
+    return result
