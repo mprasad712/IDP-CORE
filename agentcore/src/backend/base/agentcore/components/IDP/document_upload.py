@@ -70,13 +70,18 @@ class IDPDocumentUpload(Node):
             job_id = str(job.id) if job else None
             idp_agent_id = str(doc.agent_id)
 
+        import asyncio
+
         file_bytes = await get_storage_service().get_file(agent_scope, file_name)
-        overall_kind, page_status = text_layer.classify_document(file_bytes, file_type, min_text_length=50)
+        # PDF parsing / page classification is CPU-bound — keep it off the event loop
+        overall_kind, page_status = await asyncio.to_thread(
+            text_layer.classify_document, file_bytes, file_type, min_text_length=50
+        )
 
         text = ""
         tokens: list[dict] = []
         try:
-            _, tokens = text_layer.extract_native_text(file_bytes, file_type)
+            _, tokens = await asyncio.to_thread(text_layer.extract_native_text, file_bytes, file_type)
             text = " ".join(str(t.get("text", "")) for t in tokens)
         except Exception:  # scanned / non-text — OCR nodes downstream will supply text
             pass

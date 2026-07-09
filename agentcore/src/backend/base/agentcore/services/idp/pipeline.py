@@ -1400,7 +1400,8 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
                 # VISION path: render the selected pages to images and let the model read them
                 # directly. No page cap (product decision) — but log the payload size and turn a
                 # 413 / timeout / context-window error into a readable message (not a raw 413).
-                page_images = render_document_images(original_bytes, file_type, selected)
+                # CPU-bound rasterization — off the event loop, or every HTTP request stalls.
+                page_images = await asyncio.to_thread(render_document_images, original_bytes, file_type, selected)
                 if not page_images:
                     raise PipelineError("vision mode: could not render any page images from the document")
                 _payload_kb = sum(len(b) for b, _ in page_images) // 1024

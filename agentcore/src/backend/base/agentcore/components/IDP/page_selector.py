@@ -208,7 +208,8 @@ class IDPPageSelector(Node):
         new_text = ""
         try:
             from agentcore.services.idp import text_layer
-            _, tokens = text_layer.extract_native_text(sliced_bytes, "pdf")
+            # CPU-bound PDF parsing — off the event loop
+            _, tokens = await asyncio.to_thread(text_layer.extract_native_text, sliced_bytes, "pdf")
             new_text = " ".join(str(t.get("text", "")) for t in tokens)
         except Exception:  # noqa: BLE001
             pass

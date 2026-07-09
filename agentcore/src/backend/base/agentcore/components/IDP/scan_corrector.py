@@ -80,9 +80,12 @@ class IDPScanCorrector(Node):
         # (rasterized) file returns empty. (Codex #4) Kept only if there's no upstream OCR text.
         original_native_text = ""
         try:
+            import asyncio
+
             from agentcore.services.idp import text_layer
 
-            _, _otoks = text_layer.extract_native_text(file_bytes, file_type)
+            # CPU-bound PDF parsing — off the event loop
+            _, _otoks = await asyncio.to_thread(text_layer.extract_native_text, file_bytes, file_type)
             original_native_text = " ".join(str(t.get("text", "")) for t in _otoks)
         except Exception:  # noqa: BLE001
             pass
@@ -129,9 +132,11 @@ class IDPScanCorrector(Node):
         new_text = upstream_text or original_native_text
         if not new_text.strip():
             try:
+                import asyncio
+
                 from agentcore.services.idp import text_layer
 
-                _, tokens = text_layer.extract_native_text(file_bytes, out_ext)
+                _, tokens = await asyncio.to_thread(text_layer.extract_native_text, file_bytes, out_ext)
                 new_text = " ".join(str(t.get("text", "")) for t in tokens)
             except Exception:  # noqa: BLE001
                 pass

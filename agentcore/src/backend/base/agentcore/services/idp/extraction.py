@@ -755,15 +755,23 @@ async def extract_multimodal(
         mime = mime or "image/png"
         page_images.append((file_path.read_bytes(), mime))
     elif suffix == ".pdf":
-        import fitz
-        pdf_doc = fitz.open(str(file_path))
-        for page_num in range(len(pdf_doc)):
-            page = pdf_doc[page_num]
-            zoom = 150 / 72.0
-            mat = fitz.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=mat)
-            page_images.append((pix.tobytes("png"), "image/png"))
-        pdf_doc.close()
+        def _render_pdf_pages() -> list[tuple]:
+            # CPU-bound rasterization — runs in a worker thread so the event loop stays responsive
+            import fitz
+            out: list[tuple] = []
+            pdf_doc = fitz.open(str(file_path))
+            try:
+                for page_num in range(len(pdf_doc)):
+                    page = pdf_doc[page_num]
+                    zoom = 150 / 72.0
+                    mat = fitz.Matrix(zoom, zoom)
+                    pix = page.get_pixmap(matrix=mat)
+                    out.append((pix.tobytes("png"), "image/png"))
+            finally:
+                pdf_doc.close()
+            return out
+
+        page_images = await asyncio.to_thread(_render_pdf_pages)
     else:
         raise ValueError(f"Unsupported file type for multimodal extraction: {suffix}")
 

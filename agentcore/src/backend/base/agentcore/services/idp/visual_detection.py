@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -232,7 +233,9 @@ async def _detect_via_vlm(
     if not types:
         return []
 
-    pages = _render_pages(file_bytes, file_type, selected_pages)
+    # Rendering is CPU-bound (PyMuPDF rasterization) — keep it off the event loop, or every
+    # HTTP request in the process stalls while pages rasterize.
+    pages = await asyncio.to_thread(_render_pages, file_bytes, file_type, selected_pages)
     if len(pages) > _MAX_VLM_PAGES:
         logger.info(f"Visual detection: {len(pages)} pages > cap {_MAX_VLM_PAGES}; only the first {_MAX_VLM_PAGES} are analysed.")
         pages = pages[:_MAX_VLM_PAGES]
@@ -340,7 +343,8 @@ async def detect_visual_elements(
 
     want_barcode = wanted_types is None or any(t in wanted_types for t in _BARCODE_TYPES)
     if want_barcode:
-        elements.extend(_detect_barcodes(file_bytes, file_type, selected_pages))
+        # page rendering + pyzbar decoding are CPU-bound — run off the event loop
+        elements.extend(await asyncio.to_thread(_detect_barcodes, file_bytes, file_type, selected_pages))
 
     if llm_model is not None:
         elements.extend(

@@ -116,8 +116,12 @@ class IDPDocumentTypeDetector(Node):
             file_type = str(payload.get("file_type") or self._get_extension() or "pdf").lower().lstrip(".")
             file_bytes = await load_bytes(payload)
             if file_bytes:
-                kind, page_status = text_layer.classify_document(
-                    file_bytes, file_type, min_text_length=int(self.min_text_length or 50)
+                import asyncio
+
+                # CPU-bound PDF parsing — off the event loop
+                kind, page_status = await asyncio.to_thread(
+                    text_layer.classify_document,
+                    file_bytes, file_type, min_text_length=int(self.min_text_length or 50),
                 )
         except Exception as exc:  # noqa: BLE001 — never fail routing on a classify hiccup
             logger.debug(f"[DocumentTypeDetector] per-page classify failed, using text heuristic: {exc}")
