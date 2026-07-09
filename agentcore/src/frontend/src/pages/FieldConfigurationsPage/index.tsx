@@ -956,12 +956,14 @@ export default function FieldConfigurationsPage() {
             Define named extraction schemas used by the Named Config extraction node.
           </p>
         </div>
-        <Button variant="outline" onClick={() => setGenOpen(true)} className="gap-1.5 rounded-lg">
-          <Sparkles className="h-4 w-4" /> Generate with AI
-        </Button>
-        <Button onClick={openCreate} className="gap-1.5 bg-[#D04A02] hover:bg-[#B84000] text-white rounded-lg">
-          <Plus className="h-4 w-4" /> New Configuration
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => setGenOpen(true)} className="gap-1.5 rounded-lg">
+            <Sparkles className="h-4 w-4" /> Generate with AI
+          </Button>
+          <Button onClick={openCreate} className="gap-1.5 bg-[#D04A02] hover:bg-[#B84000] text-white rounded-lg">
+            <Plus className="h-4 w-4" /> New Configuration
+          </Button>
+        </div>
       </div>
 
       <Tabs defaultValue="custom" className="flex-1 flex flex-col overflow-hidden">
