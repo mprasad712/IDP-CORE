@@ -481,10 +481,16 @@ async def download_document_log(
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
 
-    # Artifact lives at flow_logs/{document_id}/flow.log under str(doc.agent_id) (see pipeline.py).
+    # Artifact lives at flow_logs/{document_id}/flow.log under the document's STORAGE SCOPE — the
+    # directory its file_path starts with (e.g. "<agent_id>(<name>_<env>_<version>)"). Reads must
+    # derive it from file_path via scope_of(), never reconstruct it (see storage_scope.py); using
+    # doc.agent_id here (the IdpAgent row id) looked in a directory that never existed -> 404.
+    from agentcore.services.idp.storage_scope import scope_of
+
+    scope = scope_of(doc.file_path) or str(doc.agent_id)
     try:
         data = await storage_service.get_file(
-            agent_id=str(doc.agent_id), file_name=f"flow_logs/{document_id}/flow.log"
+            agent_id=scope, file_name=f"flow_logs/{document_id}/flow.log"
         )
     except FileNotFoundError as e:
         raise HTTPException(
