@@ -116,6 +116,189 @@ def test_node_name_unchanged():
     assert IDPConnectorInput.name == "IDPConnectorInput"
 
 
+# ── Canvas connector resolution (connector_name plain-name + connector_provider) ──
+# The builder canvas (IDPConnectorDropdown) saves the chosen connector's PLAIN NAME in
+# `connector_name` and its provider in `connector_provider`. The component historically read only
+# `self.connector` — a "name | provider | target | uuid" token produced by the BACKEND palette
+# dropdown. On the canvas `self.connector` is empty, so a manual run failed with "No connector
+# selected", and even the plain name is not a UUID (`_get_outlook_config` needs the UUID). These
+# cover the resolver that bridges both save shapes and routes the right provider.
+
+def test_resolve_selected_connector_from_canvas_name(monkeypatch):
+    """Canvas save shape: connector="", connector_name=<plain name>, connector_provider=<provider>.
+    The resolver looks the name up in the catalogue → (uuid, provider)."""
+    from agentcore.components.IDP import connector_input as ci
+
+    n = IDPConnectorInput()
+    n.connector = ""
+    n.connector_name = "MyOutlook"
+    n.connector_provider = "outlook"
+    monkeypatch.setattr(
+        ci, "_resolve_connector_by_name",
+        lambda name, provider=None: ("11111111-1111-1111-1111-111111111111", "outlook") if name == "MyOutlook" else None,
+    )
+    cid, provider = n._resolve_selected_connector()
+    assert cid == "11111111-1111-1111-1111-111111111111"
+    assert provider == "outlook"
+
+
+def test_resolve_selected_connector_from_backend_token():
+    """The backend palette still saves the pipe token in `connector` — that path must keep working
+    with no catalogue lookup (the uuid is right there in the token)."""
+    n = IDPConnectorInput()
+    n.connector = "Acme | gmail | a@b.com | 22222222-2222-2222-2222-222222222222"
+    cid, provider = n._resolve_selected_connector()
+    assert cid == "22222222-2222-2222-2222-222222222222"
+    assert provider == "gmail"
+
+
+def test_resolve_selected_connector_empty_when_unset():
+    n = IDPConnectorInput()
+    n.connector = ""
+    cid, provider = n._resolve_selected_connector()
+    assert cid is None
+    assert provider == ""
+
+
+def test_resolve_selected_connector_provider_from_catalogue_when_hint_absent(monkeypatch):
+    """`connector_provider` is a show:false template field, so the run engine may skip it and it
+    won't exist on the component. The provider must then still come from the catalogue lookup — so a
+    Gmail canvas node routes to the Gmail path even without the provider hint."""
+    from agentcore.components.IDP import connector_input as ci
+
+    n = IDPConnectorInput()
+    n.connector = ""
+    n.connector_name = "MyGmail"  # note: connector_provider deliberately NOT set on the instance
+    monkeypatch.setattr(ci, "_resolve_connector_by_name", lambda name, provider=None: ("id-g", "gmail"))
+    cid, provider = n._resolve_selected_connector()
+    assert cid == "id-g"
+    assert provider == "gmail"
+
+
+def test_get_document_dispatches_gmail_from_canvas(monkeypatch):
+    """A Gmail connector chosen on the canvas → connector_provider="gmail" → the manual pull routes
+    to the Gmail path. Previously provider was parsed from an EMPTY `connector` → wrong Outlook path."""
+    from agentcore.components.IDP import connector_input as ci
+
+    n = IDPConnectorInput()
+    n.connector = ""
+    n.connector_name = "MyGmail"
+    n.connector_provider = "gmail"
+    monkeypatch.setattr(ci, "_resolve_connector_by_name", lambda name, provider=None: ("id-g", "gmail"))
+    called = {}
+
+    def _fake_gmail():
+        called["gmail"] = True
+        return __import__("agentcore.schema.message", fromlist=["Message"]).Message(text="ok")
+
+    n._get_gmail_document = _fake_gmail
+    out = n.get_document()
+    assert called.get("gmail") is True
+    assert out.text == "ok"
+
+
+def test_resolve_selected_connector_unresolvable_name_no_id(monkeypatch):
+    """An unresolvable plain name (deleted / typo'd connector) must NOT be passed downstream as an
+    id — that would reach UUID() and log a noisy error. Return no id so the caller errors cleanly."""
+    from agentcore.components.IDP import connector_input as ci
+
+    n = IDPConnectorInput()
+    n.connector = ""
+    n.connector_name = "GhostConnector"
+    monkeypatch.setattr(ci, "_resolve_connector_by_name", lambda name, provider=None: None)
+    cid, _ = n._resolve_selected_connector()
+    assert cid is None
+
+
+def test_resolve_selected_connector_bare_uuid_name(monkeypatch):
+    """Defensive: a bare UUID stored directly in connector_name is used as the id when the catalogue
+    name lookup misses (so a valid id still works)."""
+    from agentcore.components.IDP import connector_input as ci
+
+    n = IDPConnectorInput()
+    n.connector = ""
+    n.connector_name = "33333333-3333-3333-3333-333333333333"
+    n.connector_provider = "outlook"
+    monkeypatch.setattr(ci, "_resolve_connector_by_name", lambda name, provider=None: None)
+    cid, provider = n._resolve_selected_connector()
+    assert cid == "33333333-3333-3333-3333-333333333333"
+    assert provider == "outlook"
+
+
+def test_resolve_selected_connector_malformed_token_falls_to_name(monkeypatch):
+    """A value with '|' whose LAST segment is not a UUID is NOT mis-parsed as a backend token
+    (which would wrongly take parts[1] as provider / parts[-1] as id) — it is treated as a name."""
+    from agentcore.components.IDP import connector_input as ci
+
+    n = IDPConnectorInput()
+    n.connector = "weird | name | with | pipes"  # 4 parts, but "pipes" isn't a uuid
+    seen = {}
+
+    def _fake(name, provider=None):
+        seen["name"] = name
+        return None
+
+    monkeypatch.setattr(ci, "_resolve_connector_by_name", _fake)
+    cid, _ = n._resolve_selected_connector()
+    assert seen["name"] == "weird | name | with | pipes"  # whole value used as the name
+    assert cid is None
+
+
+def test_get_config_raises_clean_error_for_unresolvable(monkeypatch):
+    """_get_config raises a clear, non-crashing error when the selection doesn't resolve to an id."""
+    from agentcore.components.IDP import connector_input as ci
+
+    n = IDPConnectorInput()
+    n.connector = ""
+    n.connector_name = "GhostConnector"
+    monkeypatch.setattr(ci, "_resolve_connector_by_name", lambda name, provider=None: None)
+    with pytest.raises(ValueError) as exc:
+        n._get_config()
+    msg = str(exc.value).lower()
+    assert "no longer available" in msg or "no connector selected" in msg
+
+
+def _mock_db_with_rows(rows):
+    """A mock db_service whose with_session().execute().scalars().all() yields `rows`."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    exec_result = MagicMock()
+    exec_result.scalars.return_value.all.return_value = rows
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=exec_result)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    db = MagicMock()
+    db.with_session = MagicMock(return_value=cm)
+    return db
+
+
+def test_resolve_connector_by_name_first_deterministic_on_duplicates():
+    """Real `_resolve_connector_by_name` (mocked session): two same-name matches → return the first
+    (deterministic order) rather than an insertion-order-dependent pick."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+    from uuid import UUID
+    from agentcore.components.IDP import connector_input as ci
+
+    row1 = SimpleNamespace(id=UUID("44444444-4444-4444-4444-444444444444"), provider="outlook")
+    row2 = SimpleNamespace(id=UUID("55555555-5555-5555-5555-555555555555"), provider="outlook")
+    db = _mock_db_with_rows([row1, row2])
+    with patch("agentcore.services.deps.get_db_service", MagicMock(return_value=db)):
+        out = ci._resolve_connector_by_name("Dup", provider="outlook")
+    assert out == ("44444444-4444-4444-4444-444444444444", "outlook")
+
+
+def test_resolve_connector_by_name_none_when_no_rows():
+    from unittest.mock import MagicMock, patch
+    from agentcore.components.IDP import connector_input as ci
+
+    db = _mock_db_with_rows([])
+    with patch("agentcore.services.deps.get_db_service", MagicMock(return_value=db)):
+        assert ci._resolve_connector_by_name("Nope") is None
+
+
 @pytest.mark.anyio
 async def test_sync_email_monitors_resolves_canvas_node():
     """The real canvas Connector Input node has type ``ConnectorInput`` + display_name

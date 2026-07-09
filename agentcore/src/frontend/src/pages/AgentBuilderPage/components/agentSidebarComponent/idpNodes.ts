@@ -160,10 +160,12 @@ function output(
   };
 }
 
-// Gate a field so it only renders when the selected connector is an Outlook/email connector
+// Gate a field so it only renders when the selected connector is an email connector
 // (the IDPConnectorDropdown writes the chosen connector's provider into `connector_provider`).
+// Both Outlook and Gmail share the same email polling/filter options, so both providers match.
+// (RenderInputParameters' show_when accepts an array of accepted values.)
 // Future SharePoint/OneDrive connectors won't show these email-only options.
-const EMAIL_ONLY = { field: "connector_provider", value: "outlook" } as const;
+const EMAIL_ONLY = { field: "connector_provider", value: ["outlook", "gmail"] } as const;
 function emailOnly<T>(field: T): T & { show_when: typeof EMAIL_ONLY } {
   return { ...field, show_when: EMAIL_ONLY };
 }
@@ -218,8 +220,10 @@ export const IDP_NODES: IDPData = {
         // SharePoint (shown when a SharePoint connector is selected)
         "sharepoint_library",
         "sharepoint_folder",
+        "sharepoint_file_types",
         // OneDrive (shown when a OneDrive connector is selected)
         "onedrive_folder",
+        "onedrive_file_types",
         // Outlook / email
         "folder",
         "filter_subject",
@@ -227,6 +231,7 @@ export const IDP_NODES: IDPData = {
         "filter_has_attachments",
         "unread_only",
         "max_emails",
+        "poll_interval_seconds",
         "account_email",
         "filter_body",
         "filter_to",
@@ -280,6 +285,10 @@ export const IDP_NODES: IDPData = {
           "sharepoint_folder", "Folder Path", "",
           "Folder within the library to process (e.g. 'Invoices/2024'). Leave empty for the library root.",
         )),
+        sharepoint_file_types: sharepointOnly(strField(
+          "sharepoint_file_types", "File Type Filter", "pdf,png,jpg,docx",
+          "Comma-separated file extensions to process. Leave empty for all supported types.",
+        )),
         // OneDrive options — the published agent's background monitor polls the chosen folder in the
         // signed-in account's drive and ingests new files into Processed Docs (ingest_mode=idp_pipeline).
         onedrive_folder: onedriveOnly({
@@ -291,6 +300,10 @@ export const IDP_NODES: IDPData = {
           ),
           idp_onedrive_folder_fetch: true,
         }),
+        onedrive_file_types: onedriveOnly(strField(
+          "onedrive_file_types", "File Type Filter", "pdf,png,jpg,docx",
+          "Comma-separated file extensions to process. Leave empty for all supported types.",
+        )),
         // Email filters / polling — the published agent's background monitor reads these (subject /
         // sender / folder / poll interval, etc.). Modeled on the MiCore Outlook connector options;
         // the backend (sync_email_monitors_for_agent) reads each by these exact field names.
@@ -316,6 +329,10 @@ export const IDP_NODES: IDPData = {
         )),
         max_emails: emailOnly(intField(
           "max_emails", "Max Emails", 10, "Maximum number of recent emails to scan per poll.",
+        )),
+        poll_interval_seconds: emailOnly(intField(
+          "poll_interval_seconds", "Poll Interval (seconds)", 60,
+          "How often the PUBLISHED agent checks for new mail (used by the background monitor).",
         )),
         account_email: emailOnly(strField(
           "account_email", "Account / Mailbox", "",

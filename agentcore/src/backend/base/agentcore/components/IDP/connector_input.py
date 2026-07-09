@@ -123,6 +123,60 @@ def _parse_connector_provider(value: str) -> str:
     return parts[1].lower() if len(parts) >= 4 else ""
 
 
+def _resolve_connector_by_name(name: str, provider: str | None = None) -> tuple[str, str] | None:
+    """Resolve a plain connector NAME (as saved by the canvas ``IDPConnectorDropdown``) to
+    ``(connector_id, provider)`` from the catalogue.
+
+    The builder canvas saves the chosen connector's plain name in ``connector_name`` (and its
+    provider in ``connector_provider``), whereas the backend palette dropdown saves the full
+    "name | provider | target | uuid" token in ``connector``. This bridges the canvas save shape to
+    the UUID the config loaders need. Returns ``None`` when no connected IDP connector matches.
+
+    When ``provider`` is given it further narrows the match (connector names are unique only within an
+    org/dept scope, so a provider hint disambiguates). Matches are ordered deterministically and a
+    warning is logged if more than one row matches, so the choice is stable rather than
+    insertion-order dependent.
+    """
+    if not name:
+        return None
+    try:
+        from agentcore.services.deps import get_db_service
+        db_service = get_db_service()
+
+        async def _query():
+            from sqlalchemy import select
+            from agentcore.services.database.models.connector_catalogue.model import ConnectorCatalogue
+
+            async with db_service.with_session() as session:
+                stmt = (
+                    select(ConnectorCatalogue)
+                    .where(ConnectorCatalogue.name == name)
+                    .where(ConnectorCatalogue.provider.in_(_IDP_PROVIDERS))
+                    .where(ConnectorCatalogue.status == "connected")
+                    .order_by(ConnectorCatalogue.name, ConnectorCatalogue.id)
+                )
+                if provider:
+                    stmt = stmt.where(ConnectorCatalogue.provider == provider)
+                result = await session.execute(stmt)
+                rows = result.scalars().all()
+                if not rows:
+                    return None
+                if len(rows) > 1:
+                    logger.warning(
+                        f"Connector name '{name}'"
+                        + (f" (provider '{provider}')" if provider else "")
+                        + f" matched {len(rows)} connected connectors; using the first by (name, id). "
+                        "Use unique connector names to avoid ambiguity."
+                    )
+                row = rows[0]
+                return (str(row.id), (row.provider or "").lower())
+
+        return _run_async(_query())
+    except Exception as e:
+        logger.warning(f"Could not resolve connector by name '{name}': {e}")
+        return None
+
+
 def _addr_list(recipients) -> list[str]:
     """Flatten a Graph recipients array → list of email addresses."""
     out = []
@@ -366,11 +420,77 @@ class IDPConnectorInput(Node):
     # Helpers
     # ------------------------------------------------------------------
 
+    def _resolve_selected_connector(self) -> tuple[str | None, str]:
+        """Resolve the chosen connector to ``(connector_id, provider)`` across both save shapes.
+
+        - Backend palette dropdown: ``connector`` = "name | provider | target | uuid" — taken as a
+          token only when it has ≥4 pipe segments AND the last is a real UUID (so a display name that
+          happens to contain ``|`` is not mis-parsed). The uuid + provider come straight from the
+          token, no DB lookup (unchanged legacy behaviour).
+        - Canvas ``IDPConnectorDropdown``: ``connector`` is empty; the plain name is in
+          ``connector_name`` and the provider hint in ``connector_provider``. The name is resolved to
+          a uuid via the catalogue so the manual-pull / preview path works from the canvas. The
+          catalogue's provider is authoritative; the hint only disambiguates and is a fallback.
+
+        An unresolvable plain name yields ``(None, provider)`` — it is NOT passed downstream as an id
+        (that would reach ``UUID()`` and log a noisy error) — so the caller raises a clean error.
+
+        Memoized per component instance: selection can't change mid-run, so both the provider-dispatch
+        resolve in ``get_document`` and the sub-method's resolve reuse the SAME connector row.
+
+        Uses ``getattr(..., "")`` because ``connector_name`` / ``connector_provider`` only exist on the
+        component when the canvas template carries them (``connector_provider`` is a hidden field the
+        run engine may skip).
+        """
+        cached = getattr(self, "_resolved_connector_cache", None)
+        if cached is not None:
+            return cached
+
+        from uuid import UUID
+
+        def _is_uuid(s: str) -> bool:
+            try:
+                UUID(str(s))
+            except (ValueError, AttributeError, TypeError):
+                return False
+            return True
+
+        token = (getattr(self, "connector", "") or "").strip()
+        parts = [p.strip() for p in token.split("|")] if token else []
+        if len(parts) >= 4 and _is_uuid(parts[-1]):
+            result: tuple[str | None, str] = (_parse_connector_id(token), _parse_connector_provider(token))
+            self._resolved_connector_cache = result
+            return result
+
+        # Canvas shape (or a bare name/id typed into the backend field): resolve the plain name.
+        name = token or (getattr(self, "connector_name", "") or "").strip()
+        provider_hint = (getattr(self, "connector_provider", "") or "").strip().lower()
+        if not name:
+            result = (None, provider_hint)
+        else:
+            resolved = _resolve_connector_by_name(name, provider_hint or None)
+            if resolved:
+                cid, prov = resolved
+                # DB provider is authoritative (the hint only disambiguates the lookup). A stale hint
+                # can't win — it would have filtered the row out and we'd not be here.
+                result = (cid, prov)
+            elif _is_uuid(name):
+                # Defensive: a bare UUID was stored directly — use it (provider from the hint).
+                result = (name, provider_hint)
+            else:
+                # Unresolvable plain name (deleted / typo'd) — no id; caller raises a clean error.
+                result = (None, provider_hint)
+        self._resolved_connector_cache = result
+        return result
+
     def _get_config(self) -> dict:
         from agentcore.components.tools.outlook_mail import _get_outlook_config
-        connector_id = _parse_connector_id(self.connector)
+        connector_id, _ = self._resolve_selected_connector()
         if not connector_id:
-            raise ValueError("No connector selected. Pick one from the Connector dropdown.")
+            raise ValueError(
+                "No connector selected, or the selected connector is no longer available. "
+                "Pick one from the Connector dropdown."
+            )
         config = _get_outlook_config(connector_id)
         if config is None:
             raise ValueError(f"Connector not found (id={connector_id}). It may have been deleted.")
@@ -478,7 +598,7 @@ class IDPConnectorInput(Node):
             _resolve_site_id_sync,
         )
 
-        connector_id = _parse_connector_id(self.connector)
+        connector_id, _ = self._resolve_selected_connector()
         if not connector_id:
             self.status = "Error: no connector selected"
             return Message(text="No SharePoint connector selected. Pick one from the Connector dropdown.")
@@ -602,7 +722,7 @@ class IDPConnectorInput(Node):
         from urllib.parse import quote as _quote
         from agentcore.components.tools.outlook_mail import _get_outlook_config
 
-        connector_id = _parse_connector_id(self.connector)
+        connector_id, _ = self._resolve_selected_connector()
         if not connector_id:
             self.status = "Error: no connector selected"
             return Message(text="No OneDrive connector selected. Pick one from the Connector dropdown.")
@@ -727,7 +847,7 @@ class IDPConnectorInput(Node):
         import httpx
         from agentcore.components.tools.outlook_mail import _get_outlook_config
 
-        connector_id = _parse_connector_id(self.connector)
+        connector_id, _ = self._resolve_selected_connector()
         if not connector_id:
             self.status = "Error: no connector selected"
             return Message(text="No Gmail connector selected.")
@@ -876,7 +996,7 @@ class IDPConnectorInput(Node):
         """
         import httpx
 
-        provider = _parse_connector_provider(self.connector or "")
+        _, provider = self._resolve_selected_connector()
         if provider in _SHAREPOINT_PROVIDERS:
             return self._get_sharepoint_document()
         if provider in _ONEDRIVE_PROVIDERS:

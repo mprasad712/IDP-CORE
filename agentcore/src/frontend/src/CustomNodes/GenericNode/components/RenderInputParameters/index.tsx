@@ -34,10 +34,15 @@ const RenderInputParameters = ({
       if (!template?.show || template?.advanced || (template?.tool_mode && isToolMode)) {
         return false;
       }
-      // Client-side conditional visibility: show_when: { field, value }
+      // Client-side conditional visibility: show_when: { field, value }.
+      // `value` may be a single value OR an array of accepted values (e.g. show for
+      // both "outlook" and "gmail"); a scalar still matches by strict equality.
       if (template?.show_when) {
         const controllerValue = data.node?.template[template.show_when.field]?.value;
-        return controllerValue === template.show_when.value;
+        const target = template.show_when.value;
+        return Array.isArray(target)
+          ? target.includes(controllerValue)
+          : controllerValue === target;
       }
       return true;
     });
