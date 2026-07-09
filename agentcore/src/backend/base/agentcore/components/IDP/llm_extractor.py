@@ -123,7 +123,13 @@ class IDPLLMExtractor(Node):
         """When config_names multi-select is used and classification metadata is present,
         find which selected config's doc_type matches the classified type.
         Returns the config name to use, or None if no match (→ skip)."""
+        # The classifier gate applies to a SINGLE selected config too (not just the multi list): fall
+        # back to the single Field Configuration when no multi-select list is set, so a classifier that
+        # says "this isn't your type" routes to skip even with one config.
         config_names: list[str] = list(self.config_names) if self.config_names else []
+        if not config_names:
+            single = str(getattr(self, "config_name", "") or "").strip()
+            config_names = [single] if single else []
         if not config_names:
             return None
 
@@ -400,28 +406,31 @@ class IDPLLMExtractor(Node):
                 extracted={"error": "No Field Configuration selected — pick one in the AI Field Extractor."},
             )
 
-        # Multi-config routing: if config_names is populated, resolve the right config
-        # based on the upstream classification or skip if no match.
-        if config_names and self.extraction_mode == "field_configuration":
+        # Classifier gate: whenever a Document Classifier RAN — for a SINGLE config or a multi list —
+        # route to the matching config, or skip/drop per 'On Unmatched Type'. Without a classifier, the
+        # single config is used directly (unchanged). This makes a single "Invoice" config skip a
+        # medical/aadhaar doc instead of force-extracting it.
+        selected_configs = config_names or ([single_config] if single_config else [])
+        if selected_configs and self.extraction_mode == "field_configuration":
             from agentcore.services.idp.graph_native.payload import effective_payload
 
             classification = effective_payload(self, src).get("classification") or (
-                (src.additional_kwargs or {}).get("classification", {}) if isinstance(src, Message) else {}
+                (getattr(src, "additional_kwargs", None) or {}).get("classification", {}) if isinstance(src, Message) else {}
             )
+            classifier_ran = bool(classification.get("type"))
             classified_type = (classification.get("type") or "unknown").strip()
 
-            # Optional Document Classifier: when ABSENT, a single selected config is used directly;
-            # when PRESENT, its type routes to the matching config. Only multiple configs with NO
-            # classifier can't be disambiguated → skip.
-            matched_config = await self._resolve_config_name_from_classification()
-            if matched_config is None:
-                classifier_ran = bool(classification.get("type"))
-                unmatched = await self._handle_unmatched(classified_type, config_names, classifier_ran)
-                if unmatched is not None:
-                    return unmatched        # skip / drop -> terminal
-                # extract_anyway -> _handle_unmatched set self._override_config_name; fall through
+            if classifier_ran:
+                matched_config = await self._resolve_config_name_from_classification()
+                if matched_config is None:
+                    unmatched = await self._handle_unmatched(classified_type, selected_configs, True)
+                    if unmatched is not None:
+                        return unmatched        # skip / drop -> terminal
+                    # extract_anyway -> _handle_unmatched set self._override_config_name; fall through
+                else:
+                    self._override_config_name = matched_config
             else:
-                self._override_config_name = matched_config
+                self._override_config_name = None
         else:
             self._override_config_name = None
 
@@ -521,23 +530,25 @@ class IDPLLMExtractor(Node):
             return carry(rep, text="", extracted={"error": "No Field Configuration selected."})
 
         self._override_config_name = None
-        if config_names and self.extraction_mode == "field_configuration":
+        selected_configs = config_names or ([single_config] if single_config else [])
+        if selected_configs and self.extraction_mode == "field_configuration":
             from agentcore.services.idp.graph_native.payload import effective_payload
             from agentcore.schema.message import Message as _Msg
 
             classification = effective_payload(self, rep).get("classification") or (
-                (rep.additional_kwargs or {}).get("classification", {}) if isinstance(rep, _Msg) else {}
+                (getattr(rep, "additional_kwargs", None) or {}).get("classification", {}) if isinstance(rep, _Msg) else {}
             )
+            classifier_ran = bool(classification.get("type"))
             classified_type = (classification.get("type") or "unknown").strip()
-            matched = await self._resolve_config_name_from_classification(rep)
-            if matched is None:
-                classifier_ran = bool(classification.get("type"))
-                unmatched = await self._handle_unmatched(classified_type, config_names, classifier_ran)
-                if unmatched is not None:
-                    return unmatched
-                # extract_anyway -> _override_config_name set; fall through to per-chunk extraction
-            else:
-                self._override_config_name = matched
+            if classifier_ran:
+                matched = await self._resolve_config_name_from_classification(rep)
+                if matched is None:
+                    unmatched = await self._handle_unmatched(classified_type, selected_configs, True)
+                    if unmatched is not None:
+                        return unmatched
+                    # extract_anyway -> _override_config_name set; fall through to per-chunk extraction
+                else:
+                    self._override_config_name = matched
         effective = self._override_config_name or single_config or (config_names[0] if config_names else None)
 
         if not self.llm:

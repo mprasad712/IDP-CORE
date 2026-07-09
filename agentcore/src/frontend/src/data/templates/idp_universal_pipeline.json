@@ -832,7 +832,19 @@
                      "type":"str",
                      "value":[
                         "Invoice",
-                        "Medical Report"
+                        "Medical Report",
+                        "Purchase Order",
+                        "Goods Receipt Note",
+                        "Cheque",
+                        "Passport",
+                        "Aadhaar Card",
+                        "PAN Card",
+                        "Driving Licence",
+                        "Voter ID",
+                        "Utility Bill",
+                        "Salary Slip",
+                        "Offer Letter",
+                        "Contract Agreement"
                      ]
                   },
                   "confidence_threshold":{
@@ -1622,7 +1634,19 @@
                      "type":"str",
                      "value":[
                         "Invoice",
-                        "Medical Report"
+                        "Medical Report",
+                        "Purchase Order",
+                        "Goods Receipt Note",
+                        "Cheque",
+                        "Passport",
+                        "Aadhaar Card",
+                        "PAN Card",
+                        "Driving Licence",
+                        "Voter ID",
+                        "Utility Bill",
+                        "Salary Slip",
+                        "Offer Letter",
+                        "Contract Agreement"
                      ]
                   },
                   "input_mode":{

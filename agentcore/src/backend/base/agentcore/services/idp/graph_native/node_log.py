@@ -166,9 +166,13 @@ def sample_io(vertex: Any) -> dict | None:
         # params summarized so a node with many large upstream Messages can't bloat io.input.
         params = getattr(vertex, "params", None)
         if isinstance(params, dict) and params:
-            inp = {str(k): _summ(v) for k, v in list(params.items())[:_MAX_PARAMS]}
-            if len(params) > _MAX_PARAMS:
-                inp["…"] = f"+{len(params) - _MAX_PARAMS} more param(s)"
+            # Drop the vestigial `model_name` free-text field (a leftover "gpt-4o" default on older
+            # saved graphs): it is NOT the model that runs — the real model is the `llm` param. Logging
+            # it just misleads ("why gpt-4o when I ran Groq?").
+            pairs = [(k, v) for k, v in params.items() if str(k) != "model_name"]
+            inp = {str(k): _summ(v) for k, v in pairs[:_MAX_PARAMS]}
+            if len(pairs) > _MAX_PARAMS:
+                inp["…"] = f"+{len(pairs) - _MAX_PARAMS} more param(s)"
             if inp:
                 result["input"] = inp
 

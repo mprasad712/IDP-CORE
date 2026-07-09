@@ -159,6 +159,21 @@ function mapApiStatus(s: string): DocStatus {
   return "pending"; // pending_review, extracted, queued, processing, failed
 }
 
+/** Format a backend UTC timestamp as IST (Asia/Kolkata) "YYYY-MM-DD HH:MM:SS". The backend stores UTC;
+ *  if the string carries no timezone marker we treat it as UTC (append Z) before converting. */
+function toIST(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const utc = /Z$|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z";
+  const d = new Date(utc);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 19).replace("T", " ");
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  }).formatToParts(d);
+  const g = (t: string) => parts.find((x) => x.type === t)?.value ?? "";
+  return `${g("year")}-${g("month")}-${g("day")} ${g("hour")}:${g("minute")}:${g("second")}`;
+}
+
 function listDocToPage(d: ApiProcessedDoc): ProcessedDoc {
   return {
     id: d.id,
@@ -167,7 +182,7 @@ function listDocToPage(d: ApiProcessedDoc): ProcessedDoc {
     runEnv: d.run_env ?? null,
     runVersion: d.run_version ?? null,
     source: d.source ?? null,
-    dateProcessed: (d.processing_completed_at ?? d.created_at ?? "").slice(0, 19).replace("T", " "),
+    dateProcessed: toIST(d.processing_completed_at ?? d.created_at ?? ""),   // IST (Asia/Kolkata)
     documentType: d.predicted_type ?? d.file_type ?? "—",
     fileType: (d.file_type ?? "").toLowerCase().replace(/^\./, ""),
     overallConfidence: Math.round((d.overall_confidence ?? 0) * 100),

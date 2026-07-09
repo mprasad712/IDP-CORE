@@ -478,6 +478,30 @@ async def test_extractor_no_classifier_single_config_uses_it():
 
 
 @pytest.mark.anyio
+async def test_extractor_single_config_classifier_match_uses_it(monkeypatch):
+    # SINGLE config (no multi list) + a classifier that agrees -> use the config.
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    monkeypatch.setattr("agentcore.services.deps.session_scope",
+                        lambda: _T5Scope(_T5Sess([SimpleNamespace(name="Invoice", doc_type="Invoice")])))
+    comp = IDPLLMExtractor()
+    comp.config_name = "Invoice"; comp.config_names = []
+    comp._vertex = _T5Vertex({"classification": {"type": "invoice"}, "document_id": "d1"})
+    assert await comp._resolve_config_name_from_classification() == "Invoice"
+
+
+@pytest.mark.anyio
+async def test_extractor_single_config_classifier_nonmatch_returns_none(monkeypatch):
+    # SINGLE config "Invoice" but the classifier says "medical report" -> no match -> None (-> skip).
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    monkeypatch.setattr("agentcore.services.deps.session_scope",
+                        lambda: _T5Scope(_T5Sess([SimpleNamespace(name="Invoice", doc_type="Invoice")])))
+    comp = IDPLLMExtractor()
+    comp.config_name = "Invoice"; comp.config_names = []
+    comp._vertex = _T5Vertex({"classification": {"type": "medical report"}, "document_id": "d1"})
+    assert await comp._resolve_config_name_from_classification() is None
+
+
+@pytest.mark.anyio
 async def test_handle_unmatched_skip(monkeypatch):
     from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
     from agentcore.schema.data import Data
