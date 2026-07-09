@@ -32,6 +32,66 @@ class ClassificationResult(BaseModel):
     reasoning: str = Field(default="", description="A brief explanation of why this type was chosen.")
 
 
+class _StructuredClassification(BaseModel):
+    """LLM-facing schema for structured-output calls. Deliberately has no Dict field:
+    ``Dict[str, float]`` renders as JSON-schema ``additionalProperties``, which Gemini's
+    function-calling cannot express — it aborts the whole tool call with
+    finish_reason='malformed_function_call' and the classifier silently loses the result."""
+
+    predicted_type: str = Field(description="The matching document type from the provided list, or 'unknown'.")
+    confidence: float = Field(description="Confidence score between 0.0 and 1.0.")
+    reasoning: str = Field(default="", description="A brief explanation of why this type was chosen.")
+
+    def to_result(self) -> "ClassificationResult":
+        return ClassificationResult(
+            predicted_type=self.predicted_type,
+            confidence=self.confidence,
+            candidates={},
+            reasoning=self.reasoning,
+        )
+
+
+# The exact-keys contract both classifier prompts append. Models drift on key names in
+# free-form JSON (Gemini emits 'confidence_score') — pinning the keys prevents that.
+_JSON_KEYS_INSTRUCTION = (
+    'Respond with a JSON object using exactly these keys: "predicted_type" (string), '
+    '"confidence" (number between 0.0 and 1.0), "reasoning" (string), and "candidates" '
+    '(object mapping each candidate type to a number between 0.0 and 1.0).'
+)
+
+
+def _coerce_confidence(parsed: dict, predicted_type: str) -> float:
+    """Extract a confidence value from LLM JSON, tolerating key drift.
+
+    Tries 'confidence' first, then common synonyms, then the predicted type's score in
+    'candidates'. Returns 0.0 (with a warning) only when nothing usable is present —
+    a silent 0.0 here previously turned confident classifications into 'unknown'."""
+    for key in ("confidence", "confidence_score", "score"):
+        if key in parsed:
+            try:
+                return float(parsed[key])
+            except (TypeError, ValueError):
+                continue
+    candidates = parsed.get("candidates")
+    if isinstance(candidates, dict):
+        value = candidates.get(predicted_type)
+        if value is None:
+            wanted = str(predicted_type).strip().lower()
+            for name, score in candidates.items():
+                if str(name).strip().lower() == wanted:
+                    value = score
+                    break
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                pass
+    logger.warning(
+        f"[Classification] no usable confidence in LLM JSON (keys={list(parsed)[:8]}); defaulting to 0.0"
+    )
+    return 0.0
+
+
 async def classify_and_persist(
     session,
     document_id: UUID,
@@ -117,7 +177,7 @@ async def classify_and_persist(
         "Your task is to analyze the document text and classify it into one of the following standard types:\n\n"
         f"{types_desc}\n\n"
         "If the document text does not match any of these types, return 'unknown' as predicted_type.\n"
-        "Provide a confidence score (0.0 to 1.0) and include other top candidate types in the candidates dictionary."
+        f"{_JSON_KEYS_INSTRUCTION}"
     )
     user_prompt = f"Document Text:\n{merged_text[:4000]}"
 
@@ -133,7 +193,7 @@ async def classify_and_persist(
     if hasattr(llm_model, "with_structured_output"):
         try:
             try:
-                structured_model = llm_model.with_structured_output(ClassificationResult, include_raw=True)
+                structured_model = llm_model.with_structured_output(_StructuredClassification, include_raw=True)
                 res_dict = await asyncio.wait_for(structured_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
                 if isinstance(res_dict, dict):
                     result = res_dict.get("parsed")
@@ -142,9 +202,11 @@ async def classify_and_persist(
                     result = res_dict
                     raw_response = None
             except TypeError:
-                structured_model = llm_model.with_structured_output(ClassificationResult)
+                structured_model = llm_model.with_structured_output(_StructuredClassification)
                 result = await asyncio.wait_for(structured_model.ainvoke(messages), timeout=_LLM_TIMEOUT)
                 raw_response = None
+            if isinstance(result, _StructuredClassification):
+                result = result.to_result()
             usage_info = _extract_usage_from_response(raw_response, model_fallback=getattr(llm_model, "model_name", None))
         except Exception as e:
             logger.warning(f"[Classification] structured output failed: {e}. Falling back to standard JSON parsing.")
@@ -163,10 +225,12 @@ async def classify_and_persist(
                     lines = lines[:-1]
                 content = "\n".join(lines).strip()
             parsed = json.loads(content)
+            predicted = parsed.get("predicted_type", "unknown")
             result = ClassificationResult(
-                predicted_type=parsed.get("predicted_type", "unknown"),
-                confidence=float(parsed.get("confidence", 0.0)),
-                candidates=parsed.get("candidates", {})
+                predicted_type=predicted,
+                confidence=_coerce_confidence(parsed, predicted),
+                candidates=parsed.get("candidates", {}) or {},
+                reasoning=parsed.get("reasoning", ""),
             )
         except Exception as e:
             logger.error(f"[Classification] prediction parsing failed: {e}")
@@ -355,8 +419,7 @@ async def classify_via_llm(llm_model, doc_types: list[str], text: str, *, descri
         "Classify the document text into exactly one of the following types:\n\n"
         f"{types_block}\n\n"
         "If the document does not match any of these types, return 'unknown' as predicted_type.\n"
-        "Provide a confidence score (0.0 to 1.0), a brief reasoning, and include other top candidate "
-        "types in the candidates dictionary."
+        f"{_JSON_KEYS_INSTRUCTION}"
     )
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=f"Document Text:\n{text[:4000]}")]
 
@@ -364,12 +427,14 @@ async def classify_via_llm(llm_model, doc_types: list[str], text: str, *, descri
     if hasattr(llm_model, "with_structured_output"):
         try:
             try:
-                structured = llm_model.with_structured_output(ClassificationResult, include_raw=True)
+                structured = llm_model.with_structured_output(_StructuredClassification, include_raw=True)
                 res = await asyncio.wait_for(structured.ainvoke(messages), timeout=timeout)
                 result = res.get("parsed") if isinstance(res, dict) else res
             except TypeError:
-                structured = llm_model.with_structured_output(ClassificationResult)
+                structured = llm_model.with_structured_output(_StructuredClassification)
                 result = await asyncio.wait_for(structured.ainvoke(messages), timeout=timeout)
+            if isinstance(result, _StructuredClassification):
+                result = result.to_result()
         except Exception as exc:
             logger.warning(f"[classify_via_llm] structured output failed: {exc}. Falling back to JSON parse.")
 
@@ -385,10 +450,11 @@ async def classify_via_llm(llm_model, doc_types: list[str], text: str, *, descri
                     lines = lines[:-1]
                 content = "\n".join(lines).strip()
             parsed = json.loads(content)
+            predicted = parsed.get("predicted_type", "unknown")
             result = ClassificationResult(
-                predicted_type=parsed.get("predicted_type", "unknown"),
-                confidence=float(parsed.get("confidence", 0.0)),
-                candidates=parsed.get("candidates", {}),
+                predicted_type=predicted,
+                confidence=_coerce_confidence(parsed, predicted),
+                candidates=parsed.get("candidates", {}) or {},
                 reasoning=parsed.get("reasoning", ""),
             )
         except Exception as exc:
