@@ -104,11 +104,9 @@ class IDPProcessedDocsOutput(Node):
                 # re-process where the extractor now skips would clobber the human review record.
                 _finalized_statuses = ("skipped", "split", "failed", "reviewed", "auto_approved")
                 if doc is not None and doc.status not in _finalized_statuses:
+                    # NOTE: IdpDocument has NO error_message column (that field lives on
+                    # IdpProcessingJob). The skip reason is surfaced via the node status + flow log.
                     doc.status = "skipped"
-                    # Preserve the skip REASON for the UI (a stale-read of `doc` here can otherwise
-                    # clobber the error_message that the extractor's _mark_skipped committed).
-                    if local_skip_reason:
-                        doc.error_message = local_skip_reason
                     session.add(doc)
                     await session.commit()
                 self.status = "Document skipped/dropped upstream — ProcessedDocsOutput left it unchanged."

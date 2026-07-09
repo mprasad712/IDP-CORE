@@ -270,9 +270,9 @@ class IDPLLMExtractor(Node):
                 pass
 
     async def _mark_skipped(self, classified_type: str, reason: str | None = None) -> Data:
-        """Persist 'skipped' status + a human-readable REASON on the document, and return empty Data.
-
-        The reason is stored on ``doc.error_message`` so the Playground can show WHY it was skipped."""
+        """Persist 'skipped' status on the document and return empty Data. The human-readable REASON
+        is surfaced via the node status + flow log (IdpDocument has no error_message column — that
+        field is on IdpProcessingJob)."""
         src = self.document
         # Explain WHY, distinguishing the two skip causes so the user can fix the flow.
         config_names = list(self.config_names) if self.config_names else []
@@ -301,8 +301,9 @@ class IDPLLMExtractor(Node):
                 async with session_scope() as session:
                     doc = await session.get(IdpDocument, doc_id)
                     if doc:
+                        # IdpDocument has no error_message column (it's on IdpProcessingJob); the
+                        # reason is surfaced via node status + flow log, not persisted on the doc.
                         doc.status = "skipped"
-                        doc.error_message = reason
                         session.add(doc)
                         await session.commit()
         except Exception as exc:
@@ -350,7 +351,7 @@ class IDPLLMExtractor(Node):
                     if doc:
                         doc.deleted_at = datetime.now(timezone.utc)
                         doc.status = "skipped"   # valid CheckConstraint status; deleted_at hides it from review
-                        doc.error_message = f"Dropped — unmatched type '{classified_type}' (On unmatched type = drop)."
+                        # (IdpDocument has no error_message column — reason is in the flow log.)
                         session.add(doc)
                         await session.commit()
         except Exception as exc:  # noqa: BLE001

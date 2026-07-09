@@ -154,7 +154,7 @@ class IDPDocumentSplitter(Node):
                     # SAFETY NET (mirror the fixed pipeline): no child could be enqueued -> FAIL the parent,
                     # do NOT mark it 'split' (which would strand it with zero processing children).
                     doc.status = "failed"
-                    doc.error_message = "multi-doc split: no child document could be enqueued"
+                    # (IdpDocument has no error_message column — it's on IdpProcessingJob.)
                     doc.failed_at = datetime.now(timezone.utc)
                     session.add(doc)
                     await session.commit()

@@ -135,9 +135,10 @@ async def test_splitter_fails_parent_when_no_child_enqueues(monkeypatch):
     assert kind == "split"
     assert len(child_ids) == 2
 
-    # Parent must be failed, not "split" (the safety net)
+    # Parent must be failed, not "split" (the safety net).
+    # NOTE: IdpDocument has no error_message column (it's on IdpProcessingJob), so the splitter
+    # only sets status + failed_at on the doc; the reason lives in the flow log.
     assert parent.status == "failed"
-    assert parent.error_message is not None and "no child" in parent.error_message
     assert parent.failed_at is not None
 
 
