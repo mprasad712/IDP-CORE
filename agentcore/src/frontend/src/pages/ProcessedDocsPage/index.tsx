@@ -1379,7 +1379,12 @@ export default function ProcessedDocsPage() {
       ? docs.filter((d) => d.status === "split" && childParentIds.has(d.id))
       : [];
 
-    return [...splitParents, ...children];
+    // Order newest-first so split-group headers sit at THEIR OWN date instead of being pinned to the
+    // top of the tab. The DocTable re-groups children under their parent regardless of array position,
+    // so only the parents' + standalone docs' order matters here.
+    return [...splitParents, ...children].sort(
+      (a, b) => (b.dateProcessed || "").localeCompare(a.dateProcessed || ""),
+    );
   };
 
   const counts = useMemo(() => ({
