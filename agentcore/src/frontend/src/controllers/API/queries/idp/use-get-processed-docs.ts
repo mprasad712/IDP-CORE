@@ -17,6 +17,10 @@ export interface ProcessedDoc {
   page_count: number | null;
   checksum: string | null;
   source: string;
+  /** Which agent version processed it. null/'dev' = the draft canvas (Playground, connectors, or a
+   *  document from before run_env existed); 'uat'/'prod' + 'v5' = the published deployment snapshot. */
+  run_env?: string | null;
+  run_version?: string | null;
   predicted_type: string | null;
   status: string;
   overall_confidence: number | null;

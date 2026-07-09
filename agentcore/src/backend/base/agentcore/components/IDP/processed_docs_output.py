@@ -121,7 +121,11 @@ class IDPProcessedDocsOutput(Node):
                 job_id=job_id,
                 extraction_result=extracted if isinstance(extracted, dict) else {},
                 ocr_tokens=payload.get("tokens") or [],
-                vision_mode=bool(payload.get("route") == "vision"),
+                # A graph can reach several sinks (both Confidence Router branches are usually wired to
+                # one) and they run CONCURRENTLY, each in its own session. Never downgrade: the loser is on
+                # the branch the document did not take, carries no OCR tokens, and would replace the
+                # grounding-checked rows with unchecked ones — or crash on the unique constraint.
+                skip_if_already_saved=True,
             )
             # Honor the Approval Gate / router decision recorded in the working-set. The Approval Gate
             # writes decision="auto_approved" / "pending_review" into the payload; without a gate in the

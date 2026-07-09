@@ -61,20 +61,39 @@ def test_resolve_field_aliases():
 
 
 def test_overall_confidence_is_mean_of_field_confidences():
-    assert abs(overall_confidence(_doc_msg()) - 0.8) < 1e-6   # mean(0.9, 0.7)
+    """The router's score is the SAME number `save_extraction_results` stores and the UI displays.
+
+    It is the plain mean of the MODEL's per-field confidences: mean(0.9, 0.7) = 0.8. Two earlier versions
+    of this assertion sit behind that number. Originally the router averaged the model's numbers while the
+    DB stored an OCR-substring score, so a document shown as 83% routed as 0.75. Pointing both at one
+    function fixed the divergence — but that function was the OCR one, which damped this no-token fixture
+    to mean(0.828, 0.644) = 0.736 and made the score depend on the file format. Nothing damps it now.
+    """
+    from agentcore.services.idp.extraction import compute_overall_confidence
+
+    extracted = get_payload(_doc_msg())["extracted"]
+    expected = compute_overall_confidence(extracted)
+    assert abs(overall_confidence(_doc_msg()) - expected) < 1e-9
+    assert abs(expected - 0.8) < 1e-6   # mean(0.9, 0.7) — the model's own numbers, untouched
 
 
 # ── routers ────────────────────────────────────────────────────────────────────
 def test_confidence_router_scores_from_payload_not_attribute():
     from agentcore.components.IDP.confidence_router import IDPConfidenceRouter
 
+    from agentcore.services.idp.extraction import compute_overall_confidence
+
     r = _bind(IDPConfidenceRouter(), {})
     r.data = _doc_msg(); r.confidence_field = "confidence"; r.threshold = 0.8
-    assert abs(r._get_score() - 0.8) < 1e-6   # was always 0.0 before the fix
+    # The score comes from the payload (it was always 0.0 before the fix), and equals the stored number.
+    assert abs(r._get_score() - compute_overall_confidence(get_payload(_doc_msg())["extracted"])) < 1e-9
+    assert r._get_score() > 0.5
 
-    low = new_message(document_id="d", extracted={"headers": {"a": {"value": "x", "confidence": 0.2}}})
+    low_extracted = {"headers": {"a": {"value": "x", "confidence": 0.2}}}
+    low = new_message(document_id="d", extracted=low_extracted)
     r2 = _bind(IDPConfidenceRouter(), {}); r2.data = low; r2.confidence_field = "confidence"; r2.threshold = 0.8
-    assert abs(r2._get_score() - 0.2) < 1e-6
+    assert abs(r2._get_score() - compute_overall_confidence(low_extracted)) < 1e-9
+    assert r2._get_score() < r._get_score()
 
 
 def test_multi_branch_router_resolves_document_type():
@@ -261,12 +280,22 @@ def test_opencv_orientation_distinguishes_90_from_270():
 
 
 def test_digital_confidence_can_reach_autoapprove():
-    """Codex #9: a high-confidence digital extraction (no OCR tokens) must be able to clear an
-    auto-approve threshold — the old 0.75 cap made auto-approve unreachable for digital docs."""
-    from agentcore.services.idp.extraction import _ocr_evidence
+    """Codex #9: a high-confidence digital extraction must be able to clear an auto-approve threshold.
 
-    _loc, conf = _ocr_evidence("600.00", [], 0.97, vision_mode=False)
-    assert conf >= 0.8, f"digital confidence still capped too low for auto-approve: {conf}"
+    Historically the no-token path capped the score at 0.75, then 0.92 (`llm_conf x 0.92`), so a digital
+    PDF could never score what the model actually said. There is no cap now — nothing rescales the model's
+    number — and a document scores the same whether or not a token stream exists to check it against.
+    """
+    from agentcore.services.idp.extraction import compute_overall_confidence
+
+    extracted = {"headers": {"total": {"value": "600.00", "confidence": 0.97}}, "line_items": []}
+    assert abs(compute_overall_confidence(extracted) - 0.97) < 1e-9
+
+    # Same extraction, with and without a token stream in the payload -> identical score.
+    with_tokens = new_message(text="", document_id="d", extracted=extracted,
+                              tokens=[{"text": "600.00", "bounding_box": None, "confidence": 1.0, "page_number": 1}])
+    without = new_message(text="", document_id="d", extracted=extracted)
+    assert abs(overall_confidence(with_tokens) - overall_confidence(without)) < 1e-9
 
 
 def test_chunking_passes_through_when_no_text():
@@ -406,8 +435,15 @@ def test_overall_confidence_ignores_null_fields():
             {"column_name": "cgst_value", "value": None, "confidence": 0.0},
         ]}],
     }
+    from agentcore.services.idp.extraction import compute_overall_confidence
+
     conf = overall_confidence(new_message(text="", document_id="d", extracted=extracted))
-    assert conf is not None and conf >= 0.7, f"null fields dragged confidence down to {conf}"
+    assert conf is not None
+    assert abs(conf - compute_overall_confidence(extracted)) < 1e-9   # router == stored == displayed
+
+    # 3 populated fields at 0.75 each. Counting the 3 nulls as 0.0 would halve it.
+    nulls_counted = compute_overall_confidence(extracted) / 2
+    assert conf > nulls_counted + 0.2, f"null fields dragged confidence down to {conf}"
 
 
 def test_prepare_drops_orphan_terminal_sink():

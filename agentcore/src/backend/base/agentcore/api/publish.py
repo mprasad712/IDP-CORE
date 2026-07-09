@@ -316,6 +316,103 @@ async def _validate_idp_publish(snapshot: dict, session, env: str) -> None:
         )
 
 
+async def _freeze_field_configs(snapshot: dict, session, org_id) -> dict:
+    """Resolve every Field Configuration the extractor references and serialize its field definitions.
+
+    ``idp_field_configurations`` has no version column — it is mutated in place, and the graph snapshot
+    only stores the config's NAME. Without this, editing "Invoice" changed what an ALREADY-PUBLISHED
+    UAT/PROD agent extracted, and deleting it silently fell through to a global catalogue config of the
+    same name. Freezing the definitions makes a published version extract the same fields forever.
+
+    Returns ``{config_name: {"id", "headers", "line_items"}}``. A name that cannot be resolved is skipped
+    (that config then falls back to the live lookup at run time) rather than blocking an otherwise valid
+    publish — ``_validate_idp_publish`` already guarantees at least one config is selected.
+    """
+    from agentcore.services.idp.agent_config import (
+        _N_EXTRACTOR,
+        _field,
+        _find_node,
+        _lookup_config_id_by_name,
+    )
+    from agentcore.services.idp.field_defs import dump_field_definitions
+
+    extractor = _find_node(snapshot, _N_EXTRACTOR)
+    if extractor is None:
+        return {}
+
+    # The single selected config, plus the multi-type routing list the classifier picks from.
+    names: list[str] = []
+    single = _field(extractor, "config_name")
+    if single and str(single).strip():
+        names.append(str(single).strip())
+    multi = _field(extractor, "config_names")
+    if isinstance(multi, (list, tuple)):
+        names.extend(str(n).strip() for n in multi if n and str(n).strip())
+
+    frozen: dict[str, dict] = {}
+    for name in names:
+        if name in frozen:
+            continue
+        try:
+            config_id = await _lookup_config_id_by_name(session, org_id, name)
+            if config_id is None:
+                logger.warning(f"[publish] field configuration {name!r} did not resolve — not frozen")
+                continue
+            frozen[name] = await dump_field_definitions(session, config_id)
+        except Exception as e:  # noqa: BLE001 - a config we cannot read must not block the publish
+            logger.warning(f"[publish] could not freeze field configuration {name!r} (non-fatal): {e}")
+    return frozen
+
+
+async def _freeze_idp_agent_config(snapshot: dict, session, agent_id, org_id=None) -> None:
+    """Pin the ``IdpAgent`` settings into the snapshot under ``_idp_agent_config`` (mutates in place).
+
+    Freezing the graph is not sufficient. ``resolve_pipeline_config`` reads most settings off the canvas
+    nodes (already frozen with the graph), but falls back to the live ``IdpAgent`` row for the rest:
+    ``extraction_mode``, ``dynamic_prompt``, ``field_config_id``, ``default_rule_action``, and every
+    ``extra`` key (``execution_engine``, ``ocr_language``, ``long_doc_*``, ``dedup_strategy``,
+    ``confidence_threshold``, ``has_processed_docs_output``). That row is re-synced from the DRAFT graph on
+    every agent save, so without this a published run would execute a frozen graph with *today's* draft
+    settings. Read back by ``services/idp/snapshot.pinned_idp_config``.
+
+    Safe: at publish time the row was just synced from this same graph by ``sync_idp_agent_from_graph``.
+
+    NO-OP for non-IDP agents, and a no-op when the key already exists — a PROD promotion reuses the UAT
+    snapshot, and promotion must ship bit-for-bit what UAT tested, not whatever the draft says now. (A UAT
+    snapshot published before this key existed falls through and gets pinned from the live row: still
+    strictly better than resolving it at run time.) Best-effort — never break an otherwise valid publish.
+    """
+    from agentcore.services.idp.agent_config import agent_contains_idp_nodes
+    from agentcore.services.idp.field_defs import FIELD_CONFIGS_KEY
+    from agentcore.services.idp.snapshot import IDP_CONFIG_KEY
+
+    if not agent_contains_idp_nodes(snapshot) or IDP_CONFIG_KEY in snapshot:
+        return
+    try:
+        from agentcore.services.database.models.idp.config import IdpAgent
+
+        pinned: dict = {}
+        row = (await session.exec(select(IdpAgent).where(IdpAgent.agent_id == agent_id))).first()
+        if row is not None:
+            pinned.update({
+                "extra": dict(row.extra or {}),
+                "extraction_mode": row.extraction_mode,
+                "dynamic_prompt": row.dynamic_prompt,
+                "field_config_id": str(row.field_config_id) if row.field_config_id else None,
+                "default_rule_action": row.default_rule_action,
+            })
+
+        # The field DEFINITIONS themselves — the graph only names them, and they are mutable in place.
+        field_configs = await _freeze_field_configs(snapshot, session, org_id)
+        if field_configs:
+            pinned[FIELD_CONFIGS_KEY] = field_configs
+
+        if pinned:
+            snapshot[IDP_CONFIG_KEY] = pinned
+    except Exception as e:  # noqa: BLE001 - a pinning failure must not block publishing
+        logger.warning(f"[publish] could not freeze IDP config for agent {agent_id} (non-fatal): {e}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Request / Response Schemas
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2489,6 +2586,10 @@ async def publish_agent(
             snapshot["_input_type"] = "file_processing"
         else:
             snapshot["_input_type"] = "autonomous"
+
+        # ── Freeze the IDP settings + field definitions alongside the graph (no-op for non-IDP) ──
+        # Runs on the FINALIZED snapshot (post-promotion), so a PROD promotion keeps UAT's pinned config.
+        await _freeze_idp_agent_config(snapshot, session, agent_id, org_id=agent.org_id)
 
         # Capture org_id before any commits to avoid session expiry issues
         agent_org_id = agent.org_id

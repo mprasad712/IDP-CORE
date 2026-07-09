@@ -349,6 +349,11 @@ async def materialize_children(
             status="queued",
             uploaded_by=parent_doc.uploaded_by,
             extra=child_extra,
+            # A child is re-enqueued through the full pipeline, so it must run against the SAME agent
+            # version as its parent. These are real columns (not part of `extra`), so they must be copied
+            # explicitly — otherwise a split of a PROD v2 document would silently run the draft canvas.
+            run_env=parent_doc.run_env,
+            run_version=parent_doc.run_version,
         )
         session.add(child_doc)
         child_ids.append(child_id)

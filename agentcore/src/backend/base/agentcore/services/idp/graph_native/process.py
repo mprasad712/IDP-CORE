@@ -98,7 +98,9 @@ async def run_native_for_document(session, doc, job, base_agent, flow, trace_ctx
                             job_id=job.id,
                             extraction_result=extracted,
                             ocr_tokens=rpayload.get("tokens") or [],
-                            vision_mode=bool(rpayload.get("route") == "vision"),
+                            # This is a RESCUE, not the authority: if a sink already persisted the run,
+                            # leave its (grounding-checked) rows alone and just force the terminal status.
+                            skip_if_already_saved=True,
                         )
                         saved_n = len(extracted.get("headers", {}) or {})
                     except Exception as e:  # saving is best-effort — still force a terminal status below
@@ -123,7 +125,12 @@ async def run_native_for_document(session, doc, job, base_agent, flow, trace_ctx
     job.processing_time_ms = ms
     job.steps_completed = flow.steps_ok
     job.log = flow.events
-    _scope, _did = str(doc.agent_id), str(doc.id)  # capture before commit (avoid expired-attr reload)
+    # The document's own storage directory (from file_path), not a reconstruction from doc.agent_id —
+    # documents written before the directory rename must keep resolving. Captured before commit to avoid
+    # an expired-attribute reload.
+    from agentcore.services.idp.storage_scope import scope_of
+
+    _scope, _did = scope_of(doc.file_path), str(doc.id)
     session.add(job)
     await session.commit()
     # Persist the human-readable rich flow.log artifact (per-step + per-node io) so /log/download

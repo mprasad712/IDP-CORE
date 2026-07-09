@@ -59,6 +59,15 @@ from agentcore.services.idp.pre_processing import (
 from agentcore.services.idp.restruct import build_merged_text
 from agentcore.services.idp.rules_engine import _to_number, evaluate_rules
 from agentcore.services.idp.idp_tracing import create_idp_trace, end_idp_trace, start_span, end_span
+from agentcore.services.idp.field_defs import install_for_graph
+from agentcore.services.idp.snapshot import (
+    SnapshotError,
+    graph_agent_view,
+    graph_fingerprint,
+    normalize_env,
+    pin_idp_agent,
+    resolve_agent_graph_with_source,
+)
 
 
 def _idp_engine_value(idp_agent) -> str:
@@ -241,30 +250,13 @@ async def _named_config_vision_messages(session, field_config_id):
 
     Uses the confidence-requesting vision prompt variant so per-field confidence is the model's
     genuine score (the vision path has no OCR token stream to re-score against)."""
-    from agentcore.services.database.models.idp.config import (
-        IdpFieldConfiguration,
-        IdpFieldConfigHeader,
-        IdpFieldConfigLineItem,
-    )
+    from agentcore.services.idp.field_defs import FieldConfigMissing, load_field_definitions
     from agentcore.services.idp.prompt_templates import build_compact_extraction_messages_vision
 
-    config = await session.get(IdpFieldConfiguration, field_config_id)
-    if not config or getattr(config, "deleted_at", None) is not None:
-        raise PipelineError(f"named-config vision: field configuration '{field_config_id}' not found or inactive")
-    headers = (
-        await session.exec(
-            select(IdpFieldConfigHeader)
-            .where(IdpFieldConfigHeader.config_id == field_config_id)
-            .order_by(IdpFieldConfigHeader.display_order)
-        )
-    ).all()
-    line_items = (
-        await session.exec(
-            select(IdpFieldConfigLineItem)
-            .where(IdpFieldConfigLineItem.config_id == field_config_id)
-            .order_by(IdpFieldConfigLineItem.display_order)
-        )
-    ).all()
+    try:
+        headers, line_items = await load_field_definitions(session, field_config_id)
+    except FieldConfigMissing as exc:
+        raise PipelineError(f"named-config vision: {exc}") from exc
     return build_compact_extraction_messages_vision(headers, line_items)
 
 
@@ -429,7 +421,11 @@ async def _route(session, document_id: UUID, job_id: UUID, idp_agent_id: UUID, o
                     action=cfg.approve_value,
                 )
             )
-    else:
+    elif getattr(cfg, "environment", "dev") == "dev":
+        # `idp_agent_rules` is re-synced from the DRAFT canvas on every agent save (_sync_canvas_rules),
+        # so it is only a valid source for a draft run. On a published run the snapshot is authoritative:
+        # no Rules node in the frozen graph means no rules — reading the table here would apply whatever
+        # rules the developer has on the canvas right now.
         rules = (
             await session.exec(
                 select(IdpAgentRule)
@@ -890,9 +886,11 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
 
     flow = FlowLog(document_id, doc.original_filename)
     storage = get_storage_service()
-    # Scope artifacts/reads by the document's real agent_id, not by parsing file_path.
-    agent_scope = str(doc.agent_id)
-    _, file_name = _split_storage_path(doc.file_path)
+    # Scope reads AND sibling artifacts (corrected scans, OCR dumps, flow logs) by the directory the
+    # document was actually written into — never by reconstructing it. `file_path` is the only record of
+    # that, and it is what lets documents stored under the old `idp_agents.id` scheme keep resolving after
+    # the directory naming changed. See services/idp/storage_scope.py.
+    agent_scope, file_name = _split_storage_path(doc.file_path)
 
     # ensure a job row (created by the endpoint normally; create one for direct calls)
     job = await session.get(IdpProcessingJob, job_id) if job_id else None
@@ -977,7 +975,85 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         if idp_agent is None:
             raise PipelineError(f"IDP agent {doc.agent_id} not found")
         base_agent = await session.get(Agent, idp_agent.agent_id)
-        cfg = await resolve_pipeline_config(session, idp_agent, base_agent)
+        if base_agent is None:
+            raise PipelineError(f"Agent {idp_agent.agent_id} not found")
+
+        # WHICH graph runs: the PUBLISHED snapshot for this document's (run_env, run_version), or the
+        # draft canvas when unset (Playground / connectors / pre-existing rows). Chat agents resolve a
+        # published version the same way — see services/idp/snapshot.py for the parity contract.
+        #
+        # HARD RULE: never assign onto `base_agent.data`. `base_agent` is a session-attached ORM row and
+        # `_run` commits several times below, so reassigning would persist the published snapshot OVER
+        # the developer's draft canvas. Every consumer reads the graph via getattr(), so pass a shim.
+        run_env = normalize_env(doc.run_env)
+        run_version = doc.run_version
+        try:
+            graph, graph_source = await resolve_agent_graph_with_source(
+                session, base_agent.id, run_env, run_version
+            )
+        except SnapshotError as exc:
+            # Never fall back to the draft — a missing published version must fail loudly.
+            raise PipelineError(str(exc)) from exc
+
+        # PROVE which row of which table this graph came from. "running UAT v5" on its own proves nothing
+        # — it is just `doc.run_env` echoed back. `graph_source` is built from the ORM row that was
+        # actually fetched (its table name + primary key), and the fingerprints compare the graph being
+        # EXECUTED against the draft canvas as it stands right now.
+        draft_fingerprint = graph_fingerprint(getattr(base_agent, "data", None))
+        _same_as_draft = draft_fingerprint == graph_source.fingerprint
+        logger.info(f"[pipeline] {document_id}: graph source -> {graph_source.describe()}")
+        logger.info(
+            f"[pipeline] {document_id}: executing sha={graph_source.fingerprint} | "
+            f"draft agent.data sha={draft_fingerprint} -> "
+            + (
+                "IDENTICAL (draft happens to match this version; the source is still the deployment row above)"
+                if _same_as_draft
+                else "DIFFERENT (the draft canvas is NOT what is executing)"
+            )
+        )
+
+        graph_agent = graph_agent_view(base_agent, graph)
+        # IdpAgent settings are draft-synced; pin them from the snapshot on a published run.
+        idp_view = pin_idp_agent(idp_agent, graph)
+
+        # Field Configurations are mutable in place, and the graph only stores their NAME. Install this
+        # run's frozen definitions (empty for a draft graph) BEFORE anything resolves a config or loads
+        # its fields — both engines, and the isolated classify session, read it from the task context.
+        # Called unconditionally, so a previous run's set can never leak into this one.
+        install_for_graph(graph)
+
+        cfg = await resolve_pipeline_config(session, idp_view, graph_agent)
+        cfg.environment = run_env
+
+        # Always recorded — for a draft run too, so the log never leaves the question open.
+        _src_io = {
+            "requested": {"env": run_env, "version": run_version or "(latest active)"},
+            "read_from": {
+                "table": graph_source.table,
+                "deployment_id": str(graph_source.deployment_id) if graph_source.deployment_id else None,
+                "version_number": graph_source.version_number,
+                "is_active": graph_source.is_active,
+            },
+            "executing_graph": {"sha256_12": graph_source.fingerprint, "nodes": graph_source.node_count},
+            "draft_canvas": {"sha256_12": draft_fingerprint, "matches_executing_graph": _same_as_draft},
+        }
+        if graph_source.deployment_id is not None:
+            flow.step(
+                "version", "ok",
+                f"running PUBLISHED {run_env.upper()} v{graph_source.version_number} — graph read from "
+                f"{graph_source.table} row {graph_source.deployment_id} "
+                f"(sha={graph_source.fingerprint}, {graph_source.node_count} nodes); "
+                f"draft canvas sha={draft_fingerprint} "
+                + ("(identical content)" if _same_as_draft else "(DIFFERENT — draft not executed)"),
+                io={"output": _src_io},
+            )
+        else:
+            flow.step(
+                "version", "ok",
+                f"running the DRAFT canvas — graph read from agent.data "
+                f"(sha={graph_source.fingerprint}, {graph_source.node_count} nodes)",
+                io={"output": _src_io},
+            )
 
         if not cfg.model_id:
             raise PipelineError("no model configured in agent graph")
@@ -1056,17 +1132,18 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
 
         # Record which execution engine runs this document (IDP_EXECUTION_ENGINE / per-agent), so the
         # flow log clearly shows graph vs fixed.
-        _engine = _idp_engine_label(idp_agent)
+        _engine = _idp_engine_label(idp_view)
         flow.step("engine", "ok", f"IDP execution engine: {_engine}")
         logger.info(f"[pipeline] {document_id}: IDP execution engine = {_engine}")
 
-        if _idp_engine_is_native(idp_agent):
+        if _idp_engine_is_native(idp_view):
             # NATIVE engine: run the wired canvas nodes through the SAME generic graph_langgraph
             # engine simple agents use (hydrate each node with its components/IDP source, build the
             # LangGraphAdapter, stream per-vertex events under job.id for native canvas highlighting).
             # LAZY import to avoid any import cycle.
             from agentcore.services.idp.graph_native.process import run_native_for_document
-            await run_native_for_document(session, doc, job, base_agent, flow, trace_ctx)
+            # graph_agent (NOT base_agent) — its .data is the resolved snapshot for this run.
+            await run_native_for_document(session, doc, job, graph_agent, flow, trace_ctx)
             return
 
         # 2. detect digital/scanned (per page)
@@ -1267,7 +1344,7 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
         # Returns True when doc_types filter is active and document type is not in selected list.
         if trace_ctx:
             start_span(trace_ctx, "classification", inputs={"classify_enabled": cfg.classify_enabled})
-        classify_skip = await _hook_classify(session, document_id, base_agent, merged_text, cfg, flow)
+        classify_skip = await _hook_classify(session, document_id, graph_agent, merged_text, cfg, flow)
         
         classify_usage = None
         classify_model = None
@@ -1510,8 +1587,7 @@ async def _run(session, document_id: UUID, job_id: UUID | None) -> None:
             document_id=document_id,
             job_id=job.id,
             extraction_result=extracted if isinstance(extracted, dict) else {},
-            ocr_tokens=tokens,
-            vision_mode=vision_used,
+            ocr_tokens=tokens,   # grounding only — `vision_used` no longer affects the score
         )
         if trace_ctx:
             end_span(trace_ctx, "save_results", outputs={"overall_confidence": overall_conf})
@@ -1666,7 +1742,8 @@ async def _fail(session, doc, job, flow: FlowLog, message: str, *, touch_doc: bo
     try:
         if doc is not None:
             await get_storage_service().save_file(
-                agent_id=str(doc.agent_id),
+                # The document's own directory, not a reconstruction — see storage_scope.scope_of.
+                agent_id=_split_storage_path(doc.file_path)[0],
                 file_name=f"flow_logs/{doc.id}/flow.log",
                 data=flow.render().encode("utf-8"),
             )

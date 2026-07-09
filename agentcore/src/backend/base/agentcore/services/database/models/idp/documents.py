@@ -52,7 +52,8 @@ class IdpDocument(SQLModel, table=True):  # type: ignore[call-arg]
     file_size_bytes: int = Field(sa_column=Column(BigInteger, nullable=False))
     page_count: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     checksum: str | None = Field(default=None, sa_column=Column(String(128), nullable=True))
-    source: str = Field(sa_column=Column(String(30), nullable=False))  # upload|mail_connector|sharepoint|other
+    # upload|mail_connector|sharepoint|onedrive|api|other  ('api' = POST /api/run with an attachment)
+    source: str = Field(sa_column=Column(String(30), nullable=False))
     connector_id: UUID | None = Field(
         default=None,
         sa_column=Column(Uuid, ForeignKey("connector_catalogue.id", ondelete="SET NULL"), nullable=True, index=True),
@@ -61,6 +62,12 @@ class IdpDocument(SQLModel, table=True):  # type: ignore[call-arg]
     predicted_type: str | None = Field(default=None, sa_column=Column(String(100), nullable=True))
     # Multi-Branch Router node label (route_1..route_5 / "unmatched"); NULL when no router node runs.
     route_label: str | None = Field(default=None, sa_column=Column(String, nullable=True))
+    # WHICH agent version this document runs against. NULL / 'dev' -> the draft `agent.data` (Playground
+    # and legacy behavior). 'uat' / 'prod' -> resolve agent_deployment_{uat,prod}.agent_snapshot for
+    # `run_version` (e.g. 'v2'), so a published run is reproducible and immune to later canvas edits.
+    # Set at upload; explicitly copied onto split children (see services/idp/splitting.py).
+    run_env: str | None = Field(default=None, sa_column=Column(String(10), nullable=True))
+    run_version: str | None = Field(default=None, sa_column=Column(String(20), nullable=True))
     status: str = Field(
         default="queued",
         sa_column=Column(String(30), nullable=False, default="queued", index=True),
@@ -78,7 +85,7 @@ class IdpDocument(SQLModel, table=True):  # type: ignore[call-arg]
     deleted_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
 
     __table_args__ = (
-        CheckConstraint("source IN ('upload','mail_connector','sharepoint','onedrive','other')", name="ck_idp_documents_source"),
+        CheckConstraint("source IN ('upload','mail_connector','sharepoint','onedrive','api','other')", name="ck_idp_documents_source"),
         CheckConstraint(
             "status IN ('queued','processing','extracted','pending_review','auto_approved','reviewed','failed','split','skipped')",
             name="ck_idp_documents_status",
@@ -152,9 +159,14 @@ class IdpExtractedHeader(SQLModel, table=True):  # type: ignore[call-arg]
     )
     field_name: str = Field(sa_column=Column(String(100), nullable=False))
     extracted_value: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    #: The MODEL's own confidence. NULL when it reported none — unknown, not zero, and never a constant.
     confidence_score: float | None = Field(default=None, sa_column=Column(Numeric(5, 4), nullable=True))
     reasoning_trace: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     source_location: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    #: Was this value actually found in the document? Tri-state and INDEPENDENT of confidence_score:
+    #: True = found, False = not in the token stream (hallucination shape), NULL = no token stream to check
+    #: against (vision path) or a row written before grounding existed. NULL is unknown, not a failure.
+    grounded: bool | None = Field(default=None, sa_column=Column(Boolean, nullable=True))
     reviewed_value: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     is_reviewed: bool = Field(default=False, sa_column=Column(Boolean, nullable=False, default=False))
     extra: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
@@ -182,9 +194,12 @@ class IdpExtractedLineItem(SQLModel, table=True):  # type: ignore[call-arg]
     row_index: int = Field(sa_column=Column(Integer, nullable=False))
     column_name: str = Field(sa_column=Column(String(100), nullable=False))
     extracted_value: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    #: The MODEL's own confidence. NULL when it reported none — see IdpExtractedHeader.confidence_score.
     confidence_score: float | None = Field(default=None, sa_column=Column(Numeric(5, 4), nullable=True))
     reasoning_trace: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     source_location: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    #: Was this value found in the document? Tri-state — see IdpExtractedHeader.grounded.
+    grounded: bool | None = Field(default=None, sa_column=Column(Boolean, nullable=True))
     reviewed_value: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     is_reviewed: bool = Field(default=False, sa_column=Column(Boolean, nullable=False, default=False))
     extra: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))

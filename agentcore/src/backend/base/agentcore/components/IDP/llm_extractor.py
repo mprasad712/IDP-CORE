@@ -147,7 +147,25 @@ class IDPLLMExtractor(Node):
                 return None
             return config_names[0] if len(config_names) == 1 else None
 
+        # A config's `doc_type` is optional — an auto-cloned config never had one copied over, and a
+        # hand-made config often leaves it blank. Fall back to the config NAME, which is what the fixed
+        # pipeline already routes on (`_build_config_name_map` keys the map by name). Matching on
+        # doc_type ALONE meant a doc_type-less config could never be selected, and the extractor bailed
+        # out with `extracted={}` — a silent zero-field run.
+        def _routes_to(doc_type: str | None, name: str) -> bool:
+            return ((doc_type or name) or "").strip().lower() == classified_type
+
         try:
+            from agentcore.services.idp.field_defs import frozen_doc_type, has_frozen_defs
+
+            # A published run routes on the doc_types frozen at publish, so editing a config's doc_type
+            # (or deleting the config) cannot silently re-route an already-published agent.
+            if has_frozen_defs():
+                for name in config_names:
+                    if _routes_to(frozen_doc_type(name), name):
+                        return name
+                return None
+
             from agentcore.services.deps import session_scope
             from agentcore.services.database.models.idp.config import IdpFieldConfiguration
             from sqlmodel import select
@@ -164,11 +182,7 @@ class IDPLLMExtractor(Node):
                         )
                         .limit(1)
                     )).first()
-                    if config is None:
-                        continue
-                    cfg_name = (config.name or "").strip().lower()
-                    cfg_dtype = (config.doc_type or "").strip().lower()
-                    if cfg_name == classified_type or cfg_dtype == classified_type:
+                    if config and _routes_to(config.doc_type, config.name):
                         return config.name
         except Exception as exc:
             logger.warning(f"[AIFieldExtractor] multi-config lookup failed: {exc}")
@@ -423,20 +437,12 @@ class IDPLLMExtractor(Node):
                 else:
                     from agentcore.services.deps import session_scope
                     from agentcore.services.idp.extraction import extract_named_config
-                    from agentcore.services.database.models.idp.config import IdpFieldConfiguration
-                    from sqlmodel import select
+                    from agentcore.services.idp.field_defs import resolve_config_id
 
                     async with session_scope() as session:
-                        config = (await session.exec(
-                            select(IdpFieldConfiguration)
-                            .where(
-                                IdpFieldConfiguration.name == effective_config_name,
-                                IdpFieldConfiguration.deleted_at.is_(None)
-                            )
-                        )).first()
-
-                        if not config:
-                            raise ValueError(f"Active field configuration '{effective_config_name}' not found.")
+                        # Prefers the id this run's published snapshot froze for the name; a draft run
+                        # resolves it live, as before.
+                        config_id = await resolve_config_id(session, effective_config_name)
 
                         # Honor Input Mode: text path when there's a text layer (or explicit text mode),
                         # else read the page images with the vision model (image/scanned docs) — otherwise
@@ -445,11 +451,11 @@ class IDPLLMExtractor(Node):
                             extracted = await extract_named_config(
                                 session=session,
                                 ocr_text=text,
-                                field_config_id=config.id,
+                                field_config_id=config_id,
                                 llm_model=self.llm,
                             )
                         else:
-                            extracted = await self._extract_via_vision(src, config.id, session)
+                            extracted = await self._extract_via_vision(src, config_id, session)
                         raw = json.dumps(extracted, indent=2)
 
             elif self.extraction_mode == "multimodal_config":
@@ -462,21 +468,12 @@ class IDPLLMExtractor(Node):
                     extracted = {"error": "No model connected"}
                 else:
                     from agentcore.services.deps import session_scope
-                    from agentcore.services.database.models.idp.config import IdpFieldConfiguration
-                    from sqlmodel import select
+                    from agentcore.services.idp.field_defs import resolve_config_id
 
                     async with session_scope() as session:
-                        config = (await session.exec(
-                            select(IdpFieldConfiguration)
-                            .where(
-                                IdpFieldConfiguration.name == effective_config_name,
-                                IdpFieldConfiguration.deleted_at.is_(None),
-                            )
-                        )).first()
-                        if not config:
-                            raise ValueError(f"Active field configuration '{effective_config_name}' not found.")
+                        config_id = await resolve_config_id(session, effective_config_name)
                         # Storage-based vision (native docs live in storage, not on a local path).
-                        extracted = await self._extract_via_vision(src, config.id, session)
+                        extracted = await self._extract_via_vision(src, config_id, session)
                         raw = json.dumps(extracted, indent=2)
 
             headers_count = len(extracted.get("headers", {})) if isinstance(extracted, dict) else 0
@@ -547,23 +544,15 @@ class IDPLLMExtractor(Node):
             return carry(rep, text="", extracted={"error": "No model connected"})
 
         from agentcore.services.deps import session_scope
-        from agentcore.services.database.models.idp.config import IdpFieldConfiguration
         from agentcore.services.idp import long_doc
         from agentcore.services.idp.extraction import extract_named_config
-        from sqlmodel import select
+        from agentcore.services.idp.field_defs import resolve_config_id
 
         results: list[dict] = []
         via_vision = False
         try:
             async with session_scope() as session:
-                config = (await session.exec(
-                    select(IdpFieldConfiguration).where(
-                        IdpFieldConfiguration.name == effective,
-                        IdpFieldConfiguration.deleted_at.is_(None),
-                    )
-                )).first()
-                if not config:
-                    raise ValueError(f"Active field configuration '{effective}' not found.")
+                config_id = await resolve_config_id(session, effective)
 
                 # If NO chunk carries text (a scanned / image document with no OCR text — no OCR node, or
                 # PaddleOCR unavailable), read the page IMAGES with the vision model instead of extracting
@@ -571,7 +560,7 @@ class IDPLLMExtractor(Node):
                 via_vision = not any(((ch.text if isinstance(ch, Message) else str(ch)) or "").strip() for ch in chunks)
                 if via_vision:
                     self.status = "No text in chunks — extracting via vision"
-                    ex = await self._extract_via_vision(rep, config.id, session)
+                    ex = await self._extract_via_vision(rep, config_id, session)
                     logger.info(f"[AIFieldExtractor] vision raw extraction: {json.dumps(ex, default=str)[:200]}")
                     if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
                         results.append(ex)
@@ -582,7 +571,7 @@ class IDPLLMExtractor(Node):
                             continue
                         try:
                             ex = await extract_named_config(
-                                session=session, ocr_text=ctext, field_config_id=config.id, llm_model=self.llm)
+                                session=session, ocr_text=ctext, field_config_id=config_id, llm_model=self.llm)
                             logger.info(f"[AIFieldExtractor] chunk raw extraction: {json.dumps(ex, default=str)[:200]}")
                             if isinstance(ex, dict) and (ex.get("headers") or ex.get("line_items")):
                                 results.append(ex)

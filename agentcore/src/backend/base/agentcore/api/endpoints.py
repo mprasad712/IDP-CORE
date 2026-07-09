@@ -15,7 +15,19 @@ import uuid
 from uuid import UUID
 
 import sqlalchemy as sa
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from loguru import logger
@@ -869,6 +881,30 @@ async def simplified_run_agent(
         except Exception:  # noqa: BLE001
             logger.debug("Failed to resolve user from API key created_by")
 
+    # ── IDP agents run the document pipeline, not the chat graph. ────────────────────────────────
+    # Placed AFTER api-key enforcement and the HITL-resume early return, and BEFORE the telemetry /
+    # streaming machinery. `agent.data` is already the RESOLVED snapshot for (env, version), so this asks
+    # "is the version we are about to run an IDP agent?" — the right question. For a chat graph this is a
+    # single False test and nothing below changes.
+    from agentcore.services.idp.agent_config import agent_contains_idp_nodes
+
+    if agent_contains_idp_nodes(agent.data):
+        from agentcore.api.idp.run_api import run_idp_over_api
+
+        return await run_idp_over_api(
+            session=session,
+            response=response,
+            agent=agent,
+            env_value=env.value,     # a plain str, so run_api never imports this module
+            version=version,
+            input_request=input_request,
+            stream=stream,
+            api_key_user=_api_key_user,
+            # `_enforce_agent_api_key` fails open (auto-mints a key and allows the call). IDP writes
+            # documents and spends LLM tokens, so it requires a REAL key. Internal calls are exempt.
+            has_api_key=bool(agent_api_key) or _is_internal,
+        )
+
     start_time = time.perf_counter()
     from agentcore.observability.metrics_registry import (
         record_agent_run, adjust_active_sessions, record_session_duration,
@@ -1217,6 +1253,105 @@ async def simplified_run_agent(
 
     return result
 
+
+@router.post("/run/{agent_id_or_name}/document", response_model=None)
+async def simplified_run_idp_agent_with_file(
+    *,
+    request: Request,
+    session: DbSession,
+    response: Response,
+    agent_id_or_name: str,
+    agent: Annotated[AgentRead | None, Depends(get_agent_by_id_or_endpoint_name)],
+    file: Annotated[UploadFile, File(description="The document to process (pdf, png, jpg, tiff, xlsx, docx, txt)")],
+    # Deliberately `str`, not `UUID`: a form row left blank in Postman/curl sends "", which FastAPI would
+    # reject with a 422 before this handler runs. `run_api.parse_document_id` treats blank as "not given"
+    # and mints one, and rejects real garbage with a clear 400.
+    document_id: Annotated[str | None, Form(description="Optional caller-chosen document id (UUID). Omit to have one generated.")] = None,
+    agent_api_key: Annotated[AgentApiKey | None, Depends(validate_agent_api_key)] = None,
+    env: Annotated[RunEnvironment, Depends(_parse_env)] = RunEnvironment.DEV,
+    version: str = Query(description="Published version to run (e.g. 'v5')."),
+):
+    """Run a PUBLISHED IDP agent by POSTing the raw file as ``multipart/form-data``.
+
+    Identical to ``POST /api/run/{agent_id}`` with a base64 ``document``, minus the encoding step — which
+    makes it usable from curl and Postman without a pre-processing script. IDP agents only; a chat agent
+    gets a 400 pointing at ``/api/run``.
+
+        curl -X POST 'http://host/api/run/<id>/document?env=1&version=v5' \\
+             -H 'x-api-key: agk_...' -F 'file=@invoice.pdf'
+    """
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="agent not found")
+
+    # Resolve the snapshot for (env, version) exactly as /api/run does — this also 404s on a version that
+    # was never published, and yields the deployment the API key must be scoped to.
+    agent.data, prod_deployment, uat_deployment = await _resolve_agent_data_for_env(
+        agent_id=agent.id, env=env, version=version
+    )
+    from agentcore.services.idp.agent_config import agent_contains_idp_nodes
+
+    if not agent_contains_idp_nodes(agent.data):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This is not an IDP agent. Use POST /api/run/{agent_id} with an input_value.",
+        )
+
+    deployment_id = prod_deployment.id if prod_deployment else (uat_deployment.id if uat_deployment else None)
+    _internal_secret = os.environ.get("AGENTCORE_INTERNAL_SECRET", "")
+    _is_internal = bool(_internal_secret and request.headers.get("X-Internal-Secret") == _internal_secret)
+    if not _is_internal:
+        await _enforce_agent_api_key(agent_api_key, agent.id, env, deployment_id, version)
+
+    _api_key_user: User | None = None
+    if agent_api_key and not _is_internal:
+        try:
+            from agentcore.services.deps import session_scope
+            async with session_scope() as _sess:
+                _api_key_user = await _sess.get(User, agent_api_key.created_by)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to resolve user from API key created_by")
+
+    from agentcore.api.idp.run_api import run_idp_over_api_multipart
+
+    return await run_idp_over_api_multipart(
+        session=session,
+        response=response,
+        agent=agent,
+        env_value=env.value,
+        version=version,
+        upload=file,
+        document_id=document_id,
+        api_key_user=_api_key_user,
+        has_api_key=bool(agent_api_key) or _is_internal,
+    )
+
+
+@router.get("/run/{agent_id_or_name}/documents/{document_id}", response_model=None)
+async def get_idp_run_document(
+    *,
+    agent_id_or_name: str,
+    document_id: uuid.UUID,
+    agent: Annotated[AgentRead | None, Depends(get_agent_by_id_or_endpoint_name)],
+    agent_api_key: Annotated[AgentApiKey | None, Depends(validate_agent_api_key)] = None,
+):
+    """Fetch the result of a previous IDP run started via ``POST /api/run/{agent_id}``.
+
+    An IDP run waits for the pipeline with no server-side timeout. If the connection dies (a proxy 504,
+    say) the pipeline still finishes and persists — but every ``/api/v1/idp/*`` route requires a JWT, which
+    an API-key caller does not have. Without this endpoint the extraction would be unrecoverable. Pass
+    ``document.document_id`` on the run so you know the id before the response ever arrives.
+    """
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="agent not found")
+    if agent_api_key is None or agent_api_key.agent_id != agent.id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="A valid API key for this agent is required. Pass it via the x-api-key header.",
+        )
+
+    from agentcore.api.idp.run_api import get_idp_run_result
+
+    return await get_idp_run_result(agent=agent, document_id=document_id)
 
 
 # get endpoint to return version of agentcore

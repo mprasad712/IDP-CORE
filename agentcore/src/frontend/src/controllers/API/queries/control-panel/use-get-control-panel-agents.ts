@@ -29,6 +29,10 @@ export interface ControlPanelAgentItem {
   last_run?: string | null;
   failed_runs: number;
   input_type: "chat" | "autonomous" | "file_processing";
+  /** The published snapshot contains IDP nodes, so the agent is called with a document attachment
+   *  rather than an `input_value`. `input_type` cannot say — an IDP agent has no Chat Input, so it
+   *  publishes as "autonomous". */
+  is_idp?: boolean;
   moved_to_prod?: boolean;
   pending_prod_approval?: boolean;
 }

@@ -181,9 +181,16 @@ def resolve_field(src: Any, field: str, component: Any = None) -> Any:
 
 def overall_confidence(src: Any, component: Any = None) -> float | None:
     """Overall extraction confidence for a Confidence Router: a payload ``overall_conf`` if present,
-    else the mean of the per-field confidences in the payload's ``extracted`` block (same basis as
-    ``save_extraction_results``). ``None`` when no confidence signal is available. Pass ``component``
-    to also consult the shared working-set channel."""
+    else the mean of the MODEL's per-field confidences over the payload's ``extracted`` headers AND line items.
+
+    Delegates to ``extraction.compute_overall_confidence`` — the SAME function ``save_extraction_results``
+    uses — so the number that routes a document is the number stored on it and shown in the UI. These used
+    to be two different quantities: this returned the mean of the LLM's self-reported confidence while the DB
+    stored an OCR-substring score, so a document the UI showed as 83% was routed on 0.75.
+
+    Grounding is NOT part of this number and must not be: see :func:`ungrounded_fields` for the independent
+    "is the value actually on the page" signal. ``None`` when no confidence signal is available.
+    """
     payload = effective_payload(component, src) if component is not None else get_payload(src)
     if payload.get("overall_conf") is not None:
         try:
@@ -192,33 +199,53 @@ def overall_confidence(src: Any, component: Any = None) -> float | None:
             pass
 
     extracted = payload.get("extracted")
-    confs: list[float] = []
-    if isinstance(extracted, dict):
-        headers = extracted.get("headers")
-        if isinstance(headers, dict):
-            for h in headers.values():
-                # Count ONLY populated fields. A field that's absent from the document comes back with a
-                # null value at confidence 0.0; averaging those in drags the mean far below the real
-                # score of what WAS extracted (and below what save_extraction_results / the UI display),
-                # which mis-routes a good extraction to Low. (Codex-style confidence mismatch.)
-                if not isinstance(h, dict) or h.get("value") in (None, ""):
-                    continue
-                c = h.get("confidence")
-                if c is not None:
-                    try:
-                        confs.append(float(c))
-                    except (TypeError, ValueError):
-                        pass
-        for row in extracted.get("line_items", []) or []:
-            for col in (row.get("columns", []) if isinstance(row, dict) else []):
-                if not isinstance(col, dict) or col.get("value") in (None, ""):
-                    continue
-                c = col.get("confidence")
-                if c is not None:
-                    try:
-                        confs.append(float(c))
-                    except (TypeError, ValueError):
-                        pass
-    if confs:
-        return sum(confs) / len(confs)
-    return None
+    if not isinstance(extracted, dict) or not (extracted.get("headers") or extracted.get("line_items")):
+        return None
+
+    # Lazy import: extraction.py is heavy and payload.py is imported by every IDP component.
+    from agentcore.services.idp.extraction import compute_overall_confidence
+
+    return compute_overall_confidence(extracted)
+
+
+def ungrounded_fields(src: Any, component: Any = None) -> list[str]:
+    """Names of extracted values that are NOT present in the document's token stream.
+
+    Independent of :func:`overall_confidence` on purpose. A hallucinated value carries HIGH model confidence
+    — that is what hallucination is — so confidence alone can never catch it. This can, because the model
+    does not control the token stream.
+
+    Empty when there is no token stream to check against (the vision path): unknown is not a failure, and
+    treating it as one would send every vision document to review.
+    """
+    payload = effective_payload(component, src) if component is not None else get_payload(src)
+    extracted = payload.get("extracted")
+    tokens = payload.get("tokens") or []
+    if not tokens or not isinstance(extracted, dict):
+        return []
+
+    from agentcore.services.idp.grounding import Grounder
+
+    grounder = Grounder(tokens)
+    out: list[str] = []
+    for name, field in (extracted.get("headers") or {}).items():
+        if isinstance(field, dict) and field.get("value") is not None:
+            if grounder.check(field["value"])[1] is False:
+                out.append(str(name))
+    for row in extracted.get("line_items") or []:
+        if not isinstance(row, dict):
+            continue
+        cells = row.get("columns") if isinstance(row.get("columns"), list) else [
+            {"column_name": k, "value": v} for k, v in row.items() if k not in ("row_index", "columns")
+        ]
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            value = cell.get("value")
+            if isinstance(value, dict):
+                value = value.get("value")
+            if value is not None and grounder.check(value)[1] is False:
+                out.append(f"row{row.get('row_index', 0)}.{cell.get('column_name')}")
+    return out
+
+

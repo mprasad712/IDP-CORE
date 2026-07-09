@@ -51,7 +51,12 @@ class ProcessedDocRead(BaseModel):
     file_size_bytes: int
     page_count: int | None
     checksum: str | None
+    #: upload | api | mail_connector | sharepoint | onedrive | other — how the document arrived.
     source: str
+    #: WHICH agent version processed it. NULL/'dev' = the draft canvas (Playground / connectors);
+    #: 'uat'/'prod' + 'v5' = the published deployment snapshot the pipeline actually executed.
+    run_env: str | None = None
+    run_version: str | None = None
     predicted_type: str | None
     status: str
     overall_confidence: float | None
@@ -70,9 +75,14 @@ class ExtractedHeaderRead(BaseModel):
     id: UUID
     field_name: str
     extracted_value: str | None
+    #: The model's own confidence. None = the model reported none — not zero, and not a default constant.
     confidence_score: float | None
     reasoning_trace: str | None
     source_location: dict | None
+    #: True = value found in the document; False = NOT found (hallucination shape); None = never checked
+    #: (vision path, or a row extracted before grounding existed). Independent of confidence_score:
+    #: a hallucinated value carries HIGH confidence, so only this can catch it.
+    grounded: bool | None = None
     reviewed_value: str | None
     is_reviewed: bool
 
@@ -87,6 +97,7 @@ class ExtractedLineItemRead(BaseModel):
     confidence_score: float | None
     reasoning_trace: str | None
     source_location: dict | None
+    grounded: bool | None = None      # tri-state, see ExtractedHeaderRead.grounded
     reviewed_value: str | None
     is_reviewed: bool
 
@@ -284,6 +295,62 @@ async def list_processed_docs(
     return result
 
 
+async def build_processed_doc_detail(session, doc: IdpDocument) -> ProcessedDocDetailRead:
+    """Full detail payload for one document: latest job's headers, line items and detected elements.
+
+    NO AUTHORIZATION — the caller must already have authorized ``doc``. Shared by the JWT-scoped
+    ``GET /processed-docs/{id}`` and the API-key-scoped IDP run endpoints so the two can never drift.
+    """
+    doc_id = doc.id
+    # Load the most recent job first (M1: its error message AND its id scope the extracted rows
+    # so a reprocessed document shows only the latest job's headers/line-items, not every job's).
+    last_job = (
+        await session.exec(
+            select(IdpProcessingJob)
+            .where(IdpProcessingJob.document_id == doc_id)
+            .order_by(IdpProcessingJob.created_at.desc(), IdpProcessingJob.id.desc())
+            .limit(1)
+        )
+    ).first()
+    latest_job_id = last_job.id if last_job else None
+
+    # Load headers and line items for the latest job only
+    stmt_headers = select(IdpExtractedHeader).where(
+        IdpExtractedHeader.document_id == doc_id,
+        IdpExtractedHeader.job_id == latest_job_id,
+    )
+    headers = (await session.exec(stmt_headers)).all()
+
+    stmt_lines = select(IdpExtractedLineItem).where(
+        IdpExtractedLineItem.document_id == doc_id,
+        IdpExtractedLineItem.job_id == latest_job_id,
+    ).order_by(
+        IdpExtractedLineItem.row_index.asc(),
+        IdpExtractedLineItem.column_name.asc()
+    )
+    line_items = (await session.exec(stmt_lines)).all()
+
+    # Detected visual elements (document-scoped, produced by a Visual Element Detection node).
+    stmt_detected = (
+        select(IdpDetectedElement)
+        .where(IdpDetectedElement.document_id == doc_id)
+        .order_by(IdpDetectedElement.page_number.asc(), IdpDetectedElement.created_at.asc())
+    )
+    detected_elements = (await session.exec(stmt_detected)).all()
+
+    detail = ProcessedDocDetailRead.model_validate(doc)
+    # Validate the children EXPLICITLY. Pydantic v2 does not validate on assignment, so assigning raw ORM
+    # rows into these `list[XxxRead]` fields leaves SQLModel objects in place. That is invisible here
+    # (this route declares response_model=, which re-validates on the way out) but any caller that
+    # serializes the object directly — e.g. /api/run, which is response_model=None — would leak
+    # `job_id`, `document_id`, `extra` and timestamps into the response body.
+    detail.headers = [ExtractedHeaderRead.model_validate(h) for h in headers]
+    detail.line_items = [ExtractedLineItemRead.model_validate(li) for li in line_items]
+    detail.detected_elements = [DetectedElementRead.model_validate(d) for d in detected_elements]
+    detail.error_message = last_job.error_message if last_job else None
+    return detail
+
+
 @router.get("/{id}", response_model=ProcessedDocDetailRead)
 async def get_processed_doc(
     *,
@@ -299,48 +366,7 @@ async def get_processed_doc(
     if not await _can_access_document(session, current_user, doc):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    # Load the most recent job first (M1: its error message AND its id scope the extracted rows
-    # so a reprocessed document shows only the latest job's headers/line-items, not every job's).
-    last_job = (
-        await session.exec(
-            select(IdpProcessingJob)
-            .where(IdpProcessingJob.document_id == id)
-            .order_by(IdpProcessingJob.created_at.desc(), IdpProcessingJob.id.desc())
-            .limit(1)
-        )
-    ).first()
-    latest_job_id = last_job.id if last_job else None
-
-    # Load headers and line items for the latest job only
-    stmt_headers = select(IdpExtractedHeader).where(
-        IdpExtractedHeader.document_id == id,
-        IdpExtractedHeader.job_id == latest_job_id,
-    )
-    headers = (await session.exec(stmt_headers)).all()
-
-    stmt_lines = select(IdpExtractedLineItem).where(
-        IdpExtractedLineItem.document_id == id,
-        IdpExtractedLineItem.job_id == latest_job_id,
-    ).order_by(
-        IdpExtractedLineItem.row_index.asc(),
-        IdpExtractedLineItem.column_name.asc()
-    )
-    line_items = (await session.exec(stmt_lines)).all()
-
-    # Detected visual elements (document-scoped, produced by a Visual Element Detection node).
-    stmt_detected = (
-        select(IdpDetectedElement)
-        .where(IdpDetectedElement.document_id == id)
-        .order_by(IdpDetectedElement.page_number.asc(), IdpDetectedElement.created_at.asc())
-    )
-    detected_elements = (await session.exec(stmt_detected)).all()
-
-    detail = ProcessedDocDetailRead.model_validate(doc)
-    detail.headers = headers
-    detail.line_items = line_items
-    detail.detected_elements = detected_elements
-    detail.error_message = last_job.error_message if last_job else None
-    return detail
+    return await build_processed_doc_detail(session, doc)
 
 
 def _storage_parts(file_path: str) -> tuple[str, str]:

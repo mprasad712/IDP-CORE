@@ -5,7 +5,12 @@ from sqlmodel import select
 from agentcore.services.deps import session_scope
 from agentcore.services.database.models.agent.model import Agent
 from agentcore.services.database.models.model_registry.model import ModelRegistry
-from agentcore.services.database.models.idp.config import IdpAgent, IdpFieldConfiguration, IdpFieldConfigHeader
+from agentcore.services.database.models.idp.config import (
+    IdpAgent,
+    IdpFieldConfigHeader,
+    IdpFieldConfigLineItem,
+    IdpFieldConfiguration,
+)
 from agentcore.services.database.models.idp.documents import IdpDocument, IdpDocumentClassification
 from agentcore.services.database.models.user.model import User
 from agentcore.services.database.models.organization.model import Organization
@@ -209,6 +214,84 @@ async def test_classification_autoselect(monkeypatch):
             assert org_config is not None
             assert org_config.org_id == org_id
             assert org_config.is_template is False
+    finally:
+        await _cleanup(agent_id, doc_id, org_id)
+        async with session_scope() as session:
+            db_reg = await session.get(ModelRegistry, model_id)
+            if db_reg:
+                await session.delete(db_reg)
+                await session.commit()
+
+
+@pytest.mark.anyio
+async def test_autoselect_clone_preserves_per_field_prompts(monkeypatch):
+    """The auto-select clone must copy `prompt` on headers AND line items.
+
+    The catalogue templates put their extraction guidance in `prompt` and leave `description` NULL. The
+    clone copied `description` but not `prompt`, so the cloned config's extraction prompt degraded to a
+    bare list of field names — silently, with no error. Once the clone exists it is preferred over the
+    global template, so every later run used the degraded copy.
+    """
+    model_id = uuid4()
+    async with session_scope() as session:
+        session.add(ModelRegistry(id=model_id, provider="openai", model="gpt-4o", model_type="chat",
+                                  is_active=True, approval_status="approved",
+                                  display_name="gpt-4o", model_name="gpt-4o"))
+        # The exact row the clone path will pick: name='Invoice', global, template, active.
+        template = (await session.exec(
+            select(IdpFieldConfiguration).where(
+                IdpFieldConfiguration.name == "Invoice",
+                IdpFieldConfiguration.org_id.is_(None),
+                IdpFieldConfiguration.is_template == True,   # noqa: E712
+                IdpFieldConfiguration.is_active == True,     # noqa: E712
+                IdpFieldConfiguration.deleted_at.is_(None),
+            )
+        )).first()
+        if template is None:
+            template = IdpFieldConfiguration(id=uuid4(), name="Invoice", is_template=True, is_active=True)
+            session.add(template)
+            session.add(IdpFieldConfigHeader(config_id=template.id, field_name="invoice_number",
+                                             field_type="text", display_order=0, prompt="The invoice id"))
+            session.add(IdpFieldConfigLineItem(config_id=template.id, column_name="amount",
+                                               column_type="number", display_order=0, prompt="Line total"))
+            await session.commit()
+
+        src_headers = {h.field_name: h.prompt for h in (await session.exec(
+            select(IdpFieldConfigHeader).where(IdpFieldConfigHeader.config_id == template.id))).all()}
+        src_lines = {c.column_name: c.prompt for c in (await session.exec(
+            select(IdpFieldConfigLineItem).where(IdpFieldConfigLineItem.config_id == template.id))).all()}
+
+        agent_id, doc_id, org_id = await _setup_test_agent_and_doc(session, model_id)
+
+    # Guard: if the source template had no prompts at all, this test would pass vacuously.
+    assert any(p for p in src_headers.values()), "source template has no header prompts to lose"
+
+    monkeypatch.setattr("agentcore.services.model_service_client.MicroserviceChatModel",
+                        lambda **k: MockLLM(ClassificationResult(
+                            predicted_type="Invoice", confidence=0.95, candidates={"Invoice": 0.95})))
+    try:
+        async with session_scope() as session:
+            res = await classify_and_persist(session=session, document_id=doc_id,
+                                             merged_text="INV-100 Invoice Total 100",
+                                             org_id=org_id, auto_select=True, threshold=0.8)
+        clone_id = res["selected_config_id"]
+        assert clone_id is not None and clone_id != template.id, "expected a fresh clone in the org"
+
+        async with session_scope() as session:
+            clone = await session.get(IdpFieldConfiguration, clone_id)
+            assert clone.org_id == org_id and clone.is_template is False
+            # `doc_type` drives the AI Field Extractor's multi-type routing. A clone without it can
+            # never be selected -> the extractor skips the document and saves zero fields, silently.
+            assert clone.doc_type == template.doc_type, "the clone lost the template's doc_type"
+
+            got_headers = {h.field_name: h.prompt for h in (await session.exec(
+                select(IdpFieldConfigHeader).where(IdpFieldConfigHeader.config_id == clone_id))).all()}
+            got_lines = {c.column_name: c.prompt for c in (await session.exec(
+                select(IdpFieldConfigLineItem).where(IdpFieldConfigLineItem.config_id == clone_id))).all()}
+
+        # Field-for-field faithful to the template it was cloned from.
+        assert got_headers == src_headers, "the clone lost or altered per-field header prompts"
+        assert got_lines == src_lines, "the clone lost or altered per-column line-item prompts"
     finally:
         await _cleanup(agent_id, doc_id, org_id)
         async with session_scope() as session:

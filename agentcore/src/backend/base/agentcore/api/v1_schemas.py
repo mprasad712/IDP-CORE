@@ -390,6 +390,28 @@ class InputValueRequest(BaseModel):
     )
 
 
+class RunAttachment(BaseModel):
+    """A document sent inline with ``POST /api/run``. Required for IDP agents, ignored by chat agents.
+
+    Base64 rather than multipart because ``/api/run`` takes a JSON body, and FastAPI cannot mix a JSON
+    body with ``UploadFile`` on one endpoint.
+    """
+
+    filename: str = Field(description="Original file name; its extension decides the parser (e.g. 'invoice.pdf')")
+    content_base64: str = Field(description="The file's bytes, base64-encoded. A 'data:...;base64,' prefix is stripped.")
+    mime_type: str | None = Field(default=None, description="Optional MIME type; inferred from the extension when omitted")
+    # `str`, not `UUID`: a client that sends "" for "no id" would otherwise get a 422 from validation
+    # before the handler runs. `run_api.parse_document_id` treats blank as absent and 400s on garbage.
+    document_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional caller-chosen document id (UUID). Omit (or send an empty string) to have one "
+            "generated. Supplying it lets you poll GET /api/run/{agent_id}/documents/{document_id} if the "
+            "connection drops mid-run, and makes a retry idempotent instead of processing the file twice."
+        ),
+    )
+
+
 class SimplifiedAPIRequest(BaseModel):
     input_value: str | None = Field(default=None, description="The input value")
     input_type: InputType | None = Field(default="chat", description="The input type")
@@ -402,6 +424,9 @@ class SimplifiedAPIRequest(BaseModel):
     session_id: str | None = Field(default=None, description="The session id")
     env: str | None = Field(default=None, description="Environment: dev, uat, prod")
     files: list[str] | None = Field(default=None, description="List of file paths for uploaded files")
+    # IDP agents only: the document to process. Chat agents ignore it. This model does NOT set
+    # extra="forbid", so adding the field is backward compatible for every existing caller.
+    document: RunAttachment | None = Field(default=None, description="Document to process (IDP agents only)")
     # Internal-only HITL resume payload (used by /api/run resume mode).
     hitl_action: str | None = Field(default=None, description="HITL action name for resume mode")
     hitl_feedback: str | None = Field(default=None, description="Optional HITL feedback for resume mode")

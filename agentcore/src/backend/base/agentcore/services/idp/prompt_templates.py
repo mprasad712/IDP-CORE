@@ -70,20 +70,28 @@ def _field_description(name: str, field_type: str, prompt: str | None, descripti
 COMPACT_EXTRACTION_SYSTEM_TEMPLATE = (
     "You are an expert Intelligent Document Processing (IDP) agent and data extraction specialist.\n"
     "Extract the requested fields from the document text and return ONLY a JSON object of this shape:\n"
-    '{"headers": {"field_name": "value_or_null", ...}, "line_items": [{"column_name": "value", ...}, ...]}\n\n'
+    '{"headers": {"field_name": {"value": "value_or_null", "confidence": 0.95}, ...},\n'
+    ' "line_items": [{"column_name": {"value": "value", "confidence": 0.9}, ...}, ...]}\n\n'
     "Rules:\n"
     "- 'headers' are single document-level fields; 'line_items' is a list of table rows, each a flat "
-    "object of column_name -> value.\n"
+    "object of column_name -> {value, confidence}.\n"
     "- Extract EVERY row of the table — do not stop early or summarise.\n"
     "- Include ONLY the fields/columns listed below that you actually find; omit anything not present "
     "(do NOT invent values).\n"
+    "- 'confidence' MUST be a genuine float 0.0–1.0 reflecting how certain you are of THIS value. "
+    "Use the full range — NOT a constant:\n"
+    "    0.90–1.00 = stated verbatim and unambiguous in the document\n"
+    "    0.70–0.89 = clearly present but needed minor inference (e.g. date/number reformatting)\n"
+    "    0.40–0.69 = ambiguous, or derived/calculated from other values\n"
+    "    0.00–0.39 = absent, guessed, or very uncertain\n"
+    "- If a field is not present in the document: value null, confidence 0.0. Do NOT invent values.\n"
     "- Dates as YYYY-MM-DD; numbers as plain strings. Values must be strings or null.\n"
-    "- Do NOT include any confidence or reasoning keys. Return ONLY valid JSON — no markdown, no prose, "
-    "no code fences."
+    "- Do NOT include a 'reasoning' key — it overflows the output budget on long tables.\n"
+    "- Return ONLY valid JSON — no markdown, no prose, no code fences."
 )
 
 COMPACT_EXTRACTION_USER_TEMPLATE = """\
-Extract the value of each field listed below from the document text.
+Extract the value of each field listed below from the document text, and assign each one a genuine confidence score.
 
 ### Header Fields to Extract:
 {header_field_descriptions}
@@ -96,7 +104,7 @@ Extract the value of each field listed below from the document text.
 {data}
 -------
 
-Return ONLY a JSON object of exactly this shape (flat values, no confidence/reasoning):
+Return ONLY a JSON object of exactly this shape (value + confidence per field, no reasoning):
 
 {json_schema}\
 """
@@ -109,11 +117,15 @@ def build_compact_extraction_messages(
 ) -> tuple[str, str]:
     """Build (system_prompt, user_prompt) for COMPACT named-config extraction.
 
-    Mirrors :func:`build_extraction_messages` but asks the model for FLAT key/value JSON only
-    (no per-cell ``confidence``/``reasoning``). The verbose per-cell schema overflows the model's
-    output-token budget on multi-row tables and truncates ``line_items`` to empty; the compact
-    shape is ~half the tokens, and a uniform default confidence is re-attached downstream by
-    ``extraction._expand_extraction``. Per-field DB prompts/descriptions are still passed as hints.
+    Asks for ``{value, confidence}`` per field but NOT ``reasoning``. That distinction matters: it was
+    the per-cell ``reasoning`` string (100–200 chars × N fields × M rows) that overflowed the output-token
+    budget on multi-row tables and truncated ``line_items`` to empty — see :func:`build_extraction_messages`
+    for the verbose shape that caused it. A bare float costs ~12 tokens per field.
+
+    This used to suppress ``confidence`` entirely, and ``extraction._expand_value`` re-attached a hardcoded
+    0.75 to every populated field. Downstream then overwrote that constant with an OCR-substring score, so
+    the model's judgement never reached the database and "LLM confidence" was a fiction. Per-field DB
+    prompts/descriptions are still passed as hints.
     """
     if headers:
         header_field_descriptions = "\n".join(
@@ -131,10 +143,10 @@ def build_compact_extraction_messages(
     else:
         line_item_descriptions = "None"
 
-    # Flat schema scaffold — header_name -> placeholder, one sample row of column_name -> placeholder.
-    header_schema = {h.field_name: "<value or null>" for h in headers}
+    # Schema scaffold — header_name -> {value, confidence}, one sample row of column_name -> {value, confidence}.
+    header_schema = {h.field_name: {"value": "<value or null>", "confidence": 0.95} for h in headers}
     line_items_schema = (
-        [{c.column_name: "<value>" for c in line_items}] if line_items else []
+        [{c.column_name: {"value": "<value>", "confidence": 0.9} for c in line_items}] if line_items else []
     )
     json_schema = json.dumps({"headers": header_schema, "line_items": line_items_schema}, indent=2)
 
@@ -189,11 +201,13 @@ def build_compact_extraction_messages_vision(
 ) -> tuple[str, str]:
     """(system, user) for COMPACT NAMED-CONFIG extraction via VISION (page images, no OCR text).
 
-    Unlike :func:`build_compact_extraction_messages` (which SUPPRESSES confidence because the raw
-    OCR token stream re-scores each value downstream in ``_ocr_evidence``), the vision path has NO
-    OCR tokens to score against — so this variant explicitly asks the model for a genuine per-field
-    ``confidence`` and that score is what gets persisted. The document itself is supplied as image
-    blocks by the caller (``extract_vision``); this only builds the text instruction + schema.
+    Identical in shape to :func:`build_compact_extraction_messages` — both ask for ``{value, confidence}``
+    and the model's confidence is what gets persisted. This variant was once the only one that did, because
+    the text path's values were re-scored downstream against the OCR token stream; that re-scoring is gone.
+
+    What still differs is *grounding*: there are no tokens here to check a value against, so every field on
+    this path stores ``grounded=NULL`` (unknown) rather than True/False. The document itself is supplied as
+    image blocks by the caller (``extract_vision``); this only builds the text instruction + schema.
     """
     if headers:
         header_field_descriptions = "\n".join(

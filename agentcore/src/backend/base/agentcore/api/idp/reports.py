@@ -286,7 +286,10 @@ def _source_cells(dm) -> list:
     if not isinstance(sm, dict):
         sm = {}
     is_mail = src == "mail_connector"
-    label = "Email" if is_mail else ("Upload" if src in ("", "upload") else src)
+    # 'api' = the published agent was called over POST /api/run with a document attachment. Other
+    # sources keep rendering verbatim, as before.
+    _LABELS = {"": "Upload", "upload": "Upload", "api": "API"}
+    label = "Email" if is_mail else _LABELS.get(src, src)
     return [
         label,
         (sm.get("from") or "—") if is_mail else "—",

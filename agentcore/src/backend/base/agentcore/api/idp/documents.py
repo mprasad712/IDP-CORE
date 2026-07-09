@@ -21,6 +21,8 @@ from agentcore.services.database.models.user_organization_membership.model impor
 from agentcore.services.deps import get_storage_service, get_settings_service
 from agentcore.services.idp.pipeline import PipelineError, cancel_document, enqueue_document
 from agentcore.services.idp.scope import resolve_org_scope
+from agentcore.services.idp.snapshot import DEV, SnapshotError, normalize_env, resolve_agent_graph
+from agentcore.services.idp.storage_scope import storage_scope
 from agentcore.services.storage.service import StorageService
 
 router = APIRouter(prefix="/documents", tags=["IDP Documents"])
@@ -63,6 +65,8 @@ async def upload_documents(
     session: DbSession,
     current_user: CurrentActiveUser,
     agent_id: Annotated[UUID, Form(description="The UUID of the base Agent or the IDP Agent config")],
+    env: Annotated[str | None, Form(description="Which agent version to run: dev|uat|prod (or 0|1|2). Default dev (draft).")] = None,
+    version: Annotated[str | None, Form(description="Published version to run, e.g. 'v2'. Only with env=uat|prod. Default: the active version.")] = None,
     files: list[UploadFile] = File(..., description="The document files to upload"),
     storage_service: StorageService = Depends(get_storage_service),
     settings_service = Depends(get_settings_service),
@@ -71,7 +75,15 @@ async def upload_documents(
 
     Saves the files to storage and creates IdpDocument database records
     with status set to 'queued'.
+
+    ``env``/``version`` pin the run to a PUBLISHED deployment snapshot (like chat's /api/run). Omitted →
+    ``dev`` → the draft canvas, which is what the Playground sends, so its behavior is unchanged.
     """
+    # Resolve the run target up front: a bad env/version must 400 here, not fail the document later.
+    run_env = normalize_env(env)
+    # A version only means something for a published env; the draft has exactly one.
+    run_version = ((version or "").strip() or None) if run_env != DEV else None
+
     # 1. Resolve IDP Agent — auto-create if absent so the playground works without publishing
     stmt = (
         select(IdpAgent)
@@ -90,6 +102,17 @@ async def upload_documents(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Active IDP Agent with ID/agent_id '{agent_id}' not found."
+            )
+        if run_env != DEV:
+            # Auto-create is a *draft* convenience. Saving an agent that has IDP nodes creates this row
+            # (sync_idp_agent_from_graph), so a genuinely published IDP agent always has one — reaching
+            # here with env=uat/prod means the agent was never configured for IDP.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Agent '{agent_id}' has no IDP configuration, so it cannot run in "
+                    f"{run_env.upper()}. Open it in the builder, add the IDP nodes, save, and publish."
+                ),
             )
         idp_agent = IdpAgent(
             agent_id=agent_id,
@@ -111,6 +134,20 @@ async def upload_documents(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Active IDP Agent with ID/agent_id '{agent_id}' not found.",
         )
+
+    # Fail fast: reject the upload if the requested published version doesn't exist, rather than
+    # accepting the file and failing the document in the background. Runs after the org guard so it
+    # can't be used to probe for agents the caller cannot see. Resolves against the BASE agent id
+    # (`agent_id` above may be either the IdpAgent.id or the Agent.id).
+    if run_env != DEV:
+        try:
+            await resolve_agent_graph(session, idp_agent.agent_id, run_env, run_version)
+        except SnapshotError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    # Storage directory for these documents: "<agent.id>(<name>_<env>_<version>)".
+    _base_agent = await session.get(Agent, idp_agent.agent_id)
+    doc_scope = storage_scope(idp_agent.agent_id, getattr(_base_agent, "name", None), run_env, run_version)
 
     # 2. Get file upload settings
     try:
@@ -164,9 +201,11 @@ async def upload_documents(
             unique_id = uuid4()
             storage_filename = f"idp_{unique_id}{ext}"
 
-            # Save the file using the storage service scoped by the IDP Agent config UUID
+            # Directory = the BASE agent id (the one in the URL) + a readable "(name_env_version)" suffix,
+            # so a folder holds exactly the documents run against that agent version. `file_path` records
+            # it; every reader splits that rather than reconstructing. See services/idp/storage_scope.py.
             await storage_service.save_file(
-                agent_id=str(idp_agent.id),
+                agent_id=doc_scope,
                 file_name=storage_filename,
                 data=file_content
             )
@@ -176,7 +215,7 @@ async def upload_documents(
                 id=unique_id,
                 agent_id=idp_agent.id,
                 original_filename=file.filename,
-                file_path=f"{idp_agent.id}/{storage_filename}",
+                file_path=f"{doc_scope}/{storage_filename}",
                 file_type=ext.lstrip("."),
                 mime_type=file.content_type,
                 file_size_bytes=size,
@@ -184,6 +223,8 @@ async def upload_documents(
                 source="upload",
                 status="queued",
                 uploaded_by=current_user.id,
+                run_env=run_env,
+                run_version=run_version,
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
             )
