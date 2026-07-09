@@ -41,7 +41,7 @@ async def test_splitter_forks_multi_doc_and_pretypes(monkeypatch):
         return [(0, 1), (2, 3)], ["Invoice", "Medical Report"]
     monkeypatch.setattr("agentcore.components.IDP.document_splitter.detect_boundaries_hybrid", fake_boundaries)
 
-    async def fake_inputs(self, payload, doc): return ({0: "a", 1: "b", 2: "c", 3: "d"}, [])
+    async def fake_inputs(self, payload, doc): return ({0: "a", 1: "b", 2: "c", 3: "d"}, [], b"pdf")
     monkeypatch.setattr(IDPDocumentSplitter, "_page_inputs", fake_inputs, raising=True)
 
     children = []
@@ -75,7 +75,7 @@ async def test_splitter_passthrough_single_doc(monkeypatch):
     monkeypatch.setattr("agentcore.components.IDP.document_splitter.get_storage_service", lambda: object())
     async def fake_boundaries(*a, **k): return [(0, 1)], None       # ONE document
     monkeypatch.setattr("agentcore.components.IDP.document_splitter.detect_boundaries_hybrid", fake_boundaries)
-    async def fake_inputs(self, payload, doc): return ({0: "a", 1: "b"}, [])
+    async def fake_inputs(self, payload, doc): return ({0: "a", 1: "b"}, [], b"pdf")
     monkeypatch.setattr(IDPDocumentSplitter, "_page_inputs", fake_inputs, raising=True)
 
     comp = IDPDocumentSplitter(); comp.document = _msg(str(parent.id)); comp.llm = None
@@ -113,7 +113,7 @@ async def test_splitter_fails_parent_when_no_child_enqueues(monkeypatch):
         return [(0, 1), (2, 3)], ["Invoice", "Receipt"]
     monkeypatch.setattr("agentcore.components.IDP.document_splitter.detect_boundaries_hybrid", fake_boundaries)
 
-    async def fake_inputs(self, payload, doc): return ({0: "a", 1: "b", 2: "c", 3: "d"}, [])
+    async def fake_inputs(self, payload, doc): return ({0: "a", 1: "b", 2: "c", 3: "d"}, [], b"pdf")
     monkeypatch.setattr(IDPDocumentSplitter, "_page_inputs", fake_inputs, raising=True)
 
     children = []
@@ -181,7 +181,7 @@ async def test_splitter_reuses_existing_children_on_retry(monkeypatch):
         return [(0, 1), (2, 3)], ["Invoice", "Receipt"]
     monkeypatch.setattr("agentcore.components.IDP.document_splitter.detect_boundaries_hybrid", fake_boundaries)
 
-    async def fake_inputs(self, payload, doc): return ({0: "a", 1: "b", 2: "c", 3: "d"}, [])
+    async def fake_inputs(self, payload, doc): return ({0: "a", 1: "b", 2: "c", 3: "d"}, [], b"pdf")
     monkeypatch.setattr(IDPDocumentSplitter, "_page_inputs", fake_inputs, raising=True)
 
     async def _should_not_be_called(*a, **k):

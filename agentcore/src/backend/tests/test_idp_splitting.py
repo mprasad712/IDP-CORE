@@ -37,11 +37,15 @@ def test_detect_document_boundaries():
     page_status = {"page_count": 5}
     boundaries = detect_document_boundaries(tokens, page_status)
 
-    # Expected boundaries:
+    # Expected boundaries — a PARTITION of all pages (nothing is ever dropped):
     # 0 to 1 (pages 1-2)
-    # 2 to 2 (page 3 PO)
-    # 4 to 4 (page 5 Tax Invoice - page 4 is trimmed/skipped blank page)
-    assert boundaries == [(0, 1), (2, 2), (4, 4)]
+    # 2 to 3 (page 3 PO + page 4 blank separator, which attaches to the segment it follows —
+    #         a "blank" page may equally be an image-only scan, so it must never be discarded)
+    # 4 to 4 (page 5 Tax Invoice)
+    assert boundaries == [(0, 1), (2, 3), (4, 4)]
+    # coverage invariant: every page belongs to exactly one segment
+    covered = sorted(p for s, e in boundaries for p in range(s, e + 1))
+    assert covered == list(range(5))
 
 
 class MockStorage:
@@ -141,6 +145,74 @@ async def test_materialize_children():
 
     finally:
         # Cleanup
+        async with session_scope() as session:
+            children = (await session.exec(
+                select(IdpDocument).where(IdpDocument.parent_document_id == parent_doc_id)
+            )).all()
+            for c in children:
+                await session.delete(c)
+            db_parent = await session.get(IdpDocument, parent_doc_id)
+            if db_parent: await session.delete(db_parent)
+            db_ia = await session.get(IdpAgent, agent_id)
+            if db_ia: await session.delete(db_ia)
+            db_ba = await session.get(Agent, agent_id)
+            if db_ba: await session.delete(db_ba)
+            await session.commit()
+
+
+@pytest.mark.anyio
+async def test_processed_doc_detail_includes_split_children_summary():
+    """A split parent's detail payload carries the children + aggregate counts (Playground follows them)."""
+    from agentcore.api.idp.processed_docs import build_processed_doc_detail
+
+    agent_id = uuid4()
+    parent_doc_id = uuid4()
+    child_specs = [
+        ("bundle_split_1_1.pdf", "pending_review", 0.91),
+        ("bundle_split_2_3.pdf", "skipped", None),
+        ("bundle_split_4_4.pdf", "processing", None),
+    ]
+
+    try:
+        async with session_scope() as session:
+            session.add(Agent(id=agent_id, name="Split Detail Agent", data={}))
+            await session.flush()
+            session.add(IdpAgent(id=agent_id, agent_id=agent_id, extraction_mode="dynamic_prompting"))
+            await session.flush()
+            session.add(IdpDocument(
+                id=parent_doc_id, agent_id=agent_id, original_filename="bundle.pdf",
+                file_path="mock/bundle.pdf", file_type="pdf", file_size_bytes=10,
+                source="upload", status="split",
+            ))
+            for fname, st, conf in child_specs:
+                session.add(IdpDocument(
+                    id=uuid4(), agent_id=agent_id, parent_document_id=parent_doc_id,
+                    original_filename=fname, file_path=f"mock/{fname}", file_type="pdf",
+                    file_size_bytes=5, source="upload", status=st, overall_confidence=conf,
+                ))
+            await session.commit()
+
+        async with session_scope() as session:
+            parent = await session.get(IdpDocument, parent_doc_id)
+            detail = await build_processed_doc_detail(session, parent)
+
+        assert detail.children_summary is not None
+        assert detail.children_summary.total == 3
+        assert detail.children_summary.done == 2          # pending_review + skipped; 'processing' is not done
+        assert detail.children_summary.extracted == 1
+        assert detail.children_summary.skipped == 1
+        assert detail.children_summary.failed == 0
+        assert [c.original_filename for c in detail.children] == [s[0] for s in child_specs]
+        assert [c.page_range for c in detail.children] == ["1-1", "2-3", "4-4"]
+
+        # Non-split docs must NOT pay the children query / carry the fields.
+        async with session_scope() as session:
+            for c_id in [c.id for c in detail.children]:
+                child = await session.get(IdpDocument, c_id)
+                child_detail = await build_processed_doc_detail(session, child)
+                assert child_detail.children == []
+                assert child_detail.children_summary is None
+    finally:
         async with session_scope() as session:
             children = (await session.exec(
                 select(IdpDocument).where(IdpDocument.parent_document_id == parent_doc_id)

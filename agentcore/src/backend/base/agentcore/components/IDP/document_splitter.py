@@ -46,8 +46,14 @@ class IDPDocumentSplitter(Node):
     _decided: bool = False
     _decision: tuple[str, list | None] = ("single", None)
 
-    async def _page_inputs(self, payload: dict, doc: Any) -> tuple[dict[int, str], list[tuple[bytes, str]]]:
-        """Per-page text (native for digital, OCR tokens for scanned) + page images (visual signal)."""
+    async def _page_inputs(self, payload: dict, doc: Any) -> tuple[dict[int, str], list[tuple[int, bytes, str]], bytes]:
+        """Per-page text (native for digital, OCR tokens for scanned) + page images for the LLM.
+
+        Images are rendered ONLY for textless (image-only/scanned) pages — digital pages already
+        send their text, so their images would add cost and no signal — and only when a model is
+        connected with Use Vision on. Bundles with more textless pages than _MAX_VISION_PAGES send
+        no images at all: at that size local OCR + a text-only call is the cheaper strategy, and
+        detect_boundaries_hybrid switches to it automatically."""
         import fitz
         from agentcore.services.idp.graph_native.payload import load_bytes
 
@@ -63,20 +69,78 @@ class IDPDocumentSplitter(Node):
                 page_texts[p_idx] = reconstruct_page(toks)
 
         file_bytes = await load_bytes(payload)
-        page_images: list[tuple[bytes, str]] = []
-        try:
+        want_vision = bool(getattr(self, "use_vision", True)) and self.llm is not None
+
+        def _read_pdf() -> list[tuple[int, bytes, str]]:
+            # CPU-bound PDF parsing + rasterization — runs in a worker thread (asyncio.to_thread)
+            # so the event loop keeps serving HTTP requests while a bundle is analysed.
+            images: list[tuple[int, bytes, str]] = []
             pdf = fitz.open(stream=file_bytes, filetype="pdf")
-            for i in range(len(pdf)):
-                if i not in page_texts:
-                    page_texts[i] = pdf[i].get_text() or ""   # native text (digital)
-                if bool(getattr(self, "use_vision", True)) and len(page_images) < _MAX_VISION_PAGES:
-                    page_images.append((pdf[i].get_pixmap(dpi=120).tobytes("png"), "image/png"))
-                elif bool(getattr(self, "use_vision", True)) and len(page_images) == _MAX_VISION_PAGES and i == _MAX_VISION_PAGES:
-                    logger.debug(f"[split] page-image cap {_MAX_VISION_PAGES} reached; later pages use text only")
-            pdf.close()
+            try:
+                for i in range(len(pdf)):
+                    if i not in page_texts:
+                        page_texts[i] = pdf[i].get_text() or ""   # native text (digital)
+                textless = [i for i in range(len(pdf)) if len((page_texts.get(i) or "").strip()) < 10]
+                if want_vision and 0 < len(textless) <= _MAX_VISION_PAGES:
+                    for i in textless:
+                        # 96 dpi JPEG: boundary/type detection needs layout + headers, not fine print
+                        pix = pdf[i].get_pixmap(dpi=96)
+                        images.append((i, pix.tobytes("jpeg", jpg_quality=60), "image/jpeg"))
+                elif want_vision and len(textless) > _MAX_VISION_PAGES:
+                    logger.info(
+                        f"[split] {len(textless)} image-only pages exceed the {_MAX_VISION_PAGES}-image budget; "
+                        "using local OCR + text-only detection instead"
+                    )
+            finally:
+                pdf.close()
+            return images
+
+        import asyncio
+        page_images: list[tuple[int, bytes, str]] = []
+        try:
+            page_images = await asyncio.to_thread(_read_pdf)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[split] page render failed: {exc}")
-        return page_texts, page_images
+        return page_texts, page_images, file_bytes
+
+    @staticmethod
+    def _make_ocr_pages(file_bytes: bytes):
+        """Async callback OCR-ing specific (0-based) pages of the parent PDF; {page_idx: text}.
+        Used by detect_boundaries_hybrid when textless pages need text (no vision / vision failed)."""
+
+        async def _ocr_pages(pages: list[int]) -> dict[int, str]:
+            import asyncio
+
+            import fitz
+            from agentcore.services.idp.ocr import run_paddle_ocr
+            from agentcore.services.idp.restruct import reconstruct_page
+
+            def _render(p_idx: int) -> bytes | None:
+                # CPU-bound rasterization — worker thread, not the event loop
+                pdf = fitz.open(stream=file_bytes, filetype="pdf")
+                try:
+                    if not (0 <= p_idx < len(pdf)):
+                        return None
+                    # 200 dpi PNG: OCR needs more resolution than the LLM's visual skim
+                    return pdf[p_idx].get_pixmap(dpi=200).tobytes("png")
+                finally:
+                    pdf.close()
+
+            out: dict[int, str] = {}
+            for p_idx in pages:
+                try:
+                    png = await asyncio.to_thread(_render, p_idx)
+                    if png is None:
+                        continue
+                    tokens = await run_paddle_ocr(png, "png")
+                    text = reconstruct_page(tokens) if tokens else ""
+                    if text.strip():
+                        out[p_idx] = text
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[split] OCR failed for page {p_idx + 1}: {exc}")
+            return out
+
+        return _ocr_pages
 
     async def _decide(self) -> tuple[str, list | None]:
         """Decide 'single' vs 'split' ONCE (memoized). On split: materialize children, pre-type them
@@ -102,9 +166,12 @@ class IDPDocumentSplitter(Node):
                     self.status = "not splittable — passthrough"
                     self._decision = ("single", None); return self._decision
 
-                page_texts, page_images = await self._page_inputs(payload, doc)
+                page_texts, page_images, file_bytes = await self._page_inputs(payload, doc)
                 page_count = doc.page_count or (max(page_texts.keys(), default=-1) + 1)
-                boundaries, seg_types = await detect_boundaries_hybrid(page_texts, page_images, self.llm, page_count)
+                boundaries, seg_types = await detect_boundaries_hybrid(
+                    page_texts, page_images, self.llm, page_count,
+                    ocr_pages=self._make_ocr_pages(file_bytes),
+                )
 
                 if not boundaries or len(boundaries) < 2:
                     self.status = "single document — passthrough"

@@ -98,20 +98,13 @@ def detect_document_boundaries(
                 if i not in starts:
                     starts.append(i)
 
-    # Form ranges, skipping blank separators
+    # Form ranges as a PARTITION of all pages — blank/textless pages attach to the segment
+    # they fall inside instead of being trimmed off. A page with no text layer may be an
+    # image-only scan (ID card, scanned report); dropping it silently loses real documents.
     boundaries = []
     for idx, start in enumerate(starts):
         end = starts[idx + 1] - 1 if idx + 1 < len(starts) else max_pages - 1
-        
-        # Trim blank pages from end of document range
-        while end > start and len(page_texts.get(end, "").strip()) < 10:
-            end -= 1
-        # Trim blank pages from start of document range
-        while start < end and len(page_texts.get(start, "").strip()) < 10:
-            start += 1
-            
-        if len(page_texts.get(start, "").strip()) >= 10:
-            boundaries.append((start, end))
+        boundaries.append((start, end))
 
     return boundaries
 
@@ -161,16 +154,14 @@ def _boundaries_from_page_texts(
             has_header_hint = True        # WEAK hint only -> do NOT split; escalate to LLM
 
     starts = sorted(set(starts))
+    # Segments PARTITION [0, max_pages-1]: every page belongs to exactly one segment. Near-blank
+    # pages attach to the segment they fall inside instead of being trimmed off — "no text layer"
+    # also describes image-only scans (ID cards, scanned reports), and trimming them silently
+    # dropped real documents from the split. A truly blank page inside a child is harmless.
     boundaries: list[tuple[int, int]] = []
     for idx, start in enumerate(starts):
         end = starts[idx + 1] - 1 if idx + 1 < len(starts) else max_pages - 1
-        # trim near-blank separator pages (< 10 chars, to absorb OCR page-number noise) from both ends
-        while end > start and len((page_texts.get(end) or "").strip()) < 10:
-            end -= 1
-        while start < end and len((page_texts.get(start) or "").strip()) < 10:
-            start += 1
-        if len((page_texts.get(start) or "").strip()) >= 10 or start == end:
-            boundaries.append((start, end))
+        boundaries.append((start, end))
     return (boundaries or [(0, max_pages - 1)]), has_strong, has_header_hint
 
 
@@ -195,13 +186,28 @@ async def _boundaries_via_llm(
     sys_prompt = (
         "You segment a multi-document PDF. Given each page's text (and image when provided), decide which "
         "pages START a new document and the TYPE of each document (e.g. Invoice, Delivery Note, Aadhaar, "
-        "PAN, Medical Report, Terms). A bundle may contain several documents. Page 1 always starts the "
-        "first document. Respond ONLY with JSON: {\"segments\": [{\"start_page\": 1, \"type\": \"Invoice\"}, ...]} "
+        "PAN, Medical Report, Terms). A bundle may contain several documents; a single document may span "
+        "multiple consecutive pages — keep its pages together in one segment. Pages marked image-only are "
+        "scanned pages: judge them from their attached page image. Page 1 always starts the first document. "
+        "Respond ONLY with JSON: {\"segments\": [{\"start_page\": 1, \"type\": \"Invoice\"}, ...]} "
         "(1-based page numbers, ascending, always including page 1; use \"unknown\" if unsure of a type)."
     )
-    text_block = "\n".join(f"--- PAGE {i + 1} ---\n{(page_texts.get(i) or '')[:800]}" for i in range(n))
+
+    def _page_line(i: int) -> str:
+        text = (page_texts.get(i) or "").strip()
+        if len(text) < 10:
+            return f"--- PAGE {i + 1} (image-only; no machine-readable text) ---\n{text}"
+        return f"--- PAGE {i + 1} ---\n{text[:800]}"
+
+    text_block = "\n".join(_page_line(i) for i in range(n))
     content: list = [{"type": "text", "text": text_block}]
-    for img_bytes, mime in (page_images or []):
+    for item in (page_images or []):
+        # (page_idx, bytes, mime) preferred; legacy (bytes, mime) tolerated
+        if len(item) == 3:
+            p_idx, img_bytes, mime = item
+            content.append({"type": "text", "text": f"Image of PAGE {int(p_idx) + 1}:"})
+        else:
+            img_bytes, mime = item
         b64 = base64.b64encode(img_bytes).decode("utf-8")
         content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
     messages = [SystemMessage(content=sys_prompt), HumanMessage(content=content)]
@@ -241,35 +247,91 @@ async def _boundaries_via_llm(
         return None, None
 
 
+def _textless_pages(page_texts: dict[int, str], n: int) -> list[int]:
+    """0-based indices of pages whose text layer is (near-)empty — image-only scans or true blanks."""
+    return [i for i in range(n) if len((page_texts.get(i) or "").strip()) < 10]
+
+
 async def detect_boundaries_hybrid(
     page_texts: dict[int, str],
-    page_images: list[tuple[bytes, str]],
+    page_images: list[tuple],
     llm_model,
     page_count: int,
+    *,
+    ocr_pages=None,
 ) -> tuple[list[tuple[int, int]], list[str] | None]:
     """Hybrid detection that works in ALL scenarios and never false-splits without confirmation.
 
     Returns (boundaries, seg_types); seg_types (per-boundary type strings) is present only when
     the LLM path ran, else None. Rules yield a boundary ONLY on strong signals (blank page /
-    'Page 1'); header hints escalate to the LLM when a model is connected; no model -> strong
-    splits only; LLM fail -> conservative. Never raises.
+    'Page 1') AND only when every page has text — image-only pages make the rules blind, so they
+    always escalate. Escalation order: multimodal LLM (page images attached for textless pages)
+    -> OCR the textless pages + text-only LLM retry -> OCR + rules -> conservative single child.
+    ``ocr_pages`` is an optional async callable(list[int]) -> dict[int, str] supplied by the
+    caller (it owns the PDF bytes). Boundaries always cover every page. Never raises.
     """
     n = page_count if page_count and page_count > 0 else (max(page_texts.keys(), default=-1) + 1)
     single = [(0, n - 1)] if n >= 1 else []
     boundaries, has_strong, has_header_hint = _boundaries_from_page_texts(page_texts, page_count)
-    # has_header_hint isn't gated on: ANY non-confident multi-page doc escalates to the LLM (safer)
-    confident = has_strong and len(boundaries) >= 2
+    textless = _textless_pages(page_texts, n)
+    # has_header_hint isn't gated on: ANY non-confident multi-page doc escalates to the LLM (safer).
+    # Textless pages also break confidence: the rules can't see image-only pages, and trusting
+    # them here is exactly how scanned documents used to get mis-segmented.
+    confident = has_strong and len(boundaries) >= 2 and not textless
 
-    if llm_model is None:
-        return (boundaries if confident else single), None
-    if confident:
-        return boundaries, None
+    async def _ocr_fill() -> bool:
+        """OCR the textless pages in place (merge into page_texts). True if anything was added."""
+        nonlocal boundaries, has_strong, has_header_hint, textless
+        if not textless or ocr_pages is None:
+            return False
+        try:
+            recovered = await ocr_pages(list(textless))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[split] OCR of textless pages failed: {exc}")
+            return False
+        added = False
+        for p_idx, text in (recovered or {}).items():
+            if text and len(text.strip()) >= 10:
+                page_texts[int(p_idx)] = text
+                added = True
+        if added:
+            boundaries, has_strong, has_header_hint = _boundaries_from_page_texts(page_texts, page_count)
+            textless = _textless_pages(page_texts, n)
+        return added
+
     if n <= 1:
         return single, None
+
+    if llm_model is None:
+        # No model: OCR gives the rules real text for scanned pages; still strong-signals-only.
+        if textless and await _ocr_fill():
+            if has_strong and len(boundaries) >= 2 and not textless:
+                return boundaries, None
+        return (boundaries if confident else single), None
+
+    if confident:
+        return boundaries, None
+
+    # No images supplied for the textless pages (vision off, or too many scanned pages for the
+    # image budget) -> OCR them up front so the single text-only LLM call sees every page.
+    if textless and not page_images:
+        await _ocr_fill()
+
+    # 1) LLM attempt — page images (textless pages only, supplied by the caller) ride along.
     llm_boundaries, seg_types = await _boundaries_via_llm(page_texts, page_images, llm_model, page_count)
+
+    # 2) Vision failed (text-only model, payload rejected, ...) -> OCR textless pages, retry text-only.
+    if llm_boundaries is None and page_images:
+        await _ocr_fill()
+        llm_boundaries, seg_types = await _boundaries_via_llm(page_texts, [], llm_model, page_count)
+
     if llm_boundaries and len(llm_boundaries) >= 2:
         return llm_boundaries, seg_types
-    return (boundaries if confident else single), None
+
+    # 3) LLM unusable -> whatever the (possibly OCR-enriched) rules say, else one child (never drop).
+    if has_strong and len(boundaries) >= 2 and not textless:
+        return boundaries, None
+    return single, None
 
 
 async def materialize_children(
@@ -305,12 +367,17 @@ async def materialize_children(
     child_ids: list[UUID] = []
     saved_files: list[str] = []  # track stored child files to clean up if the commit fails
 
-    for start, end in boundaries:
-        # Extract pages
+    def _slice_pages(start: int, end: int) -> bytes:
+        # CPU-bound PDF assembly — worker thread, so the event loop keeps serving requests
         child_pdf = fitz.open()
-        child_pdf.insert_pdf(pdf_doc, from_page=start, to_page=end)
-        child_bytes = child_pdf.tobytes()
-        child_pdf.close()
+        try:
+            child_pdf.insert_pdf(pdf_doc, from_page=start, to_page=end)
+            return child_pdf.tobytes()
+        finally:
+            child_pdf.close()
+
+    for start, end in boundaries:
+        child_bytes = await asyncio.to_thread(_slice_pages, start, end)
 
         # Save to storage
         child_id = uuid4()
