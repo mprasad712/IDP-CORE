@@ -210,6 +210,13 @@ function enrichWithDetail(
     source: h.source_location,
   }));
   const cols = Array.from(new Set(detail.line_items.map((li) => li.column_name)));
+  // The backend returns cells alphabetically (row_index, column_name) — put the description
+  // column(s) first: it's what identifies a row, so it reads best as the leading column.
+  const _colRank = (c: string) => {
+    const lc = c.toLowerCase();
+    return lc === "description" ? 0 : lc.includes("description") ? 1 : 2;
+  };
+  cols.sort((a, b) => _colRank(a) - _colRank(b)); // stable: non-description order unchanged
   const rows: Record<number, LineItem> = {};
   const cellIds: Record<string, Record<string, string>> = {};
   const cellMeta: Record<string, Record<string, FieldEvidence>> = {};
