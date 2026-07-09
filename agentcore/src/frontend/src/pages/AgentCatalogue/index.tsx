@@ -751,7 +751,11 @@ export default function AgentCatalogueView({
                               size="sm"
                               disabled={!can("view_registry_agent")}
                               onClick={() =>
-                                navigate(`/agent-catalogue/${agent.id}/view`)
+                                // Locked (read-only) canvas view. The route is /agent/:id/view
+                                // (ViewPage) and expects the BASE agent id — the previous
+                                // /agent-catalogue/:id/view matched no route and fell through
+                                // to the home redirect.
+                                navigate(`/agent/${agent.agent_id ?? agent.id}/view`)
                               }
                             >
                               <Eye className="mr-1.5 h-3.5 w-3.5" />

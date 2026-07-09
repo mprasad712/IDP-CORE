@@ -3,14 +3,25 @@ import { useParams } from "react-router-dom";
 import { api } from "@/controllers/API/api";
 import { getURL } from "@/controllers/API/helpers/constants";
 import Loading from "@/components/ui/loading";
+import { useGetTypes } from "@/controllers/API/queries/agents/use-get-types";
 import { processAgents } from "@/utils/reactflowUtils";
 import useAgentsManagerStore from "../../stores/agentsManagerStore";
+import { useTypesStore } from "../../stores/typesStore";
 import Page from "../AgentBuilderPage/components/PageComponent";
 
 export default function ViewPage() {
   const setCurrentAgent = useAgentsManagerStore((state) => state.setCurrentAgent);
   const agents = useAgentsManagerStore((state) => state.agents);
   const { id } = useParams();
+
+  // The canvas (PageComponent) renders nothing until the component-type registry is loaded
+  // (showCanvas gates on types + templates). On builder routes AgentBuilderPage fetches it;
+  // this route renders the canvas directly, so it must fetch the registry itself — without
+  // this the locked view sits on the loading screen forever.
+  const types = useTypesStore((state) => state.types);
+  useGetTypes({
+    enabled: Object.keys(types).length <= 0,
+  });
 
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -99,7 +110,9 @@ export default function ViewPage() {
 
   return (
     <div className="agent-page-positioning">
-      <Page view setIsLoading={() => undefined} />
+      {/* enableViewportInteractions: locked view still allows zoom/pan (read-only navigation) —
+          it shows the ReadOnlyViewportControls and enables scroll-zoom, like ApprovalPreviewPage */}
+      <Page view enableViewportInteractions setIsLoading={() => undefined} />
     </div>
   );
 }
