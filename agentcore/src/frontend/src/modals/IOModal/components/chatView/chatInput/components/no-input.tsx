@@ -104,6 +104,28 @@ function buildIdpDisplay(result: any) {
   };
 }
 
+// Child statuses that mean "this child run is finished" / "finished with extraction output".
+const CHILD_TERMINAL = [
+  "pending_review",
+  "auto_approved",
+  "reviewed",
+  "skipped",
+  "failed",
+  "split",
+];
+const CHILD_EXTRACTED = ["pending_review", "auto_approved", "reviewed"];
+
+/** One display row per split child (progress + final summary views). */
+function splitChildRow(c: any) {
+  return {
+    file: c.original_filename,
+    ...(c.page_range ? { pages: c.page_range } : {}),
+    type: c.predicted_type ?? "unknown",
+    status: CHILD_TERMINAL.includes(c.status) ? c.status : "processing",
+    ...(c.overall_confidence != null ? { confidence: c.overall_confidence } : {}),
+  };
+}
+
 interface NoInputViewProps {
   isBuilding: boolean;
   sendMessage: (args: { repeat: number }) => Promise<void>;
@@ -164,6 +186,11 @@ const NoInputView: React.FC<NoInputViewProps> = ({
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollCountRef = useRef(0);
   const MAX_POLLS = 240; // 240 × 2500 ms = 10 minutes
+  // Split-run tracking: last seen children-done count (progress resets the poll budget) and the
+  // human summary line shown in the side panel while/after a split run.
+  const lastSplitDoneRef = useRef(-1);
+  const [splitProgress, setSplitProgress] = useState<string | null>(null);
+  const [splitSummary, setSplitSummary] = useState<string | null>(null);
 
   const pollForResult = async (documentId: string) => {
     pollCountRef.current += 1;
@@ -178,6 +205,73 @@ const NoInputView: React.FC<NoInputViewProps> = ({
         `${getURL("IDP_PROCESSED_DOCS")}/${documentId}`,
       );
       const doc = res.data;
+
+      // ── Split parent: the parent is terminal, but the run isn't — follow the children. ──
+      if (doc.status === "split") {
+        const children: any[] = doc.children ?? [];
+        const summary = doc.children_summary ?? {
+          total: children.length, done: 0, extracted: 0, skipped: 0, failed: 0,
+        };
+        const allDone = summary.total > 0 && summary.done >= summary.total;
+        if (!allDone) {
+          // Children still running. Progress resets the poll budget so MAX_POLLS only fires on a
+          // genuinely stuck run, not on a slow OCR-heavy bundle.
+          if (lastSplitDoneRef.current !== summary.done) {
+            lastSplitDoneRef.current = summary.done;
+            pollCountRef.current = 0;
+          }
+          setSplitProgress(`${summary.done}/${summary.total} done`);
+          setIdpResult({
+            status: `split — processing ${summary.total} documents (${summary.done} done)`,
+            documents: children.map(splitChildRow),
+          });
+          pollRef.current = setTimeout(() => pollForResult(documentId), 2500);
+          return;
+        }
+        // All children terminal → final summary with each extracted child's fields embedded.
+        attachedRef.current = null;
+        const extractedKids = children
+          .filter((c) => CHILD_EXTRACTED.includes(c.status))
+          .slice(0, 10); // sanity cap on detail fetches
+        const extractions: Record<string, any> = {};
+        await Promise.all(
+          extractedKids.map(async (c) => {
+            try {
+              const r = await api.get(`${getURL("IDP_PROCESSED_DOCS")}/${c.id}`);
+              extractions[c.original_filename ?? c.id] = buildIdpDisplay(r.data);
+            } catch {
+              /* the summary row still shows the child */
+            }
+          }),
+        );
+        const summaryText =
+          `Split into ${summary.total} documents — ${summary.extracted} extracted · ` +
+          `${summary.skipped} skipped · ${summary.failed} failed`;
+        const display: any = {
+          status: "split — completed",
+          summary: summaryText,
+          documents: children.map(splitChildRow),
+        };
+        const keys = Object.keys(extractions);
+        if (keys.length === 1) {
+          // exactly one extracted child → surface its fields at top level, like a single document
+          Object.assign(display, extractions[keys[0]], {
+            status: "split — completed",
+            summary: summaryText,
+            documents: children.map(splitChildRow),
+          });
+        } else if (keys.length > 1) {
+          display.extracted_documents = extractions;
+        }
+        setResult(doc);
+        setState("done");
+        setSplitProgress(null);
+        setSplitSummary(summaryText);
+        setIdpResult(display);
+        upsertSession({ id: documentId, status: "done", result: display });
+        return;
+      }
+
       const terminal = [
         "extracted",
         "pending_review",
@@ -185,7 +279,6 @@ const NoInputView: React.FC<NoInputViewProps> = ({
         "reviewed",
         "failed",
         "skipped",
-        "split",
       ];
       if (terminal.includes(doc.status)) {
         attachedRef.current = null;
@@ -228,6 +321,9 @@ const NoInputView: React.FC<NoInputViewProps> = ({
       setState("uploading");
       setErrorMsg("");
       pollCountRef.current = 0;
+      lastSplitDoneRef.current = -1;
+      setSplitProgress(null);
+      setSplitSummary(null);
       const processResult = await uploadAndProcess(currentAgentId, file);
       const did = String(processResult.document_id);
       const jid = processResult.job_id ? String(processResult.job_id) : null;
@@ -271,6 +367,7 @@ const NoInputView: React.FC<NoInputViewProps> = ({
     }
     setState("idle");
     setFile(null);
+    setSplitProgress(null);
   };
 
   const reset = () => {
@@ -281,6 +378,9 @@ const NoInputView: React.FC<NoInputViewProps> = ({
     setResult(null);
     setDocId(null);
     setErrorMsg("");
+    lastSplitDoneRef.current = -1;
+    setSplitProgress(null);
+    setSplitSummary(null);
     clearIdpResult();
     selectSession(null); // back to the fresh upload + history view
   };
@@ -289,6 +389,9 @@ const NoInputView: React.FC<NoInputViewProps> = ({
   // (the detached backend run kept going while the modal was closed). Idempotent per document.
   const showSession = (s: IdpSession) => {
     setDocId(s.id);
+    setSplitProgress(null);
+    // A restored split session carries its summary line inside the stored result display.
+    setSplitSummary((s.result as any)?.summary ?? null);
     if (s.status === "done") {
       stopPolling();
       attachedRef.current = null;
@@ -470,7 +573,9 @@ const NoInputView: React.FC<NoInputViewProps> = ({
             <p className="text-sm font-medium text-foreground">
               {state === "uploading"
                 ? "Uploading document…"
-                : "Processing document…"}
+                : splitProgress
+                  ? `Processing split documents — ${splitProgress}`
+                  : "Processing document…"}
             </p>
           </div>
           {file && (
@@ -498,13 +603,13 @@ const NoInputView: React.FC<NoInputViewProps> = ({
       {/* Done — the extracted result is rendered in the MAIN chat area (idpResultStore). */}
       {state === "done" && (
         <div className="flex flex-col items-center gap-3 rounded-lg border border-border bg-muted/30 px-4 py-5">
-          <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <div className="flex items-center gap-2 text-center text-sm font-medium text-foreground">
             <IconComponent
               name="CircleCheck"
-              className="h-5 w-5 text-emerald-500"
+              className="h-5 w-5 shrink-0 text-emerald-500"
               strokeWidth={ICON_STROKE_WIDTH}
             />
-            Document processed
+            {splitSummary ?? "Document processed"}
           </div>
           <p className="text-xs text-muted-foreground">
             Extracted data is shown above.

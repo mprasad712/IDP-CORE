@@ -115,6 +115,24 @@ class DetectedElementRead(BaseModel):
     class Config:
         from_attributes = True
 
+class SplitChildRead(BaseModel):
+    id: UUID
+    original_filename: str | None
+    predicted_type: str | None
+    status: str
+    overall_confidence: float | None
+    page_range: str | None = None   # "1-1", "2-3", ... parsed from the split child filename
+
+    class Config:
+        from_attributes = True
+
+class SplitChildrenSummary(BaseModel):
+    total: int
+    done: int        # children in a terminal status (nothing left running)
+    extracted: int   # pending_review / auto_approved / reviewed — extraction output exists
+    skipped: int
+    failed: int
+
 class ProcessedDocDetailRead(ProcessedDocRead):
     headers: list[ExtractedHeaderRead] = []
     line_items: list[ExtractedLineItemRead] = []
@@ -122,6 +140,10 @@ class ProcessedDocDetailRead(ProcessedDocRead):
     # Empty unless a Visual Element Detection node ran for this document.
     detected_elements: list[DetectedElementRead] = []
     error_message: str | None = None
+    # Populated only for a split PARENT (status == "split"): one entry per child document plus
+    # aggregate counts, so the Playground can follow the detached child runs to completion.
+    children: list[SplitChildRead] = []
+    children_summary: SplitChildrenSummary | None = None
 
 # Key used inside IdpDocument.extra (JSONB) to mark a saved-but-not-submitted review draft.
 REVIEW_DRAFT_KEY = "review_draft"
@@ -348,6 +370,37 @@ async def build_processed_doc_detail(session, doc: IdpDocument) -> ProcessedDocD
     detail.line_items = [ExtractedLineItemRead.model_validate(li) for li in line_items]
     detail.detected_elements = [DetectedElementRead.model_validate(d) for d in detected_elements]
     detail.error_message = last_job.error_message if last_job else None
+
+    # Split parent: attach the children + aggregate counts so callers (Playground) can follow the
+    # detached child runs. Only queried for status == "split" — the common single-doc poll stays
+    # a zero-extra-query path.
+    if doc.status == "split" and doc.parent_document_id is None:
+        child_rows = (
+            await session.exec(
+                select(IdpDocument)
+                .where(
+                    IdpDocument.parent_document_id == doc_id,
+                    IdpDocument.deleted_at.is_(None),
+                )
+                .order_by(IdpDocument.original_filename.asc())
+            )
+        ).all()
+        _terminal = ("pending_review", "auto_approved", "reviewed", "skipped", "failed", "split")
+        _extracted = ("pending_review", "auto_approved", "reviewed")
+        children: list[SplitChildRead] = []
+        for c in child_rows:
+            child = SplitChildRead.model_validate(c)
+            m = re.search(r"_split_(\d+)_(\d+)\.", c.original_filename or "")
+            child.page_range = f"{m.group(1)}-{m.group(2)}" if m else None
+            children.append(child)
+        detail.children = children
+        detail.children_summary = SplitChildrenSummary(
+            total=len(child_rows),
+            done=sum(1 for c in child_rows if c.status in _terminal),
+            extracted=sum(1 for c in child_rows if c.status in _extracted),
+            skipped=sum(1 for c in child_rows if c.status == "skipped"),
+            failed=sum(1 for c in child_rows if c.status == "failed"),
+        )
     return detail
 
 

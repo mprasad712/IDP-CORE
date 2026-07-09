@@ -12,6 +12,7 @@ import {
   RefreshCw,
   Inbox,
   ListTree,
+  Scissors,
 } from "lucide-react";
 import {
   Select,
@@ -80,6 +81,12 @@ function StatusChip({ status }: { status: string }) {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-destructive/10 border border-destructive/20 px-2 py-0.5 text-[11px] font-medium text-destructive whitespace-nowrap">
         <AlertCircle className="h-3 w-3" /> Failed
+      </span>
+    );
+  if (status === "split")
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 text-[11px] font-medium text-violet-600 dark:text-violet-400 whitespace-nowrap">
+        <Scissors className="h-3 w-3" /> Split
       </span>
     );
   return (
@@ -260,6 +267,9 @@ function UploadPanel({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollCountRef = useRef(0);
+  // Split-run tracking: children-done count (progress resets the poll budget) + spinner note.
+  const lastSplitDoneRef = useRef(-1);
+  const [splitNote, setSplitNote] = useState<string | null>(null);
 
   const { data: registryData, isLoading } = useGetRegistry(
     { deployment_env: env, page_size: 100 },
@@ -286,7 +296,54 @@ function UploadPanel({
     try {
       const res = await api.get(`${getURL("IDP_PROCESSED_DOCS")}/${documentId}`);
       const doc = res.data;
-      const terminal = ["extracted", "pending_review", "auto_approved", "reviewed", "failed", "skipped", "split"];
+
+      // Split parent: the parent status is terminal but the run isn't — follow the children
+      // (they arrive in the same response) and only report "processed" when all of them finish.
+      if (doc.status === "split") {
+        const children: any[] = doc.children ?? [];
+        const summary = doc.children_summary ?? {
+          total: children.length, done: 0, extracted: 0, skipped: 0, failed: 0,
+        };
+        const allDone = summary.total > 0 && summary.done >= summary.total;
+        if (!allDone) {
+          if (lastSplitDoneRef.current !== summary.done) {
+            lastSplitDoneRef.current = summary.done;
+            pollCountRef.current = 0; // progress = keep waiting; MAX_POLLS only kills stuck runs
+          }
+          setSplitNote(`${summary.done}/${summary.total} split documents done`);
+          pollRef.current = setTimeout(() => pollForResult(documentId, filename), 2500);
+          return;
+        }
+        setSplitNote(null);
+        const stamp = () =>
+          new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        // Parent row (Split chip) + one session row per child with its own type/confidence/status.
+        onDocProcessed({
+          id: documentId,
+          filename,
+          agentName: selectedAgent?.title ?? "Unknown Agent",
+          predictedType: `${summary.total} documents`,
+          confidence: null,
+          status: "split",
+          processedAt: stamp(),
+        });
+        for (const c of children) {
+          onDocProcessed({
+            id: c.id,
+            filename: c.original_filename ?? filename,
+            agentName: selectedAgent?.title ?? "Unknown Agent",
+            predictedType: c.predicted_type ?? null,
+            confidence: c.overall_confidence ?? null,
+            status: c.status,
+            processedAt: stamp(),
+          });
+        }
+        setFile(null);
+        setState("idle");
+        return;
+      }
+
+      const terminal = ["extracted", "pending_review", "auto_approved", "reviewed", "failed", "skipped"];
       if (terminal.includes(doc.status)) {
         onDocProcessed({
           id: documentId,
@@ -326,6 +383,8 @@ function UploadPanel({
       setState("uploading");
       setErrorMsg("");
       pollCountRef.current = 0;
+      lastSplitDoneRef.current = -1;
+      setSplitNote(null);
       // Run the PUBLISHED snapshot for the selected env/version, not the draft canvas. `version_label`
       // is the "v2" of the deployment this registry row lists; when absent the backend runs the active
       // published version. (The Playground deliberately sends neither, so it keeps running the draft.)
@@ -455,7 +514,11 @@ function UploadPanel({
                 </div>
                 <div>
                   <p className="text-sm font-semibold">
-                    {state === "uploading" ? "Uploading…" : "Processing document…"}
+                    {state === "uploading"
+                      ? "Uploading…"
+                      : splitNote
+                        ? `Processing — ${splitNote}`
+                        : "Processing document…"}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground max-w-[220px] truncate">{file?.name}</p>
                 </div>
