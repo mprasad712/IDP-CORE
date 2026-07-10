@@ -177,6 +177,26 @@ def _resolve_connector_by_name(name: str, provider: str | None = None) -> tuple[
         return None
 
 
+def _native_text_from_bytes(file_bytes: bytes, filename: str) -> tuple[str, list[dict]]:
+    """Extract the native text layer from a fetched attachment — the SAME thing the Document Upload
+    node does — so a DIGITAL document classifies/extracts with no OCR node on the canvas.
+
+    Returns ``(text, tokens)``; ``("", [])`` for a scanned / image-only file (no text layer). In that
+    case a downstream PaddleOCR node supplies the text (the temp ``file_path`` stays in the message
+    ``data``). Never returns the file path — feeding a path as "document text" is exactly what made the
+    text-based classifier label emailed invoices 'unknown'.
+    """
+    file_type = (os.path.splitext(filename or "")[1].lstrip(".") or "pdf").lower()
+    try:
+        from agentcore.services.idp.text_layer import extract_native_text
+        _, tokens = extract_native_text(file_bytes, file_type)
+        text = " ".join(str(t.get("text", "")) for t in tokens)
+        return text, tokens
+    except Exception as e:  # scanned / unsupported — an OCR node supplies text downstream
+        logger.debug(f"[ConnectorInput] no native text for '{filename}' ({e}); an OCR node will supply it")
+        return "", []
+
+
 def _addr_list(recipients) -> list[str]:
     """Flatten a Graph recipients array → list of email addresses."""
     out = []
@@ -671,11 +691,13 @@ class IDPConnectorInput(Node):
 
         self.status = f"Fetched '{filename}' from SharePoint ({library}/{folder or 'root'})"
         logger.info(f"[ConnectorInput] Downloaded SharePoint file {filename} → {tmp_path}")
+        _text, _tokens = _native_text_from_bytes(dl.content, filename)
         return Message(
-            text=tmp_path,
+            text=_text,
             data={
                 "file_path": tmp_path,
                 "filename": filename,
+                "tokens": _tokens,
                 "source": "sharepoint_connector",
                 "library": library,
                 "folder": folder,
@@ -799,11 +821,13 @@ class IDPConnectorInput(Node):
 
         self.status = f"Fetched '{filename}' from OneDrive ({folder or 'root'})"
         logger.info(f"[ConnectorInput] Downloaded OneDrive file {filename} → {tmp_path}")
+        _text, _tokens = _native_text_from_bytes(dl.content, filename)
         return Message(
-            text=tmp_path,
+            text=_text,
             data={
                 "file_path": tmp_path,
                 "filename": filename,
+                "tokens": _tokens,
                 "source": "onedrive_connector",
                 "folder": folder,
                 "item_id": item_id,
@@ -970,11 +994,13 @@ class IDPConnectorInput(Node):
 
                 self.status = f"Fetched attachment '{filename}' from '{subject}' ({from_addr})"
                 logger.info(f"[ConnectorInput] Downloaded Gmail attachment {filename} → {tmp_path}")
+                _text, _tokens = _native_text_from_bytes(content_bytes, filename)
                 return Message(
-                    text=tmp_path,
+                    text=_text,
                     data={
                         "file_path": tmp_path,
                         "filename": filename,
+                        "tokens": _tokens,
                         "source": "gmail_connector",
                         "subject": subject,
                         "from": from_addr,
@@ -986,13 +1012,96 @@ class IDPConnectorInput(Node):
         return Message(text="No downloadable file attachments found in matching Gmail messages.")
 
     # ------------------------------------------------------------------
-    # Main output method (manual / playground single pull)
+    # Main output method
     # ------------------------------------------------------------------
 
-    def get_document(self) -> Message:
-        """Fetch a document for preview (manual pull).
+    async def get_document(self) -> Message:
+        """Yield the document for this run.
 
-        Routes to SharePoint, OneDrive, Gmail, or Outlook based on the selected connector provider.
+        When the pipeline injected a ``document_id`` (an already-ingested doc — e.g. an email the
+        monitor fetched + saved to storage, or any re-run), load THAT document from storage — exactly
+        like the Document Upload node — so the emitted Message carries the IDP working-set
+        (``document_id`` / ``agent_scope`` / ``file_name`` — what every downstream node's ``load_bytes``
+        reads) plus the native text. Re-pulling from the connector here would instead emit only a temp
+        ``file_path`` in ``.data`` (never the ``additional_kwargs`` working-set), so downstream nodes
+        would see an empty ``idp`` payload and could not load the file — and it would fail outright when
+        the node's connector field is empty.
+
+        With no ``document_id`` (manual / playground preview) it fetches straight from the connector.
+        """
+        import asyncio
+
+        doc_id = str(getattr(self, "document_id", "") or "").strip()
+        if doc_id:
+            return await self._document_from_ingested(doc_id)
+        # Manual/preview pull: the connector fetch is sync (blocking httpx) — run it off the event loop.
+        return await asyncio.to_thread(self._fetch_from_connector)
+
+    async def _document_from_ingested(self, raw: str) -> Message:
+        """Load an already-ingested document from storage and emit it via ``new_message`` — mirrors the
+        Document Upload node so the connector/email pipeline path produces a downstream-loadable IDP
+        Message (native text for a digital doc; a scanned doc yields empty text and is read by a vision
+        model or a PaddleOCR node). This is what makes the published connector/email agent extract."""
+        import asyncio
+        from uuid import UUID as _UUID
+
+        from sqlmodel import select
+
+        from agentcore.services.database.models.idp.documents import IdpDocument, IdpProcessingJob
+        from agentcore.services.deps import get_storage_service, session_scope
+        from agentcore.services.idp import text_layer
+        from agentcore.services.idp.graph_native.payload import new_message
+        from agentcore.services.idp.storage_scope import scope_of
+
+        doc_id = _UUID(raw)
+        async with session_scope() as session:
+            doc = await session.get(IdpDocument, doc_id)
+            if doc is None:
+                raise ValueError(f"IDP document {raw} not found.")
+            job = (
+                await session.exec(
+                    select(IdpProcessingJob)
+                    .where(IdpProcessingJob.document_id == doc_id)
+                    .order_by(IdpProcessingJob.created_at.desc())
+                )
+            ).first()
+            # Read the directory the doc was ACTUALLY written to from file_path (never rebuild from
+            # agent_id — pre-rename docs live under the old folder). See storage_scope.scope_of.
+            file_path = doc.file_path or ""
+            agent_scope = scope_of(file_path)
+            file_name = file_path.split("/", 1)[1] if "/" in file_path else file_path
+            file_type = (doc.file_type or "").lower().lstrip(".")
+            job_id = str(job.id) if job else None
+            idp_agent_id = str(doc.agent_id)
+            orig_name = doc.original_filename or file_name
+
+        file_bytes = await get_storage_service().get_file(agent_scope, file_name)
+        # PDF parse / page classification is CPU-bound — keep it off the event loop (mirrors Upload).
+        overall_kind, page_status = await asyncio.to_thread(
+            text_layer.classify_document, file_bytes, file_type, min_text_length=50
+        )
+        text, tokens = await asyncio.to_thread(_native_text_from_bytes, file_bytes, orig_name)
+
+        self.status = f"{overall_kind} · {len(page_status)} page(s) (connector ingest)"
+        return new_message(
+            text=text,
+            document_id=raw,
+            job_id=job_id,
+            agent_id=idp_agent_id,
+            agent_scope=agent_scope,
+            file_name=file_name,
+            file_type=file_type,
+            original_filename=orig_name,
+            overall_kind=overall_kind,
+            page_status=page_status,
+            tokens=tokens,
+            source="mail_connector",
+        )
+
+    def _fetch_from_connector(self) -> Message:
+        """Fetch a document straight from the connector (manual / playground preview — no ingested
+        ``document_id``). Routes to SharePoint, OneDrive, Gmail, or Outlook by the selected provider.
+        Runs synchronously (blocking httpx); ``get_document`` calls it via ``asyncio.to_thread``.
         """
         import httpx
 
@@ -1088,11 +1197,13 @@ class IDPConnectorInput(Node):
 
             self.status = f"Fetched attachment '{filename}' from '{subject}' ({from_addr})"
             logger.info(f"[ConnectorInput] Downloaded {filename} → {tmp_path}")
+            _text, _tokens = _native_text_from_bytes(content_bytes, filename)
             return Message(
-                text=tmp_path,
+                text=_text,
                 data={
                     "file_path": tmp_path,
                     "filename": filename,
+                    "tokens": _tokens,
                     "source": "mail_connector",
                     "subject": subject,
                     "from": from_addr,

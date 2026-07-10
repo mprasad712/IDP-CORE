@@ -441,6 +441,23 @@ async def test_classify_via_llm_sentinel_on_all_failures():
 
 
 @pytest.mark.anyio
+async def test_classify_via_llm_error_flag_distinguishes_failure_from_unknown():
+    """A classifier FAILURE (model error / rate-limit / bad response) must set error=True — distinct
+    from a GENUINE 'unknown'. The extractor uses this to fall through instead of skipping a doc that
+    only failed transiently (the 'LLM token was over' data-loss bug)."""
+    from agentcore.services.idp.classification import classify_via_llm
+    # (a) model call fails (non-JSON) -> unknown WITH error=True
+    failed = await classify_via_llm(_FakeLLMPlainOnly("not json at all"), ["Invoice"], "text")
+    assert failed.predicted_type == "unknown" and failed.error is True
+    # (b) the model genuinely answers 'unknown' -> error stays False (a real no-match; may skip)
+    genuine = await classify_via_llm(
+        _FakeLLMPlainOnly('{"predicted_type": "unknown", "confidence": 0.0, "candidates": {}}'),
+        ["Invoice"], "random text",
+    )
+    assert genuine.predicted_type == "unknown" and genuine.error is False
+
+
+@pytest.mark.anyio
 async def test_node_invoke_llm_delegates_to_robust_helper(monkeypatch):
     from agentcore.components.IDP.document_classifier import IDPDocumentClassifier
     from agentcore.services.idp.classification import ClassificationResult

@@ -478,6 +478,22 @@ async def test_extractor_no_classifier_single_config_uses_it():
 
 
 @pytest.mark.anyio
+async def test_extractor_classifier_error_falls_through_not_skip():
+    """A FAILED classifier (error=True — rate-limit/timeout) must NOT be treated as an unmatched
+    'unknown' that skips the doc. It falls through to the config so the document is extracted and sent
+    to Pending Review instead of being silently dropped."""
+    from agentcore.components.IDP.llm_extractor import IDPLLMExtractor
+    from agentcore.schema.message import Message
+    comp = IDPLLMExtractor()
+    comp.config_names = ["Invoice"]
+    comp.document = Message(
+        text="x", additional_kwargs={"idp": {"classification": {"type": "unknown", "error": True}}}
+    )
+    # Contrast with test_extractor_classifier_unknown_single_config_returns_none (genuine unknown -> None/skip)
+    assert await comp._resolve_config_name_from_classification() == "Invoice"
+
+
+@pytest.mark.anyio
 async def test_extractor_single_config_classifier_match_uses_it(monkeypatch):
     # SINGLE config (no multi list) + a classifier that agrees -> use the config.
     from agentcore.components.IDP.llm_extractor import IDPLLMExtractor

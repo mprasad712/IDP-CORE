@@ -192,9 +192,51 @@ def test_get_document_dispatches_gmail_from_canvas(monkeypatch):
         return __import__("agentcore.schema.message", fromlist=["Message"]).Message(text="ok")
 
     n._get_gmail_document = _fake_gmail
-    out = n.get_document()
+    out = n._fetch_from_connector()
     assert called.get("gmail") is True
     assert out.text == "ok"
+
+
+@pytest.mark.anyio
+async def test_get_document_uses_ingested_doc_when_document_id_present():
+    """When the pipeline injects a document_id (published connector/email path), get_document loads the
+    ALREADY-INGESTED doc from storage — it does NOT re-pull from the connector."""
+    from agentcore.schema.message import Message
+
+    n = IDPConnectorInput()
+    n.document_id = "11111111-1111-1111-1111-111111111111"
+    seen = {}
+
+    async def _fake_ingested(raw):
+        seen["raw"] = raw
+        return Message(text="INGESTED")
+
+    def _fetch_boom():  # must NOT be called when a document_id is present
+        raise AssertionError("re-fetched from connector despite an ingested document_id")
+
+    n._document_from_ingested = _fake_ingested
+    n._fetch_from_connector = _fetch_boom
+    out = await n.get_document()
+    assert seen["raw"] == "11111111-1111-1111-1111-111111111111"
+    assert out.text == "INGESTED"
+
+
+@pytest.mark.anyio
+async def test_get_document_fetches_from_connector_when_no_document_id():
+    """No document_id (manual / playground preview) → fetch straight from the connector."""
+    from agentcore.schema.message import Message
+
+    n = IDPConnectorInput()  # no document_id
+    seen = {}
+
+    def _fake_fetch():
+        seen["fetched"] = True
+        return Message(text="FETCHED")
+
+    n._fetch_from_connector = _fake_fetch
+    out = await n.get_document()
+    assert seen.get("fetched") is True
+    assert out.text == "FETCHED"
 
 
 def test_resolve_selected_connector_unresolvable_name_no_id(monkeypatch):
@@ -297,6 +339,65 @@ def test_resolve_connector_by_name_none_when_no_rows():
     db = _mock_db_with_rows([])
     with patch("agentcore.services.deps.get_db_service", MagicMock(return_value=db)):
         assert ci._resolve_connector_by_name("Nope") is None
+
+
+# ── Connector self-extracts native text (like Document Upload) so a digital doc classifies/extracts
+#    with no OCR node; a scanned doc yields "" (not the file path) and flows to a PaddleOCR node. ──
+
+def test_native_text_from_bytes_digital(monkeypatch):
+    from agentcore.components.IDP import connector_input as ci
+
+    monkeypatch.setattr(
+        "agentcore.services.idp.text_layer.extract_native_text",
+        lambda file_bytes, file_type: (file_type, [{"text": "INVOICE"}, {"text": "INV-2026-001"}]),
+    )
+    text, tokens = ci._native_text_from_bytes(b"%PDF-1.4 fake", "invoice.pdf")
+    assert text == "INVOICE INV-2026-001"
+    assert len(tokens) == 2
+
+
+def test_native_text_from_bytes_scanned_is_empty_not_path(monkeypatch):
+    """A scanned / non-text file → '' (NEVER the path) so the classifier isn't fed a path string."""
+    from agentcore.components.IDP import connector_input as ci
+
+    def _raise(fb, ft):
+        raise ValueError("no text layer")
+
+    monkeypatch.setattr("agentcore.services.idp.text_layer.extract_native_text", _raise)
+    text, tokens = ci._native_text_from_bytes(b"\x89PNG scan", "scan.png")
+    assert text == ""
+    assert tokens == []
+
+
+def test_get_document_message_carries_native_text(monkeypatch):
+    """End-to-end: the manual pull sets Message.text to the attachment's NATIVE text (not the temp
+    file path), so the classifier/extractor get real content; file_path stays for OCR/render."""
+    import os
+    from unittest.mock import MagicMock, patch
+
+    node = _node(connector="", folder="inbox", max_emails=10, fetch_full_body=False)
+    node._get_config = MagicMock(return_value={})
+    node._get_account = MagicMock(return_value={"email": "x@y.com"})
+    node._get_token = MagicMock(return_value="tok")
+    monkeypatch.setattr(
+        "agentcore.services.idp.text_layer.extract_native_text",
+        lambda file_bytes, file_type: (file_type, [{"text": "Invoice"}, {"text": "Total 100"}]),
+    )
+
+    msg = {"id": "m1", "subject": "Inv", "from": {"emailAddress": {"address": "a@b.com"}},
+           "hasAttachments": True, "toRecipients": [], "ccRecipients": [], "receivedDateTime": "2026-06-25T00:00:00Z"}
+    messages_resp = _sync_resp(200, payload={"value": [msg]})
+
+    cim = "agentcore.components.IDP.connector_input"
+    with patch("httpx.get", MagicMock(return_value=messages_resp)), \
+         patch(f"{cim}._fetch_message_file_attachments_sync",
+               MagicMock(return_value=[{"name": "inv.pdf", "data": b"PDFBYTES"}])):
+        out = node._fetch_from_connector()
+
+    assert out.text == "Invoice Total 100"          # native content, NOT the temp path
+    assert out.data["file_path"].endswith(".pdf")   # path still present for OCR / vision render
+    assert out.data["tokens"] == [{"text": "Invoice"}, {"text": "Total 100"}]
+    os.remove(out.data["file_path"])
 
 
 @pytest.mark.anyio
@@ -909,7 +1010,7 @@ def test_get_document_returns_large_attachment():
     with patch("httpx.get", MagicMock(return_value=messages_resp)), \
          patch(f"{cim}._fetch_message_file_attachments_sync",
                MagicMock(return_value=[{"name": "big.pdf", "data": b"BIGDATA"}])):
-        out = node.get_document()
+        out = node._fetch_from_connector()
 
     assert out.data["filename"] == "big.pdf"
     assert out.data["source"] == "mail_connector" and out.data["from"] == "basudps@gmail.com"

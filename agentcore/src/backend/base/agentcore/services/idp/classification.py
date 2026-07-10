@@ -30,6 +30,14 @@ class ClassificationResult(BaseModel):
     confidence: float = Field(description="Confidence score between 0.0 and 1.0.")
     candidates: Dict[str, float] = Field(description="Dictionary of top candidate types and their confidence scores.")
     reasoning: str = Field(default="", description="A brief explanation of why this type was chosen.")
+    error: bool = Field(
+        default=False,
+        description=(
+            "True when the classifier could NOT run (model error / timeout / rate-limit), as opposed to a "
+            "genuine 'unknown'. Downstream must not treat an errored classification as an unmatched type to "
+            "skip — a transient failure must never silently drop the document."
+        ),
+    )
 
 
 class _StructuredClassification(BaseModel):
@@ -459,7 +467,12 @@ async def classify_via_llm(llm_model, doc_types: list[str], text: str, *, descri
             )
         except Exception as exc:
             logger.error(f"[classify_via_llm] parsing failed: {exc}")
-            result = ClassificationResult(predicted_type="unknown", confidence=0.0, candidates={})
+            # error=True: the model call itself failed (rate-limit / timeout / bad response). This is NOT
+            # a genuine 'unknown' — the extractor must fall through to extraction, not skip the document.
+            result = ClassificationResult(
+                predicted_type="unknown", confidence=0.0, candidates={}, error=True,
+                reasoning=f"Classification could not run: {type(exc).__name__}: {str(exc)[:200]}",
+            )
 
     try:
         result.confidence = max(0.0, min(1.0, float(result.confidence)))

@@ -184,6 +184,14 @@ function onedriveOnly<T>(field: T): T & { show_when: typeof ONEDRIVE_ONLY } {
   return { ...field, show_when: ONEDRIVE_ONLY };
 }
 
+// Gate a field to OUTLOOK only (not Gmail). Gmail scheduled ingest only applies
+// folder(label)/attachment/sender/subject/unread/max — it ignores body, To, CC, importance,
+// mark-as-read and fetch-full-body — so those show for Outlook alone (they'd be misleading on Gmail).
+const OUTLOOK_ONLY = { field: "connector_provider", value: "outlook" } as const;
+function outlookOnly<T>(field: T): T & { show_when: typeof OUTLOOK_ONLY } {
+  return { ...field, show_when: OUTLOOK_ONLY };
+}
+
 // ─── node definitions ─────────────────────────────────────────────────────────
 
 export const IDP_NODES: IDPData = {
@@ -339,27 +347,27 @@ export const IDP_NODES: IDPData = {
           "Linked mailbox to read from. Leave empty to use the first linked account.",
           false, true,
         )),
-        filter_body: emailOnly(strField(
+        filter_body: outlookOnly(strField(
           "filter_body", "Body contains", "",
           "Only process emails whose body contains this text.", false, true,
         )),
-        filter_to: emailOnly(strField(
+        filter_to: outlookOnly(strField(
           "filter_to", "Filter by Recipient (To)", "",
           "Only process emails sent TO this address.", false, true,
         )),
-        filter_cc: emailOnly(strField(
+        filter_cc: outlookOnly(strField(
           "filter_cc", "Filter by CC", "",
           "Only process emails with this address in CC.", false, true,
         )),
-        filter_importance: emailOnly(dropdownField(
+        filter_importance: outlookOnly(dropdownField(
           "filter_importance", "Importance", ["all", "low", "normal", "high"], "all",
           "Only process emails of this importance.", true,
         )),
-        mark_as_read: emailOnly(boolField(
+        mark_as_read: outlookOnly(boolField(
           "mark_as_read", "Mark as Read After Processing", false,
           "Mark emails as read once processed.", true,
         )),
-        fetch_full_body: emailOnly(boolField(
+        fetch_full_body: outlookOnly(boolField(
           "fetch_full_body", "Fetch Full Body", false,
           "Fetch the full email body (otherwise a short preview is used).", true,
         )),

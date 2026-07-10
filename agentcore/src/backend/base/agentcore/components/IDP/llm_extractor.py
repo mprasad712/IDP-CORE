@@ -142,7 +142,10 @@ class IDPLLMExtractor(Node):
         classification = payload.get("classification") or (
             (src.additional_kwargs or {}).get("classification", {}) if isinstance(src, Message) else {}
         )
-        classifier_ran = bool(classification.get("type"))  # the Classifier emits "unknown" (never "") for a non-match, so a truthy 'type' means a classifier ran
+        # A truthy 'type' means a classifier ran (it emits "unknown", never "", for a non-match). But an
+        # `error` classification (model failure/rate-limit) is NOT a real result — treat it as "no
+        # classifier" so an errored doc falls through to extraction instead of being skipped + lost.
+        classifier_ran = bool(classification.get("type")) and not classification.get("error")
         classified_type = (classification.get("type") or "").strip().lower()
         if not classified_type or classified_type == "unknown":
             # A Document Classifier RAN and could not identify the type -> treat as no-match so the
@@ -417,7 +420,7 @@ class IDPLLMExtractor(Node):
             classification = effective_payload(self, src).get("classification") or (
                 (getattr(src, "additional_kwargs", None) or {}).get("classification", {}) if isinstance(src, Message) else {}
             )
-            classifier_ran = bool(classification.get("type"))
+            classifier_ran = bool(classification.get("type")) and not classification.get("error")  # errored classifier (rate-limit/timeout) -> fall through, don't skip
             classified_type = (classification.get("type") or "unknown").strip()
 
             if classifier_ran:
@@ -538,7 +541,7 @@ class IDPLLMExtractor(Node):
             classification = effective_payload(self, rep).get("classification") or (
                 (getattr(rep, "additional_kwargs", None) or {}).get("classification", {}) if isinstance(rep, _Msg) else {}
             )
-            classifier_ran = bool(classification.get("type"))
+            classifier_ran = bool(classification.get("type")) and not classification.get("error")  # errored classifier (rate-limit/timeout) -> fall through, don't skip
             classified_type = (classification.get("type") or "unknown").strip()
             if classifier_ran:
                 matched = await self._resolve_config_name_from_classification(rep)

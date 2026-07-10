@@ -142,15 +142,30 @@ class IDPDocumentClassifier(Node):
         predicted_type = getattr(result, "predicted_type", None) or "unknown"
         confidence = max(0.0, min(1.0, float(getattr(result, "confidence", 0.0) or 0.0)))
         reasoning = getattr(result, "reasoning", None) or ""
+        errored = bool(getattr(result, "error", False))
 
         if confidence < float(self.confidence_threshold):
             predicted_type = "unknown"
 
+        if errored:
+            # The model call FAILED (error / timeout / rate-limit). Surface it clearly and flag it so the
+            # extractor does NOT treat it as a genuine unmatched type (which would skip + LOSE the doc).
+            # The document falls through to extraction with the configured Field Configuration → Pending
+            # Review, so a transient model failure never silently drops it.
+            reasoning = reasoning or (
+                "Classification could not run (model error / rate-limit / timeout); the document was "
+                "extracted with the configured Field Configuration and sent to Pending Review."
+            )
+
         # Persist predicted_type to IdpDocument if document carries a document_id
         await self._persist_predicted_type(src, predicted_type)
 
-        self.status = f"Classified as '{predicted_type}' (confidence {confidence:.0%})"
-        return self._tag_message(src, predicted_type, confidence, reasoning)
+        self.status = (
+            "Classification failed (model error) — extracted with the default config → Pending Review"
+            if errored
+            else f"Classified as '{predicted_type}' (confidence {confidence:.0%})"
+        )
+        return self._tag_message(src, predicted_type, confidence, reasoning, errored)
 
     # ── helpers ───────────────────────────────────────────────────────────
 
@@ -189,14 +204,15 @@ class IDPDocumentClassifier(Node):
         except Exception as exc:
             logger.debug(f"[DocumentClassifier] Could not persist predicted_type: {exc}")
 
-    def _tag_message(self, src: Any, predicted_type: str, confidence: float, reasoning: str) -> Message:
+    def _tag_message(self, src: Any, predicted_type: str, confidence: float, reasoning: str, errored: bool = False) -> Message:
         from agentcore.services.idp.graph_native.payload import carry
 
         # Put BOTH predicted_type and the full classification block into the IDP working-set payload so
         # the native engine preserves + shares them to the extractor (top-level additional_kwargs is
-        # stripped between nodes).
+        # stripped between nodes). `error` distinguishes a failed classifier from a genuine 'unknown' so
+        # the extractor falls through instead of skipping (see llm_extractor classifier gate).
         return carry(
             src,
             predicted_type=predicted_type,
-            classification={"type": predicted_type, "confidence": confidence, "reasoning": reasoning},
+            classification={"type": predicted_type, "confidence": confidence, "reasoning": reasoning, "error": errored},
         )
