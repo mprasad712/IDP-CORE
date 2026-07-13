@@ -78,12 +78,15 @@ def _sync_correct_skew(file_bytes: bytes, file_type: str, skew_threshold: float 
             doc = fitz.open(stream=file_bytes, filetype="pdf")
             doc_out = fitz.open()
             avg_angle = 0.0
+            corrected_any = False
             page_count = len(doc)
             for page_num in range(page_count):
                 pix = doc[page_num].get_pixmap(dpi=150)
                 nparr = np.frombuffer(pix.tobytes("png"), np.uint8)
                 img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 corrected_img, angle = deskew_image(img, skew_threshold)
+                if angle:
+                    corrected_any = True
                 avg_angle += angle
                 _, encoded_page = cv2.imencode(".png", corrected_img)
                 img_doc = fitz.open(stream=encoded_page.tobytes(), filetype="png")
@@ -91,6 +94,15 @@ def _sync_correct_skew(file_bytes: bytes, file_type: str, skew_threshold: float 
                 doc_out.insert_pdf(page_doc)
                 img_doc.close()
                 page_doc.close()
+            # Nothing was straightened -> return the ORIGINAL bytes untouched. Re-rendering a page at 150 DPI
+            # upscales a low-res embedded image (a 720x1600 ID photo -> ~1938px blur) and OCR then misreads it.
+            # No skew => no reason to touch the pixels.
+            # ponytail: when skew IS corrected it still rasterizes at fixed 150 DPI; render at the embedded
+            # image's native resolution if genuinely-skewed low-res scans degrade.
+            if not corrected_any:
+                doc.close()
+                doc_out.close()
+                return file_bytes, 0.0
             out_bytes = doc_out.tobytes()
             doc.close()
             doc_out.close()

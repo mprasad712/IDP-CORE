@@ -1,7 +1,10 @@
 """PaddleOCR wrapper for the IDP pipeline.
 
-PDF pages are rendered to images via pdf2image (poppler) and OCR'd with
-PaddleOCR — all pages are treated as scanned (no digital/scanned heuristic).
+PDF pages are OCR'd with PaddleOCR — all pages are treated as scanned (no digital/scanned heuristic).
+A page that is a single full-page image (a scanned page / a photo pasted into a PDF) is OCR'd from the
+embedded image's OWN pixels; other pages are rendered to a raster first. This matters: re-rendering an
+image-only page at a low DPI throws away resolution the embedded image already has, which is why an ID
+card read perfectly as a raw image but became garbage once merged into a PDF (see _dominant_page_image).
 
 Spreadsheet and Word files are extracted natively (no OCR needed).
 """
@@ -21,6 +24,21 @@ from loguru import logger
 # with no meaningful accuracy loss for standard font sizes.
 # Override with OCR_MAX_SIDE env var if a specific flow needs higher resolution.
 _OCR_MAX_SIDE = int(os.environ.get("OCR_MAX_SIDE", "1000"))
+
+# DPI used to rasterize a PDF PAGE when it must be rendered (text/mixed pages). Only used as a fallback:
+# a page that is a single dominant image is OCR'd from the embedded image's OWN pixels instead (below).
+_PDF_OCR_DPI = int(os.environ.get("OCR_PDF_DPI", "100"))
+
+# A single embedded image covering at least this fraction of the page area IS the page (a scanned page /
+# a photo pasted into a PDF). Such a page is OCR'd from the embedded image at its native resolution, not
+# from a low-DPI page raster — rendering an A4 page at 100 DPI and capping to 1000px hands OCR a fraction
+# of the pixels the original image had, which is exactly why a 720x1600 ID card read perfectly as a raw
+# .jpeg but became garbage once merged into a PDF (same image, re-rendered smaller). See _dominant_page_image.
+_FULL_PAGE_IMAGE_RATIO = float(os.environ.get("OCR_FULL_PAGE_IMAGE_RATIO", "0.6"))
+
+# Only prefer the native embedded image when it actually carries resolution. Below this a low-res image
+# stretched across a page benefits from the upscaled page render, so fall back to rendering.
+_MIN_NATIVE_OCR_SIDE = int(os.environ.get("OCR_MIN_NATIVE_SIDE", "800"))
 
 # Thread count: 4 is the sweet spot on most CPUs — beyond 4 the OCR pipeline
 # has single-threaded bottlenecks and additional cores don't help.
@@ -162,6 +180,53 @@ def _ocr_image(img: np.ndarray, ocr_model, page_number: int) -> list[dict]:
     return results
 
 
+def _dominant_page_image(doc, page):
+    """The page's single dominant embedded raster at its NATIVE resolution, or ``None``.
+
+    A scanned page (an ID card, a photo, a faxed sheet) is one full-page image sitting on the page. The
+    default path renders that page to a low-DPI pixmap and OCRs the pixmap — throwing away the embedded
+    image's real resolution. A 720x1600 Aadhaar photo pasted into an A4 page, rendered at 100 DPI and
+    capped to 1000px, reaches OCR at a fraction of its original detail; the SAME image OCR'd directly as a
+    ``.jpeg`` reads perfectly. So when exactly one image covers most of the page, OCR its own bytes.
+
+    Returns ``None`` — i.e. "render the page instead" — for:
+      * pages with 0 images (vector/text pages) or >1 image (logo + content, a collage),
+      * an image that does not dominate the page (a figure/logo, not the whole scan),
+      * a low-resolution image that would gain nothing over the upscaled page render,
+      * anything that fails to decode (exotic colorspace, JPEG2000) — never break OCR.
+    """
+    try:
+        imgs = page.get_images(full=True)
+        if len(imgs) != 1:
+            return None
+        xref = imgs[0][0]
+        rects = page.get_image_rects(xref)
+        if not rects:
+            return None
+        page_area = abs(page.rect.width * page.rect.height)
+        img_area = sum(abs(r.width * r.height) for r in rects)
+        if page_area <= 0 or (img_area / page_area) < _FULL_PAGE_IMAGE_RATIO:
+            return None
+        base = doc.extract_image(xref)
+        arr = np.frombuffer(base["image"], np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None or max(img.shape[:2]) < _MIN_NATIVE_OCR_SIDE:
+            return None
+        # The raw image is stored unrotated; honour any rotation the page applies to it so OCR sees it
+        # upright. (The Scan Corrector usually bakes this in already, so rotation is normally 0.)
+        rot = int(getattr(page, "rotation", 0) or 0) % 360
+        if rot == 90:
+            img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+        elif rot == 180:
+            img = cv2.rotate(img, cv2.ROTATE_180)
+        elif rot == 270:
+            img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return img
+    except Exception as e:  # noqa: BLE001 — detection must never break the OCR path
+        logger.debug(f"[OCR] dominant-image detection skipped: {e}")
+        return None
+
+
 def _pdf_to_images(file_bytes: bytes) -> list:
     """Convert PDF bytes to a list of PIL Images using pdf2image (poppler)."""
     try:
@@ -192,7 +257,8 @@ async def run_paddle_ocr(file_bytes: bytes, file_type: str, lang: str = "en") ->
 
     Each token: ``{text, bounding_box, confidence, page_number}``
 
-    - PDF: all pages rendered via pdf2image → PaddleOCR (no scanned/digital check)
+    - PDF: single-image pages OCR'd from the embedded image at native resolution; other pages rendered
+      to a raster → PaddleOCR (no scanned/digital check)
     - Images: PaddleOCR directly
     - XLSX/DOCX: native text extraction, no OCR
 
@@ -257,18 +323,28 @@ def _paddle_ocr_impl(file_bytes: bytes, file_type: str, lang: str = "en") -> lis
                 doc = fitz.open(stream=file_bytes, filetype="pdf")
                 for page_num in range(len(doc)):
                     page = doc[page_num]
-                    pix = page.get_pixmap(dpi=100)
-                    page_img_bytes = pix.tobytes("png")
 
-                    nparr = np.frombuffer(page_img_bytes, np.uint8)
-                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    # Scanned page = one full-page image: OCR its OWN pixels, not a low-DPI page raster
+                    # (see _dominant_page_image — this is what makes a merged ID card read as well as the
+                    # standalone image). Everything else renders the page as before.
+                    native = _dominant_page_image(doc, page)
+                    if native is not None:
+                        img = native
+                        src = "embedded image @native"
+                    else:
+                        pix = page.get_pixmap(dpi=_PDF_OCR_DPI)
+                        page_img_bytes = pix.tobytes("png")
+                        nparr = np.frombuffer(page_img_bytes, np.uint8)
+                        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        src = f"page render @{_PDF_OCR_DPI}dpi"
 
                     if img is None:
                         continue
 
+                    _pre = img.shape[:2]
                     img = _cap_image(img)
                     h, w = img.shape[:2]
-                    logger.info(f"[OCR] running page {page_num + 1} ({w}×{h}px)")
+                    logger.info(f"[OCR] running page {page_num + 1} via {src} ({_pre[1]}×{_pre[0]}→{w}×{h}px)")
                     try:
                         ocr_res = list(ocr_model.predict(img))
                     except Exception:
